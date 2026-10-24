@@ -151,3 +151,10 @@ path = "fuzz_targets/shop.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "particle"
+path = "fuzz_targets/particle.rs"
+test = false
+doc = false
+bench = false

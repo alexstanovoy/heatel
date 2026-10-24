@@ -16,16 +16,21 @@ First release.
 - `kv3`: binary KeyValues3 (legacy, LZ4 and zstd forms); `serde` feature for `Serialize`.
 - `keyvalues`: KeyValues (KV1) text and localization tables.
 - `texture`: `vtex_c` textures (block, ETC2/EAC and plain formats, PNG-stored), BC1, BC3, BC4,
-  BC5 and BC7 decoding, sprite sheet frames, mip generation, BC1/BC3/BC4/BC5 encoding
-  (`encode` feature), PNG and KTX2 output, KTX2 block decoding (`ktx2_to_plain`).
+  BC5 and BC7 decoding, sprite sheets (`Texture::sheet`: sequences and frames), mip generation,
+  BC1/BC3/BC4/BC5 encoding (`encode` feature), PNG and KTX2 output, KTX2 block decoding
+  (`ktx2_to_plain`).
 - `sound`: `vsnd_c` sounds as the WAV or MP3 file they hold.
 - `model`, `vbib`, `vertices`, `meshopt`: models, their meshes (CTRL buffers, `VBIB` blocks,
-  meshoptimizer and zstd compression), skeletons and skins.
+  meshoptimizer and zstd compression), skeletons, skins and attachments.
 - `material`: `vmat_c` materials and their glTF form.
 - `anim`: embedded animation clips, each lasting to its last frame, `(frames - 1) / fps`, a pose
   held to the end included.
-- `gltf`, `export`: models with materials, skeleton and clips as `.glb`, their images as PNG
-  or KTX2.
+- `gltf`, `export`: models with materials, skeleton, attachments (nodes under their bones) and
+  clips as `.glb`, their images as PNG or KTX2.
+- `particle`: `vpcf_c` particle systems as typed definitions (emitters, initializers,
+  operators, forces, renderers, children; inputs, curves and gradients), upgraded from the
+  format they are stored in, every value the file leaves out at the schema's default; `serde`
+  feature for them.
 - `world`: entity lumps, placements, map lighting, and worlds exported as glTF.
 - `tooltips`, `shops`, `portraits`: Dota's item and ability tooltips, shop categories and
   portrait framings.

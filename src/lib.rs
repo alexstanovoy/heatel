@@ -22,6 +22,9 @@ pub mod material;
 pub mod meshopt;
 pub mod model;
 mod ntro;
+/// Particle systems (`vpcf_c`): typed definitions of their emitters, initializers, operators,
+/// forces, renderers and children.
+pub mod particle;
 pub mod portraits;
 /// Compiled Source 2 resources: the block container every `*_c` file is.
 pub mod resource;

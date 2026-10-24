@@ -20,7 +20,26 @@ pub struct Model {
     pub meshes: Vec<Mesh>,
     /// The skins: each a name and the materials it swaps in.
     pub material_groups: Vec<(String, Vec<String>)>,
+    /// The attachments: named points the bones carry (`attach_attack1` where a missile leaves,
+    /// `attach_hitloc` where one hits), each name once.
+    pub attachments: Vec<Attachment>,
 }
+
+/// An attachment's rest place, relative to the bone that carries it, in glTF's frame.
+pub struct Attachment {
+    /// Its name.
+    pub name: String,
+    /// The bone that carries it (its strongest influence), in [`Model::bones`]; none for the
+    /// model's root.
+    pub bone: Option<usize>,
+    /// Translation from that bone.
+    pub translation: [f32; 3],
+    /// Rotation from that bone, `[x, y, z, w]`.
+    pub rotation: [f32; 4],
+}
+
+/// Most attachments a model has; Dota's have up to a few dozen.
+const MAX_ATTACHMENTS: usize = 256;
 
 /// A bone's rest pose relative to its parent, in glTF's frame.
 pub struct Bone {
@@ -78,6 +97,7 @@ impl Model {
             table: integers(data.get("m_remappingTable")),
         };
         let mut meshes = Vec::new();
+        let mut attachments = Vec::new();
         let mut budget = Budget::with_limit("model", MAX_MODEL_BYTES);
         for (i, embedded) in array(ctrl.get("embedded_meshes")).iter().enumerate() {
             let index = number(embedded, &["m_nMeshIndex", "mesh_index"]).unwrap_or(i as i64);
@@ -87,12 +107,9 @@ impl Model {
                 .is_none_or(|mask| mask >> lowest & 1 != 0);
             if in_lod {
                 let joints = remap.of(index, bones.len());
-                meshes.push(read_mesh(
-                    resource,
-                    embedded,
-                    joints.as_deref(),
-                    &mut budget,
-                )?);
+                let (mesh, data) = read_mesh(resource, embedded, joints.as_deref(), &mut budget)?;
+                add_attachments(&data, &bones, &mut attachments)?;
+                meshes.push(mesh);
             }
         }
         let material_groups = array(data.get("m_materialGroups"))
@@ -111,6 +128,7 @@ impl Model {
             bones,
             meshes,
             material_groups,
+            attachments,
         })
     }
 }
@@ -266,14 +284,61 @@ pub(crate) fn multiply(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     ]
 }
 
+/// The attachments of a mesh's data block (`m_attachments`) that `out` lacks, carried by the
+/// strongest influence of each.
+fn add_attachments(data: &Value, bones: &[Bone], out: &mut Vec<Attachment>) -> Result<()> {
+    for entry in array(data.get("m_attachments")) {
+        let value = entry.get("value").unwrap_or(entry);
+        let name = value
+            .get("m_name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if name.is_empty() || out.iter().any(|a| a.name == name) {
+            continue;
+        }
+        if out.len() == MAX_ATTACHMENTS {
+            return Err(malformed("model", "more attachments than any model has"));
+        }
+        let names = array(value.get("m_influenceNames"));
+        let weights = array(value.get("m_influenceWeights"));
+        let count = value
+            .get("m_nInfluences")
+            .and_then(Value::as_u64)
+            .unwrap_or(1) as usize;
+        let strongest = (0..count.min(names.len()).max(1))
+            .max_by(|&a, &b| {
+                let weight = |i: usize| weights.get(i).and_then(Value::as_f64).unwrap_or(1.0);
+                weight(a).total_cmp(&weight(b)).then(b.cmp(&a))
+            })
+            .unwrap_or(0);
+        let bone_name = names
+            .get(strongest)
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let bone = bones
+            .iter()
+            .position(|b| !bone_name.is_empty() && b.name == bone_name);
+        let offset = floats::<3>(array(value.get("m_vInfluenceOffsets")).get(strongest))?;
+        let turn = floats::<4>(array(value.get("m_vInfluenceRotations")).get(strongest))?;
+        let (translation, rotation) = to_gltf(offset, turn, bone.is_none());
+        out.push(Attachment {
+            name: name.to_owned(),
+            bone,
+            translation,
+            rotation,
+        });
+    }
+    Ok(())
+}
+
 /// One embedded mesh: its buffers (from `CTRL`, or an older binary `VBIB` block) and the draw
-/// calls of its `MDAT`/`DATA` block, what they take charged to `budget`.
+/// calls of its `MDAT`/`DATA` block, what they take charged to `budget`; and that block.
 fn read_mesh(
     resource: &Resource,
     embedded: &Value,
     joints: Option<&[u16]>,
     budget: &mut Budget,
-) -> Result<Mesh> {
+) -> Result<(Mesh, Value)> {
     let name = ["m_Name", "name"]
         .iter()
         .find_map(|k| embedded.get(k).and_then(Value::as_str))
@@ -316,11 +381,14 @@ fn read_mesh(
             primitives.push(draw_call(call, &index_lists, &vertex_buffers, budget)?);
         }
     }
-    Ok(Mesh {
-        name,
-        vertices,
-        primitives,
-    })
+    Ok((
+        Mesh {
+            name,
+            vertices,
+            primitives,
+        },
+        data,
+    ))
 }
 
 fn buffers(

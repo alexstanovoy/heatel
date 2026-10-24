@@ -11,6 +11,7 @@ use heatel::anim::{Clip, Keys, Track};
 use heatel::gltf::{GltfOptions, write_glb};
 use heatel::material::Material;
 use heatel::model::{Bone, Mesh, Primitive};
+use heatel::particle::{Operator, System};
 use heatel::tooltips::{Wanted, tooltips};
 use heatel::vertices::Vertices;
 use heatel::world::{Band, WorldOptions, export_world};
@@ -272,6 +273,7 @@ fn the_glb_writer_refuses_what_gltf_cannot_say() {
             bones,
             meshes: vec![mesh],
             material_groups: Vec::new(),
+            attachments: Vec::new(),
         };
         write_glb(&model, &options(clips, &materials, &uri)).map(|(glb, _)| glb)
     };
@@ -346,6 +348,56 @@ fn a_material_of_more_parameters_than_any_is_an_error() {
     assert!(Material::from_vmat("materials/m.vmat", &params(20_000)).is_err());
     let fine = Material::from_vmat("materials/m.vmat", &params(30)).unwrap();
     assert_eq!(fine.float("p29"), Some(0.5));
+}
+
+/// A particle system definition whose operator list is `operators`, read from its KV3.
+fn particle_system(operators: Vec<K>) -> heatel::Result<System> {
+    let root = K::Obj(vec![
+        ("_class", s("CParticleSystemDefinition")),
+        ("m_Operators", K::Arr(operators)),
+    ]);
+    System::from_document(&kv3::decode(&kv3_file(&root)).unwrap())
+}
+
+fn operator(class: &str, members: Vec<(&'static str, K)>) -> K {
+    K::Obj([("_class", s(class))].into_iter().chain(members).collect())
+}
+
+/// A particle system's lists are bounded (Dota's have up to ~30 functions), and every
+/// function's members are checked: a control point past the 64 a system has, a number that is
+/// not finite or a member of the wrong kind is an error, not a value the simulation trips on.
+#[test]
+fn a_particle_system_of_hostile_functions_is_an_error() {
+    let movement = || operator("C_OP_BasicMovement", vec![]);
+    assert!(particle_system((0..1000).map(|_| movement()).collect()).is_err());
+    let lock = |cp: i64| {
+        operator(
+            "C_OP_PositionLock",
+            vec![("m_nControlPointNumber", K::Int(cp))],
+        )
+    };
+    assert!(particle_system(vec![lock(64)]).is_err());
+    let fade = |time: f64| {
+        operator(
+            "C_OP_FadeOutSimple",
+            vec![("m_flFadeOutTime", K::Float(time))],
+        )
+    };
+    assert!(particle_system(vec![fade(f64::NAN)]).is_err());
+    assert!(particle_system(vec![fade(f64::INFINITY)]).is_err());
+    assert!(
+        particle_system(vec![operator(
+            "C_OP_FadeOutSimple",
+            vec![("m_flFadeOutTime", s("long"))]
+        )])
+        .is_err()
+    );
+    let fine = particle_system(vec![movement(), lock(63), fade(0.5)]).unwrap();
+    assert_eq!(fine.operators.len(), 3);
+    assert!(matches!(
+        fine.operators[2].class,
+        Operator::FadeOutSimple { time: 0.5, .. }
+    ));
 }
 
 /// A package (VPK v1) of `files`, their bytes after the directory tree, and where each starts.

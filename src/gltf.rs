@@ -1,5 +1,5 @@
 //! Writes a [`Model`] as binary glTF (`.glb`): one node per render mesh (`<model>.<mesh>`); with a skeleton, a root node named after the model
-//! holding the bones and one skin over all of them; textures as images next to the file.
+//! holding the bones, the attachments they carry and one skin over all of them; textures as images next to the file.
 //!
 //! The model's types are public, so the writer checks what it is given before writing: a model
 //! glTF cannot say (an index past its vertices, a bone parented after itself, a number that is
@@ -179,6 +179,16 @@ impl Builder {
         for (i, bone) in model.bones.iter().enumerate() {
             let parent = bone.parent.map_or(0, |p| p + 1);
             push_child(&mut self.nodes[parent], i + 1);
+        }
+        // Attachments come after the bones, so the skin's joints stay nodes 1 to the bone count.
+        for attachment in &model.attachments {
+            self.nodes.push(json!({
+                "name": attachment.name,
+                "translation": attachment.translation,
+                "rotation": attachment.rotation,
+            }));
+            let child = self.nodes.len() - 1;
+            push_child(&mut self.nodes[attachment.bone.map_or(0, |b| b + 1)], child);
         }
     }
 
@@ -413,6 +423,18 @@ fn check(model: &Model, options: &GltfOptions) -> Result<()> {
             return Err(bad(format!("bone {i} is not finite")));
         }
         size += bone.name.len() + 64 + JSON_ITEM;
+    }
+    for attachment in &model.attachments {
+        if attachment.bone.is_some_and(|b| b >= model.bones.len()) {
+            return Err(bad(format!(
+                "attachment {} on bone {:?}",
+                attachment.name, attachment.bone
+            )));
+        }
+        if !finite(&[attachment.translation]) || !finite(&[attachment.rotation]) {
+            return Err(bad(format!("attachment {} is not finite", attachment.name)));
+        }
+        size += attachment.name.len() + 64 + JSON_ITEM;
     }
     let kept = model.meshes.iter().filter(|m| {
         options

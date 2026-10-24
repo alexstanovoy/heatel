@@ -222,7 +222,8 @@ def formats(pak):
 
 
 def models(pak):
-    """Models whole (meshes, materials, textures), their animations, and materials."""
+    """Models whole (meshes, materials, textures), their animations, materials and particle
+    systems."""
     paths = sorted((p for p in pak.files if p.endswith(".vmdl_c")), key=pak.size)
     small = [p for p in paths if 8 << 10 <= pak.size(p) <= 256 << 10]
     animated = 0
@@ -247,6 +248,11 @@ def models(pak):
         data = pak.read(path)
         if data is not None:
             write("material", path.replace("/", "_"), data)
+    systems = sorted((p for p in pak.files if p.endswith(".vpcf_c")), key=pak.size)
+    for path in spread([p for p in systems if pak.size(p) <= 64 << 10], 24):
+        data = pak.read(path)
+        if data is not None:
+            write("particle", path.replace("/", "_"), data)
 
 
 def worlds(game, pak):

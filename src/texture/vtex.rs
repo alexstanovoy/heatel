@@ -4,7 +4,7 @@ use super::convert::Content;
 use super::format::{PixelFormat, Stored};
 use super::ktx2::{self, Encoding};
 use super::rgba;
-use super::sheet;
+use super::sheet::{self, Sheet};
 use crate::bytes::Cursor;
 use crate::error::{Result, malformed};
 use crate::resource::Resource;
@@ -33,8 +33,8 @@ pub struct Texture {
     format: PixelFormat,
     /// Largest level first; level `i` is `max(1, size >> i)` texels square.
     mips: Vec<Vec<u8>>,
-    /// The first frame of the file's sprite sheet, `[u0, v0, u1, v1]` in 0..1, if it has one.
-    rect: Option<[f32; 4]>,
+    /// The file's sprite sheet, if it has one.
+    sheet: Option<Sheet>,
 }
 
 impl Texture {
@@ -60,7 +60,7 @@ impl Texture {
             height,
             format: stored.decoded(),
             mips,
-            rect: header.rect,
+            sheet: header.sheet,
         };
         match stored {
             Stored::Bgra8 => {
@@ -125,14 +125,24 @@ impl Texture {
 
     /// Whether the file is a sprite sheet.
     pub fn is_sheet(&self) -> bool {
-        self.rect.is_some()
+        self.rect().is_some()
+    }
+
+    /// The file's sprite sheet: its sequences and their frames, if it has one.
+    pub fn sheet(&self) -> Option<&Sheet> {
+        self.sheet.as_ref()
+    }
+
+    /// The first frame of the sprite sheet, `[u0, v0, u1, v1]` in 0..1, if it has one.
+    fn rect(&self) -> Option<[f32; 4]> {
+        self.sheet.as_ref()?.first_rect()
     }
 
     /// Where the first frame sits in a sprite sheet: the texels `[x0, y0, x1, y1]` of the first
     /// sequence's first frame cropped to its content, widened to whole texels. Source2Viewer
     /// exports exactly these.
     pub fn first_frame_rect(&self) -> Option<[u32; 4]> {
-        let rect = self.rect?;
+        let rect = self.rect()?;
         let low = |u: f32, side: u32| (u.clamp(0.0, 1.0) * side as f32).floor() as u32;
         let high = |u: f32, side: u32| (u.clamp(0.0, 1.0) * side as f32).ceil() as u32;
         Some([
@@ -155,7 +165,7 @@ impl Texture {
         let (x0, y0) = (fx0 / bw * bw, fy0 / bh * bh);
         if x1 <= x0 || y1 <= y0 {
             return Self {
-                rect: None,
+                sheet: None,
                 ..self.clone()
             };
         }
@@ -176,7 +186,7 @@ impl Texture {
             height: y1 - y0,
             format: self.format,
             mips,
-            rect: None,
+            sheet: None,
         }
     }
 
@@ -218,7 +228,7 @@ impl Texture {
             height,
             format: PixelFormat::Rgba8,
             mips: vec![pixels],
-            rect: None,
+            sheet: None,
         })
     }
 
@@ -415,7 +425,7 @@ struct Header {
     height: u32,
     mips: usize,
     compressed: Option<Compressed>,
-    rect: Option<[f32; 4]>,
+    sheet: Option<Sheet>,
 }
 
 impl Header {
@@ -457,7 +467,7 @@ impl Header {
             height,
             mips,
             compressed: None,
-            rect: None,
+            sheet: None,
         };
         header.read_extras(data, extras_at + u64::from(extras_offset), extras)?;
         Ok(header)
@@ -479,7 +489,7 @@ impl Header {
                 .and_then(|from| data.get(from..from.checked_add(size)?))
                 .ok_or_else(|| malformed(WHAT, "extra data runs past the end"))?;
             match kind {
-                EXTRA_SHEET => self.rect = sheet::first_rect(payload)?,
+                EXTRA_SHEET => self.sheet = sheet::read(payload)?,
                 EXTRA_COMPRESSED_MIPS => self.compressed = Some(self.compressed_mips(payload)?),
                 _ => {}
             }

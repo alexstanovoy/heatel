@@ -243,6 +243,9 @@ fn the_first_frame_of_a_sprite_sheet_is_cut_from_every_level_it_lines_up_with() 
     let texture = Texture::parse(&file.bytes()).unwrap();
     assert!(texture.is_sheet());
     assert_eq!(texture.first_frame_rect(), Some([4, 4, 12, 12]));
+    let sequence = &texture.sheet().unwrap().sequences[0];
+    assert_eq!(sequence.frames[0].cropped, [0.25, 0.25, 0.75, 0.75]);
+    assert_eq!(sequence.frames[0].uncropped, [0.0, 0.0, 1.0, 1.0]);
 
     let frame = texture.first_frame();
     assert_eq!((frame.width(), frame.height()), (8, 8));

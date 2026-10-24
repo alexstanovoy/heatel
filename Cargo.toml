@@ -17,7 +17,7 @@ default = ["encode"]
 # `ExportedTexture::to_ktx2`.
 encode = ["dep:texpresso"]
 # `serde::Serialize` for KV3 documents and values, e.g. to write them as JSON.
-serde = ["dep:serde"]
+serde = ["dep:serde", "serde/derive"]
 
 [dependencies]
 crc32fast = "1.5"

@@ -11,6 +11,7 @@ Reads Valve's Source 2 formats out of a local Dota 2 install and converts them t
 | `vtex_c` textures | [`Texture`](texture::Texture): every level, block formats as stored | PNG, KTX2 |
 | `vsnd_c` sounds | [`Sound`](sound::Sound) | the WAV or MP3 inside |
 | `vmdl_c` models, `vmat_c` materials, embedded animations | [`Model`](model::Model), [`Material`](material::Material), [`Clip`](anim::Clip) | `.glb` with PNG or KTX2 images |
+| `vpcf_c` particle systems | [`System`](particle::System): emitters, initializers, operators, forces, renderers, children | JSON (feature `serde`) |
 | `vwrld_c` worlds, `vents_c` entity lumps | [`EntityLump`](world::EntityLump), [`placements`](world::placements), [`lighting`](world::lighting) | `.gltf` + `.bin` |
 | `items.txt`, `npc_abilities.txt`, `shops.txt`, `portraits.txt` | [`tooltips`](tooltips::tooltips), [`categories`](shops::categories), [`framings`](portraits::framings) | |
 
@@ -94,7 +95,8 @@ crate has no `unsafe` code (`#![forbid(unsafe_code)]`).
 - `encode` (default): BC1/BC3/BC4/BC5 compression of RGBA8 images
   ([`Texture::compressed`](texture::Texture::compressed),
   [`ExportedTexture::to_ktx2`](export::ExportedTexture::to_ktx2)).
-- `serde`: `Serialize` for KV3 documents and values.
+- `serde`: `Serialize` for KV3 documents and values; `Serialize` and `Deserialize` for particle
+  systems.
 
 ## Tests with an install
 
