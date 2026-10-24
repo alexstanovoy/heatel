@@ -101,6 +101,9 @@ pub struct Look {
     pub blend_frames: bool,
     /// How the card faces.
     pub orientation: Orientation,
+    /// The texture is a normal map that bends the view of what is behind (a heat haze), not a
+    /// colour.
+    pub refract: bool,
 }
 
 /// `C_OP_RenderSprites`' parameters.
@@ -347,6 +350,7 @@ impl Look {
                 Orientation::ScreenToNormal,
                 Orientation::Full,
             ][obj.choice("m_nOrientationType", &ORIENTATIONS, 0)?],
+            refract: obj.bool("m_bRefract", false)?,
         })
     }
 }
