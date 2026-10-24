@@ -90,14 +90,17 @@ impl Vpk {
         })
     }
 
+    /// The directory file's path in the [`Source`].
     pub fn dir_path(&self) -> &str {
         &self.dir_path
     }
 
+    /// How many files it lists.
     pub fn len(&self) -> usize {
         self.files.len()
     }
 
+    /// Whether it lists none.
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
     }
@@ -121,6 +124,7 @@ impl Vpk {
         Some(self.entry(i))
     }
 
+    /// Every file it lists, in directory order.
     pub fn entries(&self) -> impl ExactSizeIterator<Item = Entry<'_>> {
         self.files.iter().map(|&record| Entry { vpk: self, record })
     }
@@ -274,14 +278,17 @@ impl<'a> Entry<'a> {
         &self.vpk.tree[start..start + len]
     }
 
+    /// The file's directory (`models/heroes/pudge`; empty at the root).
     pub fn dir(&self) -> &'a str {
         self.string(self.record.dir)
     }
 
+    /// The file's name without extension.
     pub fn name(&self) -> &'a str {
         self.string(self.record.name)
     }
 
+    /// The file's extension (`vmdl_c`).
     pub fn ext(&self) -> &'a str {
         self.string(self.record.ext)
     }
@@ -312,6 +319,7 @@ impl<'a> Entry<'a> {
         u32::from_le_bytes([b[0], b[1], b[2], b[3]])
     }
 
+    /// The CRC32 of the whole file, checked on read.
     pub fn crc(&self) -> u32 {
         self.u32_at(0)
     }
@@ -321,10 +329,12 @@ impl<'a> Entry<'a> {
         self.field(RECORD_LEN, self.u16_at(4) as usize)
     }
 
+    /// Which archive holds the file's data (`0x7fff`: the directory file itself).
     pub fn archive_index(&self) -> u16 {
         self.u16_at(6)
     }
 
+    /// Where in that archive the data starts.
     pub fn archive_offset(&self) -> u32 {
         self.u32_at(8)
     }

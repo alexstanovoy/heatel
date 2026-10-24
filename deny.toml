@@ -1,0 +1,40 @@
+# cargo deny check: known vulnerabilities, licenses and where crates come from.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # A proc macro of texture2ddecoder: it runs at build time on the crate's own source and
+    # never sees an input; no maintained release of texture2ddecoder drops it yet.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained build-time proc macro (paste) of texture2ddecoder; no input reaches it" },
+    # The tests check KTX2 output with bevy_image 0.19.1, which pulls ruzstd 0.8.3; heatel
+    # itself uses 0.9.1, and the tests' files are not supercompressed.
+    { id = "RUSTSEC-2026-0344", reason = "dev-dependency only (bevy_image's ruzstd 0.8); heatel uses ruzstd 0.9.1" },
+]
+
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.93
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

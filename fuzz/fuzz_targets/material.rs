@@ -2,8 +2,9 @@
 //! with the images it names, plain and tinted. No input panics.
 #![no_main]
 
-use dbota_assets::fuzzing::material_json;
-use dbota_assets::{Material, Resource};
+use heatel::Resource;
+use heatel::fuzzing::material_json;
+use heatel::material::Material;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

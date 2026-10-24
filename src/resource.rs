@@ -21,19 +21,25 @@ pub struct Resource<'a> {
 /// A block of a [`Resource`]: its four-character type and where its bytes are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Block {
+    /// The block's type (`DATA`, `CTRL`, ...).
     pub kind: [u8; 4],
+    /// Where its bytes start in the file.
     pub offset: u32,
+    /// How many bytes it has.
     pub size: u32,
 }
 
 /// A file named in a resource's `RERL` block (its external references).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExternalRef {
+    /// The reference's 64-bit id.
     pub id: u64,
+    /// The referenced file's path.
     pub name: String,
 }
 
 impl<'a> Resource<'a> {
+    /// Reads the header and block table of a compiled file; a table that points outside the file is an error.
     pub fn parse(bytes: &'a [u8]) -> Result<Self> {
         let mut c = Cursor::new(bytes, "resource header");
         let file_size = c.u32()?;
@@ -93,10 +99,12 @@ impl<'a> Resource<'a> {
         self.file_size
     }
 
+    /// The blocks in file order.
     pub fn blocks(&self) -> &[Block] {
         &self.blocks
     }
 
+    /// The bytes of `block`.
     pub fn bytes(&self, block: &Block) -> &'a [u8] {
         let start = block.offset as usize;
         &self.bytes[start..start + block.size as usize]

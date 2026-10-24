@@ -6,8 +6,8 @@ use crate::error::{Error, Result};
 /// Random-access reads of the files of a Dota install, by path relative to its `game/dota`
 /// folder with `/` separators (`pak01_dir.vpk`, `pak01_042.vpk`, `maps/dota.vpk`).
 ///
-/// Reads are synchronous: the browser backs this with `File.slice` read through `FileReaderSync`,
-/// which a Web Worker (where the pipeline runs) may call.
+/// Reads are synchronous: in a browser, back it with `File.slice` read through `FileReaderSync`,
+/// which a Web Worker may call (see [`SliceSource`]).
 pub trait Source {
     /// The size in bytes of the file at `path`.
     fn size(&self, path: &str) -> Result<u64>;
@@ -29,6 +29,7 @@ impl<S: Source + ?Sized> Source for &S {
 
 /// One random-access file: a buffer in memory, or a browser `File` read by slices.
 pub trait Slice {
+    /// Its size in bytes.
     fn size(&self) -> u64;
 
     /// Exactly `len` bytes at `offset`; the caller has checked the range against `size`.
@@ -50,7 +51,8 @@ impl Slice for Vec<u8> {
     }
 }
 
-/// A [`Source`] made of named [`Slice`]s: in-memory files, or the browser's picked files.
+/// A [`Source`] made of named [`Slice`]s: in-memory files, or the files a user picked in a
+/// browser.
 pub struct SliceSource<F> {
     files: HashMap<String, F>,
 }
@@ -64,6 +66,7 @@ impl<F> Default for SliceSource<F> {
 }
 
 impl<F: Slice> SliceSource<F> {
+    /// Adds (or replaces) the file at `path` (relative, `/`-separated).
     pub fn insert(&mut self, path: impl Into<String>, file: F) {
         self.files.insert(path.into(), file);
     }
@@ -124,6 +127,7 @@ mod native {
     }
 
     impl DirSource {
+        /// The install whose `game/dota` folder is `root` (see [`find_game_dir`](crate::find_game_dir)).
         pub fn new(root: impl Into<PathBuf>) -> Self {
             Self { root: root.into() }
         }

@@ -10,7 +10,7 @@
 #                                          and memory blowups, all of which land in artifacts/
 #
 # The corpora and findings live outside the repository, in $FUZZ_DATA
-# (default ~/.cache/dbota-fuzz): seeds are the user's own Valve files. Each
+# (default ~/.cache/heatel-fuzz): seeds are the user's own Valve files. Each
 # target keeps its corpus in corpus/<target> there and writes what it finds
 # to artifacts/<target>. An input slower than FUZZ_TIMEOUT seconds (30) is a
 # hang. A process may map 4 GiB at most: without a sanitizer libFuzzer sees
@@ -18,7 +18,7 @@
 # so an oversized allocation fails (and aborts) instead.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-data=${FUZZ_DATA:-${XDG_CACHE_HOME:-$HOME/.cache}/dbota-fuzz}
+data=${FUZZ_DATA:-${XDG_CACHE_HOME:-$HOME/.cache}/heatel-fuzz}
 export RUSTFLAGS="-Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=4 \
 -Cllvm-args=-sanitizer-coverage-inline-8bit-counters -Cllvm-args=-sanitizer-coverage-pc-table \
 -Cllvm-args=-sanitizer-coverage-trace-compares --cfg fuzzing -Cdebug-assertions -Coverflow-checks"
@@ -33,8 +33,8 @@ build() {
 # The longest input worth mutating: a few real files of the format fit.
 max_len() {
     case "$1" in
-    model | world | import) echo 1048576 ;;
-    resource | vtex | cache_image | anim | entities | tooltips | portraits | shop) echo 262144 ;;
+    model | world) echo 1048576 ;;
+    resource | vtex | anim | entities | tooltips | portraits | shop) echo 262144 ;;
     kv3 | material | vbib) echo 131072 ;;
     *) echo 65536 ;;
     esac

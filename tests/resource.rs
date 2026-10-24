@@ -3,7 +3,7 @@
 //! allocation of the declared count, the stack), and KV3 claiming more than its bytes can hold.
 //! Each is an error now.
 
-use dbota_assets::{Resource, kv3};
+use heatel::{Resource, kv3};
 
 fn words(values: &[u32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()

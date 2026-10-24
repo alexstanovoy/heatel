@@ -1,7 +1,7 @@
 //! A `vsnd_c` sound and the audio file made of it: no input panics.
 #![no_main]
 
-use dbota_assets::Sound;
+use heatel::Sound;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

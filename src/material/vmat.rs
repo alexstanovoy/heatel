@@ -17,9 +17,13 @@ pub struct Material {
     pub path: String,
     /// The file name without extension, as the glTF material's name.
     pub name: String,
+    /// The shader (`hero.vfx`, `multiblend.vfx`, ...).
     pub shader: String,
+    /// Integer parameters (`F_ALPHA_TEST`, ...).
     pub ints: Vec<(String, i64)>,
+    /// Float parameters.
     pub floats: Vec<(String, f32)>,
+    /// Vector parameters.
     pub vectors: Vec<(String, [f32; 4])>,
     /// Texture parameters and their textures (`materials/.../x.vtex`, without `_c`).
     pub textures: Vec<(String, String)>,
@@ -28,10 +32,15 @@ pub struct Material {
     pub extras: Json,
 }
 
+/// How a material's alpha is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Alpha {
+    /// Alpha ignored.
     Opaque,
+    /// Alpha tested against a cutoff.
     Mask,
+    /// Alpha blended.
     Blend,
 }
 
@@ -105,14 +114,17 @@ impl Material {
             + 1024
     }
 
+    /// The integer parameter `key`, 0 when unset.
     pub fn int(&self, key: &str) -> i64 {
         find(&self.ints, key).copied().unwrap_or(0)
     }
 
+    /// The float parameter `key`, if set.
     pub fn float(&self, key: &str) -> Option<f32> {
         find(&self.floats, key).copied()
     }
 
+    /// The vector parameter `key`, if set.
     pub fn vector(&self, key: &str) -> Option<[f32; 4]> {
         find(&self.vectors, key).copied()
     }

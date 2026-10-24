@@ -1,7 +1,7 @@
 //! A package built here, read back through the in-memory `Source` the browser's files will
 //! back: the VPK layout contract without a Dota install.
 
-use dbota_assets::{Error, SliceSource, Vpk};
+use heatel::{Error, SliceSource, Vpk};
 
 #[derive(Clone, Copy)]
 struct File {

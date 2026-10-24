@@ -5,6 +5,7 @@ use crate::error::{Result, malformed};
 use crate::kv3::Value;
 use crate::resource::Resource;
 
+/// A compiled entity lump (`vents_c`).
 pub struct EntityLump {
     /// Each entity's key values (`classname`, `origin`, `angles`, `scales`, `model`, ...).
     pub entities: Vec<Value>,

@@ -1,9 +1,11 @@
-//! A `vtex_c` texture and every way the importer and the client take it: its first sprite
-//! frame, the KTX2 file, the RGBA8 pixels, the PNG files, and the images packed from its
-//! channels. No input panics.
+//! A `vtex_c` texture and every way it is written: its first sprite frame, the KTX2 file, the
+//! RGBA8 pixels, the PNG files, the images packed from its channels, and a model's image of
+//! each role and packing (small textures only: compressing is slow). No input panics.
 #![no_main]
 
-use dbota_assets::{Encoding, Pack, Texture};
+use heatel::export::ExportedTexture;
+use heatel::material::Pack;
+use heatel::texture::{Encoding, Role, Texture};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -25,4 +27,24 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     let _ = texture.first_frame_png();
+    if u64::from(texture.width()) * u64::from(texture.height()) > 256 * 256 {
+        return;
+    }
+    for role in [Role::Colour, Role::Normal, Role::Data] {
+        for pack in [
+            None,
+            Some(Pack::Channel(3)),
+            Some(Pack::Orm),
+            Some(Pack::Rgb),
+        ] {
+            let image = ExportedTexture {
+                vtex: "materials/t.vtex".to_owned(),
+                uri: "t.ktx2".to_owned(),
+                pack,
+                role,
+            };
+            let _ = image.to_ktx2(&texture);
+            let _ = image.to_png(&texture);
+        }
+    }
 });

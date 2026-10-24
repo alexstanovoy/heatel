@@ -14,6 +14,7 @@ pub use vtex::Texture;
 /// What a material reads a texture as, which decides its encoding and the block format an image
 /// made from it is compressed to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum Role {
     /// Colours on the sRGB curve: base colour, emission.
     Colour,
@@ -24,6 +25,7 @@ pub enum Role {
 }
 
 impl Role {
+    /// How a texture of this role is encoded.
     pub fn encoding(self) -> Encoding {
         match self {
             Self::Colour => Encoding::Srgb,

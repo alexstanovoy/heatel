@@ -3,12 +3,14 @@
 //! panics.
 #![no_main]
 
-#[path = "common/files.rs"]
-mod files;
+use heatel::fuzzing::files;
 
 use std::collections::HashMap;
 
-use dbota_assets::{Bone, GltfOptions, Model, Resource, read_clips, write_glb};
+use heatel::anim::read_clips;
+use heatel::gltf::{GltfOptions, write_glb};
+use heatel::model::Bone;
+use heatel::{Model, Resource};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -44,6 +46,7 @@ fuzz_target!(|data: &[u8]| {
         materials: &HashMap::new(),
         texture_uri: &|vtex: &str| format!("{vtex}.png"),
         clips: &clips,
+        generator: "fuzz",
     };
     let _ = write_glb(&model, &options);
 });

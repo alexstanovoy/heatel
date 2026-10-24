@@ -44,18 +44,26 @@ pub(crate) fn components(format: u32) -> Option<usize> {
 /// One vertex or index buffer, decoded.
 #[derive(Clone, Debug)]
 pub struct Buffer {
+    /// How many elements it holds.
     pub count: usize,
+    /// Bytes per element.
     pub stride: usize,
+    /// Its vertex attributes (none for an index buffer).
     pub fields: Vec<Field>,
+    /// The decoded elements, `count * stride` bytes.
     pub data: Vec<u8>,
 }
 
 /// One vertex attribute of a [`Buffer`]; `semantic` is upper case (`POSITION`, `TEXCOORD`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Field {
+    /// The attribute's semantic.
     pub semantic: String,
+    /// Its semantic index (`TEXCOORD` 1 is the second UV set).
     pub index: u32,
+    /// Its DXGI format id.
     pub format: u32,
+    /// Its byte offset in an element.
     pub offset: usize,
 }
 
@@ -265,6 +273,7 @@ impl Buffer {
             .map(move |vertex| &vertex[offset..offset + width]))
     }
 
+    /// The attribute `semantic` (upper case) of index `index`, if the buffer has it.
     pub fn field(&self, semantic: &str, index: u32) -> Option<&Field> {
         self.fields
             .iter()

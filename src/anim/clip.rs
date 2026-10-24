@@ -1,6 +1,6 @@
 //! The clips of a model's embedded animation (`CTRL.embedded_animation`: the `ANIM` block's
 //! compressed frames, the `AGRP` block's decode key, the `ASEQ` block's sequences), sampled
-//! per frame into glTF keyframes as Source2Viewer 20 wrote them for the asset cache.
+//! per frame into glTF keyframes as Source2Viewer 20 writes them.
 
 use std::collections::{HashMap, HashSet};
 
@@ -11,7 +11,7 @@ use crate::model::{SourceBone, array, floats, multiply, rotate, source_skeleton,
 use crate::resource::Resource;
 
 /// Most bone-frames one call decodes (each becomes up to three keyframes); the largest
-/// manifest model (a destruction animation) takes 41 k.
+/// model we know (a destruction animation) takes 41 k.
 const MAX_BONE_FRAMES: usize = 1 << 21;
 /// Most element reads, frame-block visits and segment bones one call goes through.
 const MAX_WORK: usize = 1 << 28;
@@ -23,6 +23,7 @@ const MIN_FPS: f32 = 1e-3;
 
 /// An animation clip on a model's skeleton.
 pub struct Clip {
+    /// The clip's name in the model (`attack`, `idle`).
     pub name: String,
     /// One per bone, in skeleton order.
     pub tracks: Vec<Track>,
@@ -32,15 +33,20 @@ pub struct Clip {
 /// its ends, so a channel stops at its last change: a clip that holds its pose (Pudge's hook
 /// throw) lasts until the last bone moves.
 pub struct Track {
+    /// Rotations as `[x, y, z, w]` quaternions.
     pub rotation: Keys<4>,
+    /// Translations.
     pub translation: Keys<3>,
+    /// Scales.
     pub scale: Keys<3>,
 }
 
+/// Keyframes of one channel: a time and an `N`-component value each.
 #[derive(Default)]
 pub struct Keys<const N: usize> {
     /// Seconds, increasing.
     pub times: Vec<f32>,
+    /// One value per time.
     pub values: Vec<[f32; N]>,
 }
 

@@ -1,4 +1,4 @@
-//! Files built here that once crashed or blew up a converter of the importer, found by the fuzz
+//! Files built here that once crashed or blew up a converter, found by the fuzz
 //! targets (`fuzz/`) or in their review: models whose draw calls or attributes run past their
 //! buffers or copy one large buffer many times, the glTF writer given what glTF cannot say,
 //! materials of more parameters than any, a world that lists its files again and again, and
@@ -7,10 +7,14 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use dbota_assets::{
-    Band, Bone, Clip, GltfOptions, Keys, Material, Mesh, Model, Primitive, Resource, SliceSource,
-    Source, Track, Vertices, Vpk, Wanted, export_world, kv3, tooltips_json, write_glb,
-};
+use heatel::anim::{Clip, Keys, Track};
+use heatel::gltf::{GltfOptions, write_glb};
+use heatel::material::Material;
+use heatel::model::{Bone, Mesh, Primitive};
+use heatel::tooltips::{Wanted, tooltips};
+use heatel::vertices::Vertices;
+use heatel::world::{Band, WorldOptions, export_world};
+use heatel::{Model, Resource, SliceSource, Source, Vpk, kv3};
 
 /// A KV3 value to write.
 enum K {
@@ -177,7 +181,7 @@ fn model(mesh: &str, offset: K, indices: usize, calls: Vec<K>) -> Vec<u8> {
     ])
 }
 
-fn read_model(bytes: &[u8]) -> dbota_assets::Result<Model> {
+fn read_model(bytes: &[u8]) -> heatel::Result<Model> {
     Model::read(&Resource::parse(bytes)?)
 }
 
@@ -226,6 +230,7 @@ fn options<'a>(
         materials,
         texture_uri: uri,
         clips,
+        generator: "test",
     }
 }
 
@@ -256,7 +261,7 @@ fn triangle(indices: Vec<u32>, normals: usize) -> Mesh {
 }
 
 /// The writer takes public types: a bone parented after itself indexed past the node list or
-/// made a cycle, and indices, lengths and numbers glTF cannot hold made a file the client's
+/// made a cycle, and indices, lengths and numbers glTF cannot hold made a file a glTF
 /// loader refused.
 #[test]
 fn the_glb_writer_refuses_what_gltf_cannot_say() {
@@ -287,7 +292,7 @@ fn the_glb_writer_refuses_what_gltf_cannot_say() {
     assert!(write(Vec::new(), triangle(vec![0, 1, 2], 2), &[]).is_err());
     let colored = |name: &str| {
         let mut mesh = fine();
-        mesh.vertices[0].extra.push(dbota_assets::Attribute {
+        mesh.vertices[0].extra.push(heatel::vertices::Attribute {
             name: name.to_owned(),
             width: 4,
             values: vec![[1.0; 4]; 3],
@@ -384,11 +389,11 @@ struct Counted {
 }
 
 impl Source for Counted {
-    fn size(&self, path: &str) -> dbota_assets::Result<u64> {
+    fn size(&self, path: &str) -> heatel::Result<u64> {
         self.src.size(path)
     }
 
-    fn read_at(&self, path: &str, offset: u64, len: usize) -> dbota_assets::Result<Vec<u8>> {
+    fn read_at(&self, path: &str, offset: u64, len: usize) -> heatel::Result<Vec<u8>> {
         *self.reads.borrow_mut().entry(offset).or_default() += 1;
         self.src.read_at(path, offset, len)
     }
@@ -452,7 +457,7 @@ fn world(nodes: usize, placed: usize, mesh: &str) -> Vec<(&'static str, Vec<u8>)
 }
 
 /// The world exported, and how often each file was read.
-fn export<'a>(files: &[(&'a str, Vec<u8>)]) -> (dbota_assets::Result<()>, HashMap<&'a str, usize>) {
+fn export<'a>(files: &[(&'a str, Vec<u8>)]) -> (heatel::Result<()>, HashMap<&'a str, usize>) {
     let (bytes, starts) = package(files);
     let mut src = SliceSource::default();
     src.insert("maps/w.vpk", bytes);
@@ -468,14 +473,15 @@ fn export<'a>(files: &[(&'a str, Vec<u8>)]) -> (dbota_assets::Result<()>, HashMa
         v_max: 1e9,
     };
     let uri = |v: &str| v.to_owned();
-    let result = export_world(
-        &src,
-        &[&vpk],
-        "maps/w/world.vwrld_c",
-        &band,
-        "mid.bin",
-        &uri,
-    );
+    let options = WorldOptions {
+        band: Some(band),
+        exclude: &[],
+        scene: "w",
+        bin_uri: "w.bin",
+        texture_uri: &uri,
+        generator: "test",
+    };
+    let result = export_world(&src, &[&vpk], "maps/w/world.vwrld_c", &options);
     let reads = src.reads.borrow();
     let reads = starts
         .iter()
@@ -507,7 +513,10 @@ fn names_placed_again_and_again_are_charged_for_every_copy() {
 /// searched to the end of the text: quadratic in the file's size.
 #[test]
 fn tooltip_scripts_read_in_linear_time() {
-    let wanted = Wanted::parse("item 0 boots\n");
+    let wanted = Wanted {
+        names: vec!["item_boots".to_owned()],
+        heroes: Vec::new(),
+    };
     let localization = b"\"DOTA_Tooltip_ability_item_boots\" \"Boots\"\n";
     let mut script = String::from("\"DOTAAbilities\" {\n");
     for i in 0..300_000 {
@@ -515,9 +524,9 @@ fn tooltip_scripts_read_in_linear_time() {
     }
     script += &"/* ".repeat(300_000);
     script += "\"item_boots\" { \"ItemCost\" \"500\" } }";
-    let json = tooltips_json(&wanted, localization, &[script.as_bytes()]).unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
-    assert_eq!(json["item_boots"]["name"], "Boots");
+    let found = tooltips(&wanted, localization, &[script.as_bytes()]).unwrap();
+    assert_eq!(found["item_boots"].name, "Boots");
+    assert_eq!(found["item_boots"].cost.as_deref(), Some("500"));
     let huge = vec![b' '; 17 << 20];
-    assert!(tooltips_json(&wanted, localization, &[&huge]).is_err());
+    assert!(tooltips(&wanted, localization, &[&huge]).is_err());
 }

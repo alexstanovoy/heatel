@@ -3,28 +3,51 @@ use crate::error::{Result, malformed};
 /// How a texture's texels are stored: a block-compressed format of the GPU, or plain channels.
 /// Compressed blocks pass through from the `vtex_c` untouched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PixelFormat {
+    /// BC1 (DXT1): RGB, 1-bit alpha.
     Bc1,
+    /// BC3 (DXT5): RGBA.
     Bc3,
+    /// BC4: one channel.
     Bc4,
+    /// BC5: two channels.
     Bc5,
+    /// BC6H: HDR RGB.
     Bc6h,
+    /// BC7: RGBA.
     Bc7,
+    /// ETC2 RGB.
     Etc2Rgb,
+    /// ETC2 RGBA.
     Etc2Rgba,
+    /// EAC R11: one channel.
     EacR11,
+    /// EAC RG11: two channels.
     EacRg11,
+    /// 8-bit red.
     R8,
+    /// 8-bit red and green.
     Rg8,
+    /// 8-bit RGBA.
     Rgba8,
+    /// 16-bit red.
     R16,
+    /// 16-bit red and green.
     Rg16,
+    /// 16-bit RGBA.
     Rgba16,
+    /// Half-float red.
     R16f,
+    /// Half-float red and green.
     Rg16f,
+    /// Half-float RGBA.
     Rgba16f,
+    /// Float red.
     R32f,
+    /// Float red and green.
     Rg32f,
+    /// Float RGBA.
     Rgba32f,
 }
 

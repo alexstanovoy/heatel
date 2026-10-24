@@ -5,7 +5,7 @@ use super::format::PixelFormat;
 use crate::error::{Result, malformed};
 
 const WHAT: &str = "ktx2";
-/// Largest side of a texture the importer writes.
+/// Largest side of a texture written.
 const MAX_SIDE: u32 = 16384;
 /// Most memory the decoded levels of one texture may take.
 const MAX_DECODED: usize = 256 << 20;
@@ -16,7 +16,9 @@ const MAX_DECODED: usize = 256 << 20;
 /// 32-bit channels, floats) are written linear whatever is asked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoding {
+    /// Colours on the sRGB curve.
     Srgb,
+    /// Plain numbers.
     Linear,
 }
 
@@ -267,7 +269,7 @@ pub(super) fn write(
     out
 }
 
-/// The KTX2 file of plain channels the importer's KTX2 file `bytes` decodes to, for a GPU that
+/// The KTX2 file of plain channels a KTX2 file this crate wrote (`bytes`) decodes to, for a GPU that
 /// samples no block format: every level decoded (BC1, BC3, BC7 and RGBA8 to RGBA8; BC4 to its
 /// one channel, BC5 to its two, which a normal map is read as), sRGB where the file is. Any
 /// other file is an error.
@@ -339,7 +341,7 @@ pub fn to_plain(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(write(width, height, plain, encoding, &mips))
 }
 
-/// The pixel format, and whether sRGB, of a `vkFormat` the importer writes.
+/// The pixel format, and whether sRGB, of a `vkFormat` this crate writes.
 fn format_of(vk: u32) -> Option<(PixelFormat, bool)> {
     use PixelFormat as P;
     Some(match vk {

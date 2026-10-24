@@ -1,5 +1,5 @@
 //! The portrait framings of Dota's `scripts/npc/portraits.txt`: where the HUD portrait's camera
-//! and light stand for each model, boiled down to one line per model of the manifest.
+//! and light stand for a model, and the background behind it.
 
 use crate::error::{Result, malformed};
 
@@ -134,20 +134,92 @@ fn values(entry: &Kv) -> Option<[f32; VALUES]> {
     Some(out)
 }
 
-/// The colours Dota tints a portrait's background with, one per corner (top left, top right,
-/// bottom right, bottom left), each channel 0 to 1 (white leaves the image as it is).
-const WHITE: [[f32; 3]; 4] = [[1.0; 3]; 4];
+/// The colours Dota tints a portrait's background with where the file sets none: white, which
+/// leaves the image as it is.
+pub const WHITE: [[f32; 3]; 4] = [[1.0; 3]; 4];
 
-/// A wanted model's framing as Dota defines it.
-pub struct Framed {
-    pub logical: String,
-    values: [f32; VALUES],
-    /// The background's material (`.vmat`), when the entry names one, and its corner tints.
-    pub background: Option<(String, [[f32; 3]; 4])>,
+/// The portrait camera (in the model's own inches and degrees).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Camera {
+    /// Where it stands.
+    pub position: [f32; 3],
+    /// Pitch, yaw and roll.
+    pub angles: [f32; 3],
+    /// Its horizontal field of view.
+    pub fov: f32,
+    /// Its far plane (10000 where the entry sets none).
+    pub far: f32,
+}
+
+/// The portrait's light and ambient colour.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PortraitLight {
+    /// Where the light stands.
+    pub position: [f32; 3],
+    /// Its pitch, yaw and roll.
+    pub angles: [f32; 3],
+    /// Its field of view.
+    pub fov: f32,
+    /// Its colour, 0 to 255 a channel.
+    pub color: [f32; 3],
+    /// The ambient colour, 0 to 255 a channel.
+    pub ambient: [f32; 3],
+    /// How bright the light is (1 where unset).
+    pub scale: f32,
+    /// How bright the ambient colour is (1 where unset).
+    pub ambient_scale: f32,
+}
+
+/// The image behind a portrait.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Background {
+    /// Its material (`materials/.../x.vmat`); the image is its `g_tColor`.
+    pub material: String,
+    /// The colours each corner is tinted with (top left, top right, bottom right, bottom left),
+    /// 0 to 1 a channel.
+    pub tints: [[f32; 3]; 4],
+}
+
+/// A model's portrait framing as Dota defines it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Framing {
+    /// The caller's name for the model.
+    pub label: String,
+    /// The default camera.
+    pub camera: Camera,
+    /// The light.
+    pub light: PortraitLight,
+    /// The background, when the entry names one.
+    pub background: Option<Background>,
+}
+
+impl Framing {
+    fn new(label: &str, v: [f32; VALUES], background: Option<Background>) -> Self {
+        let three = |at: usize| [v[at], v[at + 1], v[at + 2]];
+        Self {
+            label: label.to_owned(),
+            camera: Camera {
+                position: three(0),
+                angles: three(3),
+                fov: v[6],
+                far: v[7],
+            },
+            light: PortraitLight {
+                position: three(8),
+                angles: three(11),
+                fov: v[14],
+                color: three(15),
+                ambient: three(18),
+                scale: v[21],
+                ambient_scale: v[22],
+            },
+            background,
+        }
+    }
 }
 
 /// The background of an entry: its material and the four corner colours, white where unset.
-fn background(entry: &Kv) -> Option<(String, [[f32; 3]; 4])> {
+fn background(entry: &Kv) -> Option<Background> {
     let vmat = entry.text("PortraitBackgroundTexture")?.trim();
     if !vmat.ends_with(".vmat") {
         return None;
@@ -167,12 +239,15 @@ fn background(entry: &Kv) -> Option<(String, [[f32; 3]; 4])> {
             *slot = [r, g, b].map(|c| c.clamp(0.0, 1.0));
         }
     }
-    Some((vmat.to_owned(), colors))
+    Some(Background {
+        material: vmat.to_owned(),
+        tints: colors,
+    })
 }
 
-/// Dota's framings of the wanted models, in the order of `wanted` (pairs of a logical name and
-/// the model's `.vmdl` path). A model Dota has no framing for is left out.
-pub fn framings(portraits: &[u8], wanted: &[(&str, &str)]) -> Result<Vec<Framed>> {
+/// Dota's framings of the wanted models out of `portraits.txt`, in the order of `wanted` (pairs
+/// of a label and the model's `.vmdl` path). A model Dota has no framing for is left out.
+pub fn framings(portraits: &[u8], wanted: &[(&str, &str)]) -> Result<Vec<Framing>> {
     if portraits.len() > MAX_FILE {
         return Err(malformed("portraits", format!("{} bytes", portraits.len())));
     }
@@ -184,55 +259,16 @@ pub fn framings(portraits: &[u8], wanted: &[(&str, &str)]) -> Result<Vec<Framed>
         .ok_or_else(|| malformed("portraits", "no Portraits block"))?;
     Ok(wanted
         .iter()
-        .filter_map(|(logical, vmdl)| {
+        .filter_map(|(label, vmdl)| {
             let entry = all.get(vmdl)?;
-            Some(Framed {
-                logical: (*logical).to_owned(),
-                values: values(entry)?,
-                background: background(entry),
-            })
+            Some(Framing::new(label, values(entry)?, background(entry)))
         })
         .collect())
 }
 
-/// `models/portraits.txt`: a line per framing, `<logical> <numbers...> <background>`: camera
-/// position and angles in the model's own inches and degrees, horizontal field of view, far
-/// plane, the light's position, angles and field of view, light colour and ambient colour as
-/// 0-255, the light's and the ambient colour's scales, the background's four corner tints as 0-1 (top left, top right, bottom right, bottom
-/// left), and the background image's cache path, `-` where there is none. `image` names the
-/// cache path a background material's image was written to, if it was.
-pub fn portraits_txt(framed: &[Framed], image: impl Fn(&str) -> Option<String>) -> String {
-    let mut out = String::from(
-        "# logical, camera position (3), camera angles (3), fov, far, light position (3), light angles (3), light fov, light colour (3), ambient colour (3), light scale, ambient scale, background tints (4x3), background image\n",
-    );
-    for f in framed {
-        out.push_str(&f.logical);
-        let (colors, path) = match &f.background {
-            Some((vmat, colors)) => (*colors, image(vmat)),
-            None => (WHITE, None),
-        };
-        for n in f.values.iter().chain(colors.as_flattened()) {
-            out.push_str(&format!(" {n}"));
-        }
-        out.push(' ');
-        out.push_str(path.as_deref().unwrap_or("-"));
-        out.push('\n');
-    }
-    out
-}
-
-/// Where the image of portrait background material `vmat` goes in the cache.
-pub fn background_png(vmat: &str) -> String {
-    let file = vmat.rsplit('/').next().unwrap_or(vmat);
-    format!(
-        "models/portrait_backgrounds/{}.png",
-        file.trim_end_matches(".vmat")
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{background_png, framings, portraits_txt};
+    use super::{Background, Camera, Framing, PortraitLight, framings};
 
     const FILE: &str = r#"
 "Portraits" // comment
@@ -261,15 +297,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(framed.len(), 1, "the model without a framing has no line");
-        let out = portraits_txt(&framed, |vmat| Some(background_png(vmat)));
-        let line = out.lines().find(|l| !l.starts_with('#')).unwrap();
-        assert_eq!(
-            line,
-            "a 162.31 63.73 144.54 2.75 199.94 0 25 10000 1 2 3 49.61 263.39 0 90 231 254 187 97 114 0 \
-             2.8 5 1 1 1 1 1 1 0.8 0.2 0.1 1 1 1 models/portrait_backgrounds/portraitbackground_desert.png"
-        );
-        let out = portraits_txt(&framed, |_| None);
-        assert!(out.trim_end().ends_with(" -"), "no image, no path: {out}");
+        let framing = Framing {
+            label: "a".to_owned(),
+            camera: Camera {
+                position: [162.31, 63.73, 144.54],
+                angles: [2.75, 199.94, 0.0],
+                fov: 25.0,
+                far: 10_000.0,
+            },
+            light: PortraitLight {
+                position: [1.0, 2.0, 3.0],
+                angles: [49.61, 263.39, 0.0],
+                fov: 90.0,
+                color: [231.0, 254.0, 187.0],
+                ambient: [97.0, 114.0, 0.0],
+                scale: 2.8,
+                ambient_scale: 5.0,
+            },
+            background: Some(Background {
+                material: "materials/vgui/hud/heroportraits/portraitbackground_desert.vmat"
+                    .to_owned(),
+                tints: [[1.0; 3], [1.0; 3], [0.8, 0.2, 0.1], [1.0; 3]],
+            }),
+        };
+        assert_eq!(framed[0], framing);
     }
 
     #[test]

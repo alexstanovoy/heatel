@@ -1,7 +1,7 @@
-//! The mid-lane band of a [`Scene`], cut as the old export pipeline cut the whole world: the
-//! nodes whose mesh bounds touch the band, less the ones the client spawns itself, flattened to
-//! world matrices, without skins; a triangle list that uses less than half of its vertex buffer
-//! gets its own vertices.
+//! A [`Scene`] written as one glTF: the nodes whose mesh bounds touch the band (all of them
+//! without one), less the excluded ones and the lower-detail layers, flattened to world
+//! matrices, without skins; a triangle list that uses less than half of its vertex buffer gets
+//! its own vertices.
 
 use std::collections::HashMap;
 use std::f64::consts::SQRT_2;
@@ -15,26 +15,6 @@ use crate::material::extensions_used;
 use crate::model::{Mesh, Model};
 use crate::vertices::{SCALE, Vertices};
 
-/// Node names left out: trees, towers, barracks, ancients and fountains (the client spawns
-/// those as units), the end-game cameras.
-const EXCLUDED: [&str; 16] = [
-    "tree_",
-    "dire_tree",
-    "radiant_tower",
-    "dire_tower",
-    "radiant_ancient001",
-    "dire_ancient_base001",
-    "radiant_melee_barracks001",
-    "radiant_ranged_barracks001",
-    "dire_barracks_melee001",
-    "dire_barracks_ranged001",
-    "radiant_fountain002",
-    "dire_fountain002",
-    "radiant_statue001",
-    "dire_column001",
-    "bad_ancient_destruction_camera",
-    "radiant_endcam",
-];
 /// Most bytes of geometry written.
 const MAX_BIN: usize = 1 << 30;
 /// Most indices and vertices visited while writing (the band of Dota's map takes ~2e7): many
@@ -46,23 +26,26 @@ const UNSIGNED_INT: u32 = 5125;
 const ARRAY_BUFFER: u32 = 34962;
 const ELEMENT_ARRAY_BUFFER: u32 = 34963;
 
-/// The band around the mid lane, in Dota units: `|x - y| / √2 <= half_width` across it and
-/// `v_min <= (x + y) / √2 <= v_max` along it.
+/// A band along the map's diagonal (the direction Dota's mid lane runs), in Dota units:
+/// `|x - y| / √2 <= half_width` across it and `v_min <= (x + y) / √2 <= v_max` along it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Band {
+    /// Half its width, across the diagonal.
     pub half_width: f64,
+    /// Where it starts along the diagonal.
     pub v_min: f64,
+    /// Where it ends along the diagonal.
     pub v_max: f64,
 }
 
-/// Whether a node is left out by name: the client's own units and the world's lower-detail
-/// layers (`n0_lr1_...` and up).
-fn excluded(name: &str) -> bool {
+/// Whether a node is left out by name: one starting with any of `exclude`, and the world's
+/// lower-detail layers (`n0_lr1_...` and up).
+fn excluded(name: &str, exclude: &[&str]) -> bool {
     let layer = name
         .strip_prefix("n0_lr")
         .and_then(|rest| rest.bytes().next())
         .is_some_and(|d| (b'1'..=b'9').contains(&d));
-    layer || EXCLUDED.iter().any(|p| name.starts_with(p))
+    layer || exclude.iter().any(|p| name.starts_with(p))
 }
 
 /// Whether `bounds` placed by `matrix` (glTF, column major) touch `band`.
@@ -84,6 +67,15 @@ fn touches(matrix: &[f32; 16], bounds: &Bounds, band: &Band) -> bool {
     u[0] <= band.half_width && u[1] >= -band.half_width && v[0] <= band.v_max && v[1] >= band.v_min
 }
 
+/// What a cropped world keeps and how its document names things.
+pub(super) struct Cut<'a> {
+    pub band: Option<&'a Band>,
+    pub exclude: &'a [&'a str],
+    pub scene: &'a str,
+    pub bin_uri: &'a str,
+    pub generator: &'a str,
+}
+
 /// The cropped world: the `.gltf` document (its buffer named `bin_uri`) and its geometry.
 pub(super) struct Cropped {
     pub doc: Json,
@@ -94,11 +86,10 @@ pub(super) struct Cropped {
     pub images: Vec<usize>,
 }
 
-/// Writes the nodes of `scene` that `band` keeps; `load` gives a scene model's decoded model.
+/// Writes the nodes of `scene` that `cut` keeps; `load` gives a scene model's decoded model.
 pub(super) fn crop(
     scene: &Scene,
-    band: &Band,
-    bin_uri: &str,
+    cut: &Cut<'_>,
     load: &mut dyn FnMut(usize) -> Result<std::rc::Rc<Model>>,
 ) -> Result<Cropped> {
     let mut w = Writer::default();
@@ -109,7 +100,10 @@ pub(super) fn crop(
         let Some(bounds) = mesh.bounds else {
             continue;
         };
-        if excluded(&node.name) || !touches(&node.matrix, &bounds, band) {
+        let outside = cut
+            .band
+            .is_some_and(|band| !touches(&node.matrix, &bounds, band));
+        if excluded(&node.name, cut.exclude) || outside {
             continue;
         }
         let index = match mesh_index.get(&node.mesh) {
@@ -134,14 +128,14 @@ pub(super) fn crop(
         .map(|&i| scene.images.list[i].clone())
         .collect();
     let mut doc = json!({
-        "asset": { "version": "2.0", "generator": "dbota_assets" },
+        "asset": { "version": "2.0", "generator": cut.generator },
         "scene": 0,
-        "scenes": [{ "name": "mid", "nodes": (0..nodes.len()).collect::<Vec<_>>() }],
+        "scenes": [{ "name": cut.scene, "nodes": (0..nodes.len()).collect::<Vec<_>>() }],
         "nodes": nodes,
         "meshes": w.meshes,
         "accessors": w.accessors,
         "bufferViews": w.views,
-        "buffers": [{ "byteLength": w.bin.len().next_multiple_of(4), "uri": bin_uri }],
+        "buffers": [{ "byteLength": w.bin.len().next_multiple_of(4), "uri": cut.bin_uri }],
         "materials": materials,
     });
     if !list.is_empty() {

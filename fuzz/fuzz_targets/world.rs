@@ -1,12 +1,11 @@
-//! A world (`.vwrld_c`) exported as the importer exports the map: its nodes (`.vwnod_c`),
-//! entity lumps, the models and materials they place, cut to a band that keeps everything.
-//! The input is the world, then the files it names (common/files.rs). No input panics.
+//! A world (`.vwrld_c`) exported: its nodes (`.vwnod_c`),
+//! entity lumps, the models and materials they place, cut to a band that keeps everything, and uncut.
+//! The input is the world, then the files it names (`heatel::fuzzing::files`). No input panics.
 #![no_main]
 
-#[path = "common/files.rs"]
-mod files;
+use heatel::fuzzing::files;
 
-use dbota_assets::{Band, export_world};
+use heatel::world::{Band, WorldOptions, export_world};
 use libfuzzer_sys::fuzz_target;
 
 const WORLD: &str = "maps/w/world.vwrld_c";
@@ -24,5 +23,15 @@ fuzz_target!(|data: &[u8]| {
         v_max: 1e9,
     };
     let uri = |vtex: &str| format!("{vtex}.png");
-    let _ = export_world(&src, &[&vpk], WORLD, &band, "mid.bin", &uri);
+    for band in [Some(band), None] {
+        let options = WorldOptions {
+            band,
+            exclude: &["tree_"],
+            scene: "w",
+            bin_uri: "w.bin",
+            texture_uri: &uri,
+            generator: "fuzz",
+        };
+        let _ = export_world(&src, &[&vpk], WORLD, &options);
+    }
 });

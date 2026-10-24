@@ -3,7 +3,7 @@
 //! decodes past its bound.
 #![no_main]
 
-use dbota_assets::fuzzing::{meshopt_indices, meshopt_vertices};
+use heatel::meshopt::{decode_index_buffer, decode_vertex_buffer};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -12,11 +12,11 @@ fuzz_target!(|data: &[u8]| {
     };
     let count = usize::from(u16::from_le_bytes([head[0], head[1]])) << (head[3] & 7);
     let stride = usize::from(head[2]);
-    if let Ok(out) = meshopt_vertices(encoded, count, stride) {
+    if let Ok(out) = decode_vertex_buffer(encoded, count, stride) {
         assert_eq!(out.len(), count * stride);
     }
     for size in [2, 4] {
-        if let Ok(out) = meshopt_indices(encoded, count, size) {
+        if let Ok(out) = decode_index_buffer(encoded, count, size) {
             assert_eq!(out.len(), count * size);
         }
     }

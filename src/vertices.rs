@@ -21,37 +21,47 @@ const UNIT_LENGTH: f32 = 0.00674;
 /// One vertex buffer, decoded and converted.
 #[derive(Clone, Default)]
 pub struct Vertices {
+    /// Positions in metres, glTF's frame.
     pub positions: Vec<[f32; 3]>,
+    /// Unit normals, when the buffer has them.
     pub normals: Option<Vec<[f32; 3]>>,
+    /// Tangents with their handedness in `w`, when the buffer has them.
     pub tangents: Option<Vec<[f32; 4]>>,
     /// `TEXCOORD_0`, `TEXCOORD_1`, ...
     pub uvs: Vec<Vec<[f32; 2]>>,
     /// The other attributes, in buffer order.
     pub extra: Vec<Attribute>,
+    /// Bone joints and weights, when the buffer is skinned.
     pub skin: Option<Skin>,
 }
 
 /// An attribute glTF does not define, or one it does beyond the above (`COLOR_0`).
 #[derive(Clone)]
 pub struct Attribute {
+    /// Its glTF attribute name (`COLOR_0`, `_BLENDINDICES`, ...).
     pub name: String,
     /// Components per vertex, 1 to 4; the unused ones of `values` are 0.
     pub width: usize,
+    /// Its values, one per vertex.
     pub values: Vec<[f32; 4]>,
 }
 
 /// Per vertex, four model skeleton bones and their weights (summing to 1).
 #[derive(Clone)]
 pub struct Skin {
+    /// Indices into the model's bones.
     pub joints: Vec<[u16; 4]>,
+    /// Each joint's weight.
     pub weights: Vec<[f32; 4]>,
 }
 
 impl Vertices {
+    /// How many vertices it holds.
     pub fn len(&self) -> usize {
         self.positions.len()
     }
 
+    /// Whether it holds none.
     pub fn is_empty(&self) -> bool {
         self.positions.is_empty()
     }

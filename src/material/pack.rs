@@ -4,6 +4,7 @@
 /// wrote the materials' inputs: it unpacked each channel a glTF slot wants into an image of
 /// its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum Pack {
     /// One channel (0 red .. 3 alpha) as a grey image.
     Channel(u8),

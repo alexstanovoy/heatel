@@ -1,7 +1,7 @@
 //! Sounds built here and read back: the `vsnd_c` layouts and the files made of them, without a
 //! Dota 2 install. The golden test compares with the real files.
 
-use dbota_assets::{Sound, SoundFormat};
+use heatel::sound::{Sound, SoundFormat};
 
 /// A `vsnd_c` with the older binary `DATA` block: `packed` first word, sample count, duration,
 /// audio size, then the audio.

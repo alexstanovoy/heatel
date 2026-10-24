@@ -1,8 +1,9 @@
-//! An entity lump (`.vents_c`): its entities and child lumps, the models it places, and the
-//! cache's `trees.txt`, `buildings.txt` and `lighting.txt` made of it. No input panics.
+//! An entity lump (`.vents_c`): its entities and child lumps, the models it places, what they
+//! place and the map's lighting. No input panics; every placement is finite.
 #![no_main]
 
-use dbota_assets::{EntityLump, Resource, buildings_txt, lighting_txt, trees_txt};
+use heatel::Resource;
+use heatel::world::{EntityLump, lighting, placements};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -13,7 +14,9 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let _ = lump.models();
-    let _ = trees_txt(&lump.entities);
-    let _ = buildings_txt(&lump.entities);
-    let _ = lighting_txt(&lump.entities);
+    for p in placements(&lump.entities) {
+        let numbers = [p.origin[0], p.origin[1], p.origin[2], p.yaw, p.scale];
+        assert!(numbers.iter().all(|n| n.is_finite()), "{p:?}");
+    }
+    let _ = lighting(&lump.entities);
 });

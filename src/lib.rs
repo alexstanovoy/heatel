@@ -1,59 +1,51 @@
-//! Reads Valve's Source 2 formats straight from a local Dota 2 install: VPK packages, compiled
-//! resource containers and binary KV3, through a [`Source`] that is a folder on disk natively
-//! and the user's picked files in a browser. Every parser is bounded: the input is an untrusted
-//! local file, and a malformed one is an [`Error`], never a panic or an unbounded allocation.
+#![doc = include_str!("../README.md")]
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
-mod anim;
+/// Animation clips of a model's embedded animation.
+pub mod anim;
 mod budget;
 mod bytes;
-#[cfg(any(unix, windows))]
-pub mod cache_dir;
 mod error;
-mod export;
+pub mod export;
 #[cfg(fuzzing)]
+#[doc(hidden)]
 pub mod fuzzing;
-mod gltf;
-pub mod import;
-mod keyvalues;
+pub mod gltf;
+pub mod keyvalues;
 pub mod kv3;
 #[cfg(any(unix, windows))]
 mod locate;
-mod material;
-mod meshopt;
-mod model;
+/// Materials (`vmat_c`): shader, parameters, textures, and their glTF form.
+pub mod material;
+pub mod meshopt;
+pub mod model;
 mod ntro;
-mod portraits;
-mod resource;
-mod shops;
-mod sound;
-mod source;
-mod texture;
-mod tooltips;
-mod vbib;
-mod vertices;
-mod vpk;
-mod world;
+pub mod portraits;
+/// Compiled Source 2 resources: the block container every `*_c` file is.
+pub mod resource;
+pub mod shops;
+pub mod sound;
+/// Where files are read from: a folder on disk, or in-memory and browser files.
+pub mod source;
+pub mod texture;
+pub mod tooltips;
+pub mod vbib;
+pub mod vertices;
+/// VPK packages: a directory file and its numbered archives.
+pub mod vpk;
+pub mod world;
 
-pub use anim::{Clip, Keys, Track, read_clips};
 pub use error::{Error, Result};
-pub use export::{ExportedClip, ExportedModel, ExportedTexture, export_model, read_from};
-pub use gltf::{GltfOptions, write_glb};
+pub use export::{export_model, read_from};
 #[cfg(any(unix, windows))]
 pub use locate::find_game_dir;
-pub use material::{Alpha, Material, Pack, orm_uri};
-pub use model::{Bone, Mesh, Model, Primitive};
-pub use portraits::{background_png, framings, portraits_txt};
-pub use resource::{Block, ExternalRef, Resource};
-pub use shops::shop_json;
-pub use sound::{Sound, SoundFormat};
+pub use model::Model;
+pub use resource::Resource;
+pub use sound::Sound;
 #[cfg(any(unix, windows))]
 pub use source::DirSource;
 pub use source::{Slice, SliceSource, Source};
-pub use texture::{Encoding, PixelFormat, Role, Texture, ktx2_to_plain};
-pub use tooltips::{Wanted, labels_json, tooltips_json};
-pub use vbib::{Buffer, Field};
-pub use vertices::{Attribute, Skin, Vertices};
-pub use vpk::{Entry, Vpk};
-pub use world::{
-    Band, EntityLump, ExportedWorld, buildings_txt, export_world, lighting_txt, trees_txt,
-};
+pub use texture::Texture;
+pub use vpk::Vpk;

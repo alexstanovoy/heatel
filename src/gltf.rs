@@ -1,11 +1,10 @@
-//! Writes a [`Model`] as binary glTF (`.glb`), laid out as the asset cache's models are: one
-//! node per render mesh (`<model>.<mesh>`); with a skeleton, a root node named after the model
+//! Writes a [`Model`] as binary glTF (`.glb`): one node per render mesh (`<model>.<mesh>`); with a skeleton, a root node named after the model
 //! holding the bones and one skin over all of them; textures as images next to the file.
 //!
 //! The model's types are public, so the writer checks what it is given before writing: a model
 //! glTF cannot say (an index past its vertices, a bone parented after itself, a number that is
-//! not finite, attributes of unequal lengths) or one past [`MAX_GLB`] is an error, never a
-//! panic or a file the client's loader refuses.
+//! not finite, attributes of unequal lengths) or one past 1 GiB is an error, never a
+//! panic or a file a glTF loader refuses.
 
 use std::collections::HashMap;
 
@@ -33,7 +32,7 @@ pub struct GltfOptions<'a> {
     /// The model's path (`models/heroes/pudge/pudge.vmdl_c`): the root node's name and the
     /// prefix of the mesh names.
     pub name: &'a str,
-    /// Only these render meshes, when given (the manifest's `meshes=`).
+    /// Only these render meshes, when given (by their names in the model).
     pub meshes: Option<&'a [&'a str]>,
     /// Whether to write the skeleton and skin: models that animate, or wear onto one that does.
     /// Without it, the meshes stand alone and keep only their vertex bone weights.
@@ -44,6 +43,8 @@ pub struct GltfOptions<'a> {
     pub texture_uri: &'a dyn Fn(&str) -> String,
     /// Animations of the skeleton (written only with it).
     pub clips: &'a [Clip],
+    /// What the file says wrote it (glTF's `asset.generator`).
+    pub generator: &'a str,
 }
 
 #[derive(Default)]
@@ -61,7 +62,8 @@ struct Builder {
     time_index: HashMap<Vec<u32>, usize>,
 }
 
-/// The model as a `.glb` file, and the images its materials use (to be written next to it).
+/// The model as a `.glb` file, and the images its materials use (to be written next to it,
+/// each under the name `options.texture_uri` gave it).
 pub fn write_glb(model: &Model, options: &GltfOptions) -> Result<(Vec<u8>, Vec<ExportedTexture>)> {
     check(model, options)?;
     let mut b = Builder::default();
@@ -89,7 +91,7 @@ pub fn write_glb(model: &Model, options: &GltfOptions) -> Result<(Vec<u8>, Vec<E
     }
     let animations = b.animations(options);
     let mut root = json!({
-        "asset": { "version": "2.0", "generator": "dbota_assets" },
+        "asset": { "version": "2.0", "generator": options.generator },
         "scene": 0,
         "scenes": [{ "nodes": scene }],
         "nodes": b.nodes,

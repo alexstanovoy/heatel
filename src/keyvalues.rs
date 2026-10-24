@@ -1,5 +1,15 @@
-//! KeyValues text as Valve's scripts and localization files write it: quoted keys and values,
-//! braces, `//` and `/* */` comments. Every reader is bounded: the text is an untrusted file.
+//! KeyValues (KV1) text as Valve's scripts and localization files write it: quoted keys and
+//! values, braces, `//` and `/* */` comments. Every reader is bounded: the text is an untrusted
+//! file.
+//!
+//! ```
+//! use heatel::keyvalues::{Kv, parse_kv};
+//!
+//! let tree = parse_kv(r#""DOTAAbilities" { "item_boots" { "ItemCost" "500" } }"#)?;
+//! let cost = tree.get("DOTAAbilities").and_then(|b| b.get("item_boots")).and_then(|b| b.get("ItemCost"));
+//! assert!(matches!(cost, Some(Kv::Text(t)) if t == "500"));
+//! # Ok::<(), heatel::Error>(())
+//! ```
 
 use std::collections::HashMap;
 
@@ -11,8 +21,9 @@ const MAX_DEPTH: usize = 64;
 /// Largest file read; the largest, the localization, is ~1.8 MB.
 const MAX_FILE: usize = 16 << 20;
 
-/// A file as text, without a byte-order mark; one larger than any of them is an error.
-pub(crate) fn text(bytes: &[u8]) -> Result<&str> {
+/// A file as text, without a byte-order mark; one that is not UTF-8 or larger than any of
+/// Dota's (16 MiB) is an error.
+pub fn text(bytes: &[u8]) -> Result<&str> {
     if bytes.len() > MAX_FILE {
         return Err(malformed("keyvalues", format!("{} bytes", bytes.len())));
     }
@@ -23,20 +34,32 @@ pub(crate) fn text(bytes: &[u8]) -> Result<&str> {
 /// A KeyValues node: a string, or a block of keys in file order (a repeated key keeps its
 /// first value; repeated blocks merge into the first).
 #[derive(Debug)]
-pub(crate) enum Kv {
+pub enum Kv {
+    /// A string value.
     Text(String),
+    /// A block of keyed values.
     Block(Block),
 }
 
 /// A block's items in file order, each key's first place found by hash: a script may hold
 /// any number of keys, and each is looked up as it is read.
 #[derive(Debug, Default)]
-pub(crate) struct Block {
+pub struct Block {
     items: Vec<(String, Kv)>,
     first: HashMap<String, usize>,
 }
 
 impl Block {
+    /// The value of `key` (its first, keys matching exactly).
+    pub fn get(&self, key: &str) -> Option<&Kv> {
+        self.position(key).map(|at| &self.items[at].1)
+    }
+
+    /// The keys and values in file order.
+    pub fn items(&self) -> &[(String, Kv)] {
+        &self.items
+    }
+
     fn position(&self, key: &str) -> Option<usize> {
         self.first.get(key).copied()
     }
@@ -48,14 +71,16 @@ impl Block {
 }
 
 impl Kv {
-    pub(crate) fn get(&self, key: &str) -> Option<&Kv> {
+    /// The value of `key` in a block (keys match exactly); none for a string.
+    pub fn get(&self, key: &str) -> Option<&Kv> {
         match self {
             Self::Block(block) => block.position(key).map(|at| &block.items[at].1),
             Self::Text(_) => None,
         }
     }
 
-    pub(crate) fn block(&self) -> Option<&[(String, Kv)]> {
+    /// A block's keys and values in file order; none for a string.
+    pub fn block(&self) -> Option<&[(String, Kv)]> {
         match self {
             Self::Block(block) => Some(&block.items),
             Self::Text(_) => None,
@@ -63,15 +88,21 @@ impl Kv {
     }
 }
 
-pub(crate) enum Token<'a> {
+/// A token of KeyValues text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Token<'a> {
+    /// A quoted string's text, escapes left as they are.
     Text(&'a str),
+    /// `{`
     Open,
+    /// `}`
     Close,
 }
 
 /// The quoted strings and braces of KeyValues text, one at a time; comments and anything else
 /// are skipped.
-pub(crate) struct Tokens<'a> {
+#[derive(Clone, Debug)]
+pub struct Tokens<'a> {
     text: &'a str,
     at: usize,
     /// Where a `*/` was last searched for and none found: none follows any later `/*` either.
@@ -115,7 +146,7 @@ impl<'a> Iterator for Tokens<'a> {
 }
 
 /// The tokens of `text`, read as they are asked for.
-pub(crate) fn tokens(text: &str) -> Tokens<'_> {
+pub fn tokens(text: &str) -> Tokens<'_> {
     Tokens {
         text,
         at: 0,
@@ -138,10 +169,11 @@ fn quoted_end(bytes: &[u8], from: usize) -> Option<usize> {
     None
 }
 
-/// KeyValues text as a tree. Keys and values are quoted strings; a block without a key, or
-/// whose key already holds a string, is read and dropped; a repeated block key reopens the
-/// first block of that key in its place.
-pub(crate) fn parse_kv(text: &str) -> Result<Kv> {
+/// KeyValues text as a tree (a [`Kv::Block`] at the root). Keys and values are quoted strings;
+/// a block without a key, or whose key already holds a string, is read and dropped; a repeated
+/// block key reopens the first block of that key in its place. Blocks nested deeper than 64
+/// are an error.
+pub fn parse_kv(text: &str) -> Result<Kv> {
     // Each open block: its items, and its key and place in its parent (none for a dropped one).
     let mut stack: Vec<Open> = vec![(Block::default(), None)];
     let mut key: Option<String> = None;
@@ -207,8 +239,9 @@ fn close(stack: &mut Vec<Open>) {
     }
 }
 
-/// The localization's `"key" "value"` lines, keys lower-cased, the first of a key kept.
-pub(crate) fn localization_table(text: &str) -> HashMap<String, String> {
+/// The localization's `"key" "value"` lines (`resource/localization/*_english.txt`), keys
+/// lower-cased, the first of a key kept, `\"` and `\n` in values unescaped.
+pub fn localization_table(text: &str) -> HashMap<String, String> {
     let bytes = text.as_bytes();
     let mut table = HashMap::new();
     // Each try starts at a line start.

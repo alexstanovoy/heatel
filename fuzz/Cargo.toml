@@ -1,12 +1,10 @@
-# Coverage-guided fuzz targets for everything dbota reads from a file it did
-# not write: Valve's formats (VPK packages, resources, KV3, NTRO, textures,
-# sounds, models, meshes, animations, materials, worlds, entity lumps, the
-# tooltip, shop and portrait scripts), the importer that converts them, and the
-# asset cache as the client reads it back. A workspace of its own: the
-# fuzzer's flags and libFuzzer stay out of the main build. `fuzz.sh` builds
-# and runs them on stable Rust.
+# Coverage-guided fuzz targets for every reader of Valve's formats: VPK packages, resources,
+# KV3, NTRO, textures, sounds, models, meshes, animations, materials, worlds, entity lumps,
+# and the tooltip, shop and portrait scripts, with the glTF, KTX2 and PNG writers they feed.
+# A workspace of its own: the fuzzer's flags and libFuzzer stay out of the main build.
+# `fuzz.sh` builds and runs them on stable Rust.
 [package]
-name = "dbota_fuzz"
+name = "heatel_fuzz"
 version = "0.0.0"
 edition = "2024"
 license = "MIT"
@@ -16,12 +14,7 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
-# The versions and decoders the client loads its cache with.
-bevy_asset = { version = "=0.19.1", default-features = false }
-bevy_image = { version = "=0.19.1", default-features = false, features = ["png", "ktx2", "zstd_rust"] }
-crc32fast = "1.5"
-dbota_assets = { path = "../crates/dbota_assets" }
-# The client's glTF loader validates with it, with these extensions.
+# glTF validation, with the extensions the writer uses.
 gltf = { version = "1.4.0", default-features = false, features = [
     "KHR_lights_punctual",
     "KHR_materials_transmission",
@@ -35,8 +28,8 @@ gltf = { version = "1.4.0", default-features = false, features = [
     "names",
     "utils",
 ] }
+heatel = { path = ".." }
 libfuzzer-sys = "0.4"
-rodio = { version = "=0.22.2", default-features = false, features = ["hound", "mp3"] }
 serde_json = "1"
 
 [workspace]
@@ -78,20 +71,6 @@ bench = false
 [[bin]]
 name = "vsnd"
 path = "fuzz_targets/vsnd.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "cache_image"
-path = "fuzz_targets/cache_image.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "cache_sound"
-path = "fuzz_targets/cache_sound.rs"
 test = false
 doc = false
 bench = false
@@ -162,27 +141,6 @@ bench = false
 [[bin]]
 name = "gltf"
 path = "fuzz_targets/gltf.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "import"
-path = "fuzz_targets/import.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "plan"
-path = "fuzz_targets/plan.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "cache_text"
-path = "fuzz_targets/cache_text.rs"
 test = false
 doc = false
 bench = false

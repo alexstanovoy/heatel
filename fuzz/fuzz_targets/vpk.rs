@@ -3,7 +3,7 @@
 //! with their CRC. No input panics.
 #![no_main]
 
-use dbota_assets::{SliceSource, Vpk};
+use heatel::{SliceSource, Vpk};
 use libfuzzer_sys::fuzz_target;
 
 /// Entries read back at most: enough to reach every kind of location.

@@ -1,14 +1,10 @@
-//! The tooltip texts of the items and abilities the client names: their names, the shop search's
-//! aliases, descriptions, lore, notes, number labels and Dota's own numbers, read out of the
-//! install's localization and item/ability scripts (plain KeyValues text in the package) into the
-//! cache's `text/tooltips.json`; and the interface's labels (a stat's name, a line of the stats
-//! tooltip) into `text/labels.json`.
+//! The tooltip texts of Dota's items and abilities: their names, the shop search's aliases,
+//! descriptions, lore, notes, number labels and Dota's own numbers, read out of the install's
+//! localization and item/ability scripts (plain KeyValues text in the package).
 
 use std::collections::{BTreeMap, HashMap};
 
-use serde_json::{Map, Value as Json, json};
-
-use crate::error::{Result, malformed};
+use crate::error::Result;
 use crate::keyvalues::{Kv, localization_table, parse_kv, text};
 
 const LOCALIZATION: &str = "resource/localization/abilities_english.txt";
@@ -19,41 +15,19 @@ const ALIAS: &str = "dota_searchalias_ability_";
 /// Most aliases kept of one name.
 const MAX_ALIASES: usize = 16;
 
-/// What `ids.txt` asks texts of: Dota names (`item_<name>` for items) and the heroes whose
-/// ability scripts hold them.
+/// Whose texts to read: Dota names (`item_<name>` for items, the ability's name otherwise) and
+/// the heroes whose ability scripts hold them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Wanted {
+    /// The items' and abilities' names.
     pub names: Vec<String>,
+    /// The heroes (`pudge`) whose `npc_dota_hero_<hero>.txt` scripts are searched too.
     pub heroes: Vec<String>,
 }
 
 impl Wanted {
-    /// The names of `ids.txt`: items and abilities (not recipes), `text` entries, heroes.
-    pub fn parse(ids: &str) -> Self {
-        let mut names = Vec::new();
-        let mut heroes = Vec::new();
-        for line in ids.lines() {
-            let words: Vec<&str> = line
-                .split('#')
-                .next()
-                .unwrap_or_default()
-                .split_whitespace()
-                .collect();
-            match words.as_slice() {
-                ["item", _, name, ..] if *name != "recipe" => names.push(format!("item_{name}")),
-                ["ability", _, name, ..] if *name != "recipe" => names.push((*name).to_owned()),
-                ["text", _, _, name, ..] => names.push((*name).to_owned()),
-                ["hero", _, name, ..] => heroes.push((*name).to_owned()),
-                _ => {}
-            }
-        }
-        names.sort();
-        names.dedup();
-        Self { names, heroes }
-    }
-
     /// The install files the texts come from: the localization, then the scripts in the order
-    /// their blocks are searched.
+    /// their blocks are searched. Read each from the package and give them to [`tooltips`].
     pub fn sources(&self) -> Vec<String> {
         let mut heroes: Vec<String> = self
             .heroes
@@ -72,9 +46,42 @@ impl Wanted {
     }
 }
 
-/// `text/tooltips.json` from the localization and the scripts (the files of
-/// [`Wanted::sources`], in that order).
-pub fn tooltips_json(wanted: &Wanted, localization: &[u8], scripts: &[&[u8]]) -> Result<Vec<u8>> {
+/// An item's or ability's tooltip, as Dota's localization and scripts give it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tooltip {
+    /// Its shown name.
+    pub name: String,
+    /// The description, when there is one.
+    pub description: Option<String>,
+    /// The lore line, when there is one.
+    pub lore: Option<String>,
+    /// The notes, in order.
+    pub notes: Vec<String>,
+    /// The other names the shop's search finds it by (at most 16).
+    pub aliases: Vec<String>,
+    /// The script's `AbilityValues`, each as the space-separated text of its levels, in script
+    /// order.
+    pub values: Vec<(String, String)>,
+    /// `ItemCost`, from the script or its values.
+    pub cost: Option<String>,
+    /// `AbilityCooldown`, from the script or its values.
+    pub cooldown: Option<String>,
+    /// `AbilityManaCost`, from the script or its values.
+    pub mana: Option<String>,
+    /// `AbilityCastRange`, from the script or its values.
+    pub range: Option<String>,
+    /// The localization's label of each value that has one (`$variables` filled in), in
+    /// the values' order.
+    pub labels: Vec<(String, String)>,
+}
+
+/// The tooltips of `wanted`'s names that the localization has a name for, by name, from the
+/// localization and the scripts (the files of [`Wanted::sources`], in that order).
+pub fn tooltips(
+    wanted: &Wanted,
+    localization: &[u8],
+    scripts: &[&[u8]],
+) -> Result<BTreeMap<String, Tooltip>> {
     let loc = localization_table(text(localization)?);
     let variables: HashMap<&str, &str> = loc
         .iter()
@@ -96,112 +103,70 @@ pub fn tooltips_json(wanted: &Wanted, localization: &[u8], scripts: &[&[u8]]) ->
         let block = found.get(name.as_str()).copied();
         out.insert(name.clone(), entry(name, title, block, &loc, &variables));
     }
-    serde_json::to_vec(&out).map_err(|e| malformed("tooltips", e.to_string()))
+    Ok(out)
 }
 
-/// Longest label text kept: an interface line, not a document.
-const LABEL_LIMIT: usize = 1024;
-
-/// `text/labels.json`: the text of each `(file, key)` of `keys` out of its localization file
-/// among `files` (install path and bytes), by the key lower-cased. A key a file lacks, or whose
-/// text is longer than [`LABEL_LIMIT`], is left out: the client says it in its own words.
-pub fn labels_json(keys: &[(String, String)], files: &[(&str, &[u8])]) -> Result<Vec<u8>> {
-    let tables = files
-        .iter()
-        .map(|(path, bytes)| Ok((*path, localization_table(text(bytes)?))))
-        .collect::<Result<Vec<_>>>()?;
-    let mut out = BTreeMap::new();
-    for (file, key) in keys {
-        let key = key.to_lowercase();
-        let found = tables
-            .iter()
-            .find(|(path, _)| path == file)
-            .and_then(|(_, table)| table.get(&key))
-            .filter(|text| text.len() <= LABEL_LIMIT);
-        if let Some(text) = found {
-            out.insert(key, text.clone());
-        }
-    }
-    serde_json::to_vec(&out).map_err(|e| malformed("labels", e.to_string()))
-}
-
-/// One name's entry.
+/// One name's tooltip.
 fn entry(
     name: &str,
     title: &str,
     block: Option<&Kv>,
     loc: &HashMap<String, String>,
     variables: &HashMap<&str, &str>,
-) -> Json {
+) -> Tooltip {
     let key = |suffix: &str| format!("{PREFIX}{name}{suffix}");
-    let mut entry = Map::new();
-    entry.insert("name".into(), json!(title));
-    for (field, suffix) in [("description", "_description"), ("lore", "_lore")] {
-        if let Some(text) = loc.get(&key(suffix)) {
-            entry.insert(field.into(), json!(text));
-        }
-    }
-    let notes: Vec<&String> = (0..)
+    let notes = (0..)
         .map_while(|n| loc.get(&key(&format!("_note{n}"))))
+        .cloned()
         .collect();
-    if !notes.is_empty() {
-        entry.insert("notes".into(), json!(notes));
-    }
     // The other names the shop's search finds it by, `;` between them.
-    let aliases: Vec<&str> = loc
+    let aliases = loc
         .get(&format!("{ALIAS}{name}"))
         .map(|list| {
             list.split(';')
                 .map(str::trim)
                 .filter(|a| !a.is_empty())
                 .take(MAX_ALIASES)
+                .map(str::to_owned)
                 .collect()
         })
         .unwrap_or_default();
-    if !aliases.is_empty() {
-        entry.insert("aliases".into(), json!(aliases));
-    }
-    let values: Vec<(&str, String)> = block
+    let values: Vec<(String, String)> = block
         .and_then(|b| b.get("AbilityValues"))
         .and_then(Kv::block)
         .unwrap_or_default()
         .iter()
-        .filter_map(|(k, v)| Some((k.as_str(), level_values(Some(v))?)))
+        .filter_map(|(k, v)| Some((k.clone(), level_values(Some(v))?)))
         .collect();
-    let value_map: Map<String, Json> = values
-        .iter()
-        .map(|(k, v)| ((*k).into(), json!(v)))
-        .collect();
-    entry.insert("values".into(), Json::Object(value_map));
-    let fields = [
-        ("cost", "ItemCost"),
-        ("cooldown", "AbilityCooldown"),
-        ("mana", "AbilityManaCost"),
-        ("range", "AbilityCastRange"),
-    ];
-    for (field, script_key) in fields {
+    let field = |script_key: &str| {
         let own = level_values(block.and_then(|b| b.get(script_key))).filter(|s| !s.is_empty());
-        let from_values = || {
+        own.or_else(|| {
             values
                 .iter()
-                .find(|(k, _)| *k == script_key)
+                .find(|(k, _)| k == script_key)
                 .map(|(_, v)| v.clone())
-        };
-        if let Some(v) = own.or_else(from_values) {
-            entry.insert(field.into(), json!(v));
-        }
-    }
-    let labels: Vec<Json> = values
+        })
+    };
+    let labels = values
         .iter()
         .filter_map(|(k, _)| {
             let label = loc.get(&key(&format!("_{}", k.to_lowercase())))?;
-            (!label.is_empty()).then(|| json!([k, substitute(label, variables)]))
+            (!label.is_empty()).then(|| (k.clone(), substitute(label, variables)))
         })
         .collect();
-    if !labels.is_empty() {
-        entry.insert("labels".into(), json!(labels));
+    Tooltip {
+        name: title.to_owned(),
+        description: loc.get(&key("_description")).cloned(),
+        lore: loc.get(&key("_lore")).cloned(),
+        notes,
+        aliases,
+        cost: field("ItemCost"),
+        cooldown: field("AbilityCooldown"),
+        mana: field("AbilityManaCost"),
+        range: field("AbilityCastRange"),
+        values,
+        labels,
     }
-    Json::Object(entry)
 }
 
 /// A script value as the space-separated text Dota prints: a string, or a block's `value`.

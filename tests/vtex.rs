@@ -2,7 +2,7 @@
 //! KTX2 output, without a Dota install. The golden tests compare with the real files.
 
 use bevy_image::{CompressedImageFormats, ktx2_buffer_to_image};
-use dbota_assets::{Encoding, PixelFormat, Texture};
+use heatel::texture::{Encoding, PixelFormat, Texture};
 
 /// A `vtex_c` as the game's compiler lays it out.
 struct Vtex {
@@ -193,7 +193,7 @@ fn textures_that_decode_past_the_memory_cap_are_errors() {
     // two gigabytes.
     let mut ycocg = packed_square(16384, 2, 256 << 20);
     ycocg.redi = Some(b"Texture Compiler Version Image YCoCg Conversion".to_vec());
-    let over = |result: Result<_, dbota_assets::Error>| {
+    let over = |result: Result<_, heatel::Error>| {
         let err = result.expect_err("an error").to_string();
         assert!(err.contains("over the cap"), "{err}");
     };

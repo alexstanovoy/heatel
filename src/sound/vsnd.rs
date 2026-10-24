@@ -12,9 +12,11 @@ const MAX_CHANNELS: u16 = 8;
 
 /// The kind of audio file a sound is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SoundFormat {
     /// Uncompressed 8- or 16-bit samples.
     Wav,
+    /// An MP3 file.
     Mp3,
 }
 
@@ -79,6 +81,7 @@ impl<'a> Sound<'a> {
         })
     }
 
+    /// The kind of audio file it holds.
     pub fn format(&self) -> SoundFormat {
         self.format
     }
@@ -91,10 +94,12 @@ impl<'a> Sound<'a> {
         }
     }
 
+    /// Samples per second.
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
 
+    /// How many channels.
     pub fn channels(&self) -> u16 {
         self.channels
     }

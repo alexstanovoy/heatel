@@ -1,14 +1,16 @@
 //! The `.glb` writer given any model, materials and clips its public types can hold, not only
 //! ones a resource reads into: it refuses what glTF cannot say instead of panicking, and
-//! every file it writes validates as glTF (as the client's loader validates it).
+//! every file it writes validates as glTF (as Bevy's loader validates it).
 #![no_main]
 
 use std::collections::HashMap;
 
-use dbota_assets::{
-    Attribute, Bone, Clip, GltfOptions, Keys, Material, Mesh, Model, Primitive, Skin, Track,
-    Vertices, write_glb,
-};
+use heatel::Model;
+use heatel::anim::{Clip, Keys, Track};
+use heatel::gltf::{GltfOptions, write_glb};
+use heatel::material::Material;
+use heatel::model::{Bone, Mesh, Primitive};
+use heatel::vertices::{Attribute, Skin, Vertices};
 use libfuzzer_sys::arbitrary::{Arbitrary, Result, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
@@ -170,6 +172,7 @@ fn run(u: &mut Unstructured) -> Result<()> {
         materials: &materials,
         texture_uri: &|vtex: &str| format!("{vtex}.png"),
         clips: &clips,
+        generator: "fuzz",
     };
     if let Ok((glb, _)) = write_glb(&model, &options)
         && let Err(e) = gltf::Gltf::from_slice(&glb)

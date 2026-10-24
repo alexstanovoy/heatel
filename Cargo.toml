@@ -1,10 +1,23 @@
 [package]
-name = "dbota_assets"
+name = "heatel"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT"
-publish = false
-description = "Reads Valve's Source 2 formats (VPK, resource containers, KV3) from a local Dota 2 install."
+description = "Reads Valve's Source 2 formats from a local Dota 2 install (VPK, resources, KV3, textures, sounds, models, materials, worlds) and converts them to glTF, KTX2, PNG, WAV and MP3."
+# repository = ""
+readme = "README.md"
+keywords = ["source2", "dota2", "valve", "vpk", "gltf"]
+categories = ["parser-implementations", "game-development", "multimedia::images", "rendering::data-formats"]
+include = ["/src", "/examples", "/tests", "/README.md", "/CHANGELOG.md", "/LICENSE"]
+
+[features]
+default = ["encode"]
+# Block compression (BC1, BC3, BC4, BC5) of RGBA8 textures: `Texture::compressed` and
+# `ExportedTexture::to_ktx2`.
+encode = ["dep:texpresso"]
+# `serde::Serialize` for KV3 documents and values, e.g. to write them as JSON.
+serde = ["dep:serde"]
 
 [dependencies]
 crc32fast = "1.5"
@@ -14,8 +27,9 @@ lz4_flex = { version = "0.14", default-features = false, features = ["std", "saf
 meshoptimizer-rs = { version = "=0.2.1", default-features = false, features = ["std"] }
 png = { version = "0.18", default-features = false }
 ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
+serde = { version = "1.0.200", default-features = false, features = ["std"], optional = true }
 serde_json = "1"
-texpresso = { version = "2.0.2", default-features = false }
+texpresso = { version = "2.0.2", default-features = false, optional = true }
 texture2ddecoder = "0.1.2"
 thiserror = "2"
 
@@ -24,7 +38,20 @@ bevy_image = { version = "=0.19.1", default-features = false, features = ["ktx2"
 lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode"] }
 ktx2 = "0.5"
 meshopt = "0.7.0"
+serde_json = "1"
+
+[[example]]
+name = "kv3_to_json"
+required-features = ["serde"]
+
+[[example]]
+name = "texture_convert"
+required-features = ["encode"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lints.rust]
-# The fuzz targets build with `--cfg fuzzing` (fuzz/fuzz.sh).
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+# The fuzz targets build with `--cfg fuzzing` (fuzz/fuzz.sh); docs.rs with `--cfg docsrs`.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)", "cfg(docsrs)"] }

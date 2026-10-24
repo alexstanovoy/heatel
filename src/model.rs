@@ -12,8 +12,11 @@ use crate::vertices::{SCALE, TO_GLTF, Vertices, convert};
 /// and draw calls' indices. The largest of the install's models takes ~20 MB.
 const MAX_MODEL_BYTES: usize = 128 << 20;
 
+/// A model (`vmdl_c`): its skeleton, render meshes and skins, in glTF's frame (metres, Y up).
 pub struct Model {
+    /// The skeleton, parents before children.
     pub bones: Vec<Bone>,
+    /// The render meshes.
     pub meshes: Vec<Mesh>,
     /// The skins: each a name and the materials it swaps in.
     pub material_groups: Vec<(String, Vec<String>)>,
@@ -21,22 +24,31 @@ pub struct Model {
 
 /// A bone's rest pose relative to its parent, in glTF's frame.
 pub struct Bone {
+    /// The bone's name.
     pub name: String,
+    /// Its parent's index in [`Model::bones`]; none for a root.
     pub parent: Option<usize>,
+    /// Translation from its parent.
     pub translation: [f32; 3],
+    /// Rotation from its parent, `[x, y, z, w]`.
     pub rotation: [f32; 4],
 }
 
+/// A render mesh: vertex buffers and the draw calls over them.
 pub struct Mesh {
-    /// The embedded mesh's name (`shadow_fiend_base_lod0`).
+    /// The embedded mesh's name (`pudge_body_lod0`).
     pub name: String,
+    /// Its vertex buffers.
     pub vertices: Vec<Vertices>,
+    /// Its draw calls.
     pub primitives: Vec<Primitive>,
 }
 
 /// One draw call: triangles over one of the mesh's vertex buffers with one material.
 pub struct Primitive {
+    /// The index of its vertex buffer in [`Mesh::vertices`].
     pub vertices: usize,
+    /// Triangle-list indices into that buffer.
     pub indices: Vec<u32>,
     /// The material's path (`materials/.../x.vmat`, without `_c`).
     pub material: String,
@@ -45,6 +57,7 @@ pub struct Primitive {
 }
 
 impl Model {
+    /// Reads the model of a parsed `vmdl_c`: its embedded meshes (meshopt, zstd or `VBIB` buffers), skeleton and skins. One larger than any of the game's is an error.
     pub fn read(resource: &Resource) -> Result<Self> {
         let data = resource
             .data()

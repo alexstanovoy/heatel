@@ -3,17 +3,16 @@
 //! under their own paths. A file whose path line is empty stands for the next path the files so
 //! far name (a KV3 string of one of their blocks, or a path-like word of a text) that no file
 //! holds. The files are packed into an in-memory VPK, so the code under test reads them through
-//! the same index, CRC and bounds as a real install's. `seeds.py` writes such inputs from a real
-//! install.
-#![allow(dead_code)]
+//! the same index, CRC and bounds as a real install's. `fuzz/seeds.py` writes such inputs from a
+//! real install.
 
 use std::collections::{HashSet, VecDeque};
 
-use dbota_assets::kv3::{self, Value};
-use dbota_assets::{Resource, SliceSource, Vpk};
+use crate::kv3::{self, Value};
+use crate::{Resource, SliceSource, Vpk};
 
 /// Splits the fuzzer's input into files.
-pub const SEPARATOR: &[u8] = b"\n%%dbota-file%%\n";
+pub const SEPARATOR: &[u8] = b"\n%%heatel-file%%\n";
 /// Most files an input becomes.
 pub const MAX_FILES: usize = 24;
 /// Most strings looked at per file.

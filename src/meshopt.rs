@@ -6,9 +6,6 @@ use meshoptimizer_rs::codec;
 
 use crate::error::{Result, malformed};
 
-#[cfg(test)]
-mod tests;
-
 /// Largest output one call may allocate.
 const MAX_OUTPUT: usize = 256 << 20;
 
@@ -29,7 +26,7 @@ fn check(count: usize, size: usize) -> Result<()> {
 }
 
 /// `count` vertices of `stride` bytes each, decoded from meshopt's vertex codec.
-pub(crate) fn decode_vertex_buffer(data: &[u8], count: usize, stride: usize) -> Result<Vec<u8>> {
+pub fn decode_vertex_buffer(data: &[u8], count: usize, stride: usize) -> Result<Vec<u8>> {
     if stride == 0 || stride > 256 || !stride.is_multiple_of(4) {
         return Err(bad(format!(
             "vertex stride {stride} is not a multiple of 4 up to 256"
@@ -46,7 +43,7 @@ pub(crate) fn decode_vertex_buffer(data: &[u8], count: usize, stride: usize) -> 
 }
 
 /// `count` indices of `index_size` (2 or 4) bytes each, decoded from meshopt's index codec.
-pub(crate) fn decode_index_buffer(data: &[u8], count: usize, index_size: usize) -> Result<Vec<u8>> {
+pub fn decode_index_buffer(data: &[u8], count: usize, index_size: usize) -> Result<Vec<u8>> {
     if index_size != 2 && index_size != 4 {
         return Err(bad(format!("index size {index_size} is not 2 or 4")));
     }

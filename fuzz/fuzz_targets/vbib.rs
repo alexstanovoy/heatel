@@ -3,7 +3,7 @@
 //! input panics.
 #![no_main]
 
-use dbota_assets::fuzzing::vbib;
+use heatel::fuzzing::vbib;
 use libfuzzer_sys::fuzz_target;
 
 /// A remapping table as a mesh's model gives one.

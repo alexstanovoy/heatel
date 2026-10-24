@@ -1,8 +1,17 @@
+//! meshoptimizer's vertex and index codecs against the C library's encoder (the `meshopt`
+//! crate): random and typical buffers round-trip, damaged ones are errors, and, with a Dota 2
+//! install, every compressed buffer of its models decodes.
+
 use std::sync::Mutex;
 
-use super::{decode_index_buffer, decode_vertex_buffer};
-use crate::kv3::Value;
-use crate::{DirSource, Resource, Vpk, find_game_dir};
+use heatel::kv3::Value;
+use heatel::meshopt::{decode_index_buffer, decode_vertex_buffer};
+use heatel::{DirSource, Resource, Vpk, find_game_dir};
+
+/// What the index codec's header byte says of a sequence (its high nibble).
+const SEQUENCE_HEADER: u8 = 0xd0;
+/// Largest buffer a model's zstd stream is read to.
+const MAX_OUTPUT: u64 = 256 << 20;
 
 /// The encoder's index version is a process-wide setting, so index encodings are serialised.
 static INDEX_ENCODER: Mutex<()> = Mutex::new(());
@@ -278,17 +287,14 @@ fn buffer_bytes(res: &Resource, buf: &Value, index: bool, totals: &mut Totals) -
     if flag(buf, "m_bCompressedZSTD") {
         let mut plain = Vec::new();
         let mut zstd = ruzstd::decoding::StreamingDecoder::new(bytes.as_slice()).unwrap();
-        std::io::Read::read_to_end(
-            &mut std::io::Read::take(&mut zstd, super::MAX_OUTPUT as u64),
-            &mut plain,
-        )
-        .unwrap();
+        std::io::Read::read_to_end(&mut std::io::Read::take(&mut zstd, MAX_OUTPUT), &mut plain)
+            .unwrap();
         bytes = plain;
         totals.zstd_buffers += 1;
     }
     if flag(buf, "m_bMeshoptCompressed") {
         if index {
-            let sequence = bytes[0] & 0xf0 == super::SEQUENCE_HEADER;
+            let sequence = bytes[0] & 0xf0 == SEQUENCE_HEADER;
             assert_eq!(sequence, flag(buf, "m_bMeshoptIndexSequence"));
             totals.sequences += usize::from(sequence);
             bytes = decode_index_buffer(&bytes, count, size).unwrap();
@@ -303,39 +309,39 @@ fn buffer_bytes(res: &Resource, buf: &Value, index: bool, totals: &mut Totals) -
     bytes
 }
 
-/// Decodes every buffer of every embedded mesh of the manifest's models, and checks each index
-/// points into its mesh's vertex buffer. Needs the Dota 2 install (`DBOTA_DOTA_PATH`).
+/// Decodes every buffer of every embedded mesh of every model in the install's main package,
+/// and checks each index points into one of its mesh's vertex buffers. Needs a Dota 2 install
+/// (`HEATEL_DOTA_PATH`, a `dota 2 beta` folder, else the usual Steam places):
+///
+/// ```sh
+/// cargo test --release --test meshopt -- --ignored --nocapture
+/// ```
 #[test]
-#[ignore = "needs the Dota 2 install"]
+#[ignore = "needs a local Dota 2 install"]
 fn every_model_buffer_decodes() {
-    let dota = std::env::var_os("DBOTA_DOTA_PATH").map(std::path::PathBuf::from);
+    let dota = std::env::var_os("HEATEL_DOTA_PATH").map(std::path::PathBuf::from);
     let src = DirSource::new(
-        find_game_dir(dota.as_deref()).expect("Dota 2 not found; set DBOTA_DOTA_PATH"),
+        find_game_dir(dota.as_deref()).expect("Dota 2 not found; set HEATEL_DOTA_PATH"),
     );
-    let (pak, map) = (
-        Vpk::open(&src, "pak01_dir.vpk").unwrap(),
-        Vpk::open(&src, "maps/dota.vpk").unwrap(),
-    );
-    let manifest = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../assets-manifest/manifest.txt"
-    ))
-    .unwrap();
+    let pak = Vpk::open(&src, "pak01_dir.vpk").unwrap();
     let mut totals = Totals::default();
-    for path in manifest.lines().filter_map(|l| {
-        let mut words = l.split('#').next()?.split_whitespace();
-        (words.next()? == "model").then(|| words.nth(1)).flatten()
-    }) {
-        let vpk = if pak.get(path).is_some() { &pak } else { &map };
-        let bytes = vpk.read_file(&src, path).unwrap();
+    let models: Vec<String> = pak
+        .entries()
+        .filter(|e| e.ext() == "vmdl_c")
+        .map(|e| e.path())
+        .collect();
+    for path in &models {
+        let bytes = pak.read_file(&src, path).unwrap();
         let res = Resource::parse(&bytes).unwrap();
-        let ctrl = res.kv3(b"CTRL").unwrap().unwrap().root;
+        let ctrl = res.kv3(b"CTRL").map(|doc| doc.unwrap().root);
         let meshes = ctrl
-            .get("embedded_meshes")
+            .as_ref()
+            .and_then(|c| c.get("embedded_meshes"))
             .and_then(Value::as_array)
-            .unwrap();
-        if meshes.iter().any(|m| m.get("m_vertexBuffers").is_none()) {
-            totals.skipped_models += 1; // VBIB blocks, another reader's job
+            .unwrap_or_default();
+        if meshes.is_empty() || meshes.iter().any(|m| m.get("m_vertexBuffers").is_none()) {
+            // No embedded meshes, or VBIB blocks: another reader's job.
+            totals.skipped_models += 1;
             continue;
         }
         totals.models += 1;
@@ -354,7 +360,12 @@ fn every_model_buffer_decodes() {
                 totals.vertex_buffers += 1;
                 totals.vertices += field(vb, "m_nElementCount");
             }
-            let vertex_count = field(&vbs[0], "m_nElementCount");
+            // An index buffer may serve any of the mesh's vertex buffers.
+            let vertex_count = vbs
+                .iter()
+                .map(|vb| field(vb, "m_nElementCount"))
+                .max()
+                .unwrap_or(0);
             for ib in ibs {
                 let size = field(ib, "m_nElementSizeInBytes") as usize;
                 let indices = as_u32(&buffer_bytes(&res, ib, true, &mut totals), size);

@@ -3,7 +3,7 @@
 //! the struct an `NTRO` block lays out). No input panics.
 #![no_main]
 
-use dbota_assets::Resource;
+use heatel::Resource;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

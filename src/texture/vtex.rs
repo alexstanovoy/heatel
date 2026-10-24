@@ -103,14 +103,17 @@ impl Texture {
         Ok(())
     }
 
+    /// Width of the largest level, in texels.
     pub fn width(&self) -> u32 {
         self.width
     }
 
+    /// Height of the largest level, in texels.
     pub fn height(&self) -> u32 {
         self.height
     }
 
+    /// How the texels are stored.
     pub fn format(&self) -> PixelFormat {
         self.format
     }
@@ -289,6 +292,7 @@ impl Texture {
     /// from Dota's textures (packed channels, decoded normals) reach the GPU compressed as the
     /// textures Dota stores do. Colours are fitted by their perceived brightness with
     /// `Encoding::Srgb`, every channel alike otherwise. Other textures and formats are errors.
+    #[cfg(feature = "encode")]
     pub fn compressed(&self, format: PixelFormat, encoding: Encoding) -> Result<Self> {
         let target = match format {
             PixelFormat::Bc1 => texpresso::Format::Bc1,
