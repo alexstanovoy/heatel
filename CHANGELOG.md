@@ -31,8 +31,8 @@ First release.
   operators, forces, renderers, children; inputs, curves and gradients), upgraded from the
   format they are stored in, every value the file leaves out at the schema's default; `serde`
   feature for them. Pre-emission operators (`System::pre_emission`) and projected decals
-  (`Renderer::Projected`, their materials by `System::materials`) and refraction
-  (`Look::refract`) included.
+  (`Renderer::Projected`, their materials by `System::materials`), refraction
+  (`Look::refract`) and deferred lights (`Renderer::DeferredLight`) included.
 - `world`: entity lumps, placements, map lighting, and worlds exported as glTF.
 - `tooltips`, `shops`, `portraits`: Dota's item and ability tooltips, shop categories and
   portrait framings.

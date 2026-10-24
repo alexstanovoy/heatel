@@ -24,6 +24,9 @@ pub use operator::{
 };
 pub use pre_emission::{ControlPointPositions, PreEmission};
 pub use read::MAX_CONTROL_POINT;
-pub use renderer::{Blend, Look, Orientation, Projected, Renderer, Ropes, Sprites, Trails};
+pub use renderer::{
+    Blend, ColorBlend, DeferredLight, Look, Orientation, Projected, Renderer, Ropes, Sprites,
+    Trails,
+};
 pub use system::{Child, Constants, MAX_CHILDREN, MAX_PARTICLES, System};
 pub use transform::{ControlPoint, Transform};

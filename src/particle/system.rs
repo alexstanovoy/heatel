@@ -175,14 +175,17 @@ impl System {
             }
         }
         for renderer in &self.renderers {
-            if let Renderer::Projected(p) = &renderer.class
-                && (p.materials.len() > MAX_LAYERS
-                    || p.materials.iter().any(|m| m.len() > MAX_NAME))
-            {
-                return Err(malformed(
-                    WHAT,
-                    "too many projected materials or too long a path",
-                ));
+            let too_long = match &renderer.class {
+                Renderer::Projected(p) => {
+                    p.materials.len() > MAX_LAYERS || p.materials.iter().any(|m| m.len() > MAX_NAME)
+                }
+                Renderer::DeferredLight(l) => {
+                    l.texture.as_ref().is_some_and(|t| t.len() > MAX_NAME)
+                }
+                _ => false,
+            };
+            if too_long {
+                return Err(malformed(WHAT, "too many materials or too long a path"));
             }
         }
         for init in &self.initializers {

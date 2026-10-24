@@ -21,6 +21,9 @@ pub enum Renderer {
     Ropes(Box<Ropes>),
     /// `C_OP_RenderProjected`: a decal per particle, projected onto what is below it.
     Projected(Box<Projected>),
+    /// `C_OP_RenderDeferredLight`: a light per particle, of its colour, its radius' reach and
+    /// its alpha's intensity.
+    DeferredLight(Box<DeferredLight>),
     /// A class this crate does not read.
     Unsupported(String),
 }
@@ -186,6 +189,79 @@ pub struct Projected {
     pub projection_depth: Option<[f32; 2]>,
 }
 
+/// `C_OP_RenderDeferredLight`'s parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct DeferredLight {
+    /// The reach's scale (the reach is the radius times it).
+    pub radius_scale: FloatInput,
+    /// The intensity's scale (the intensity is the alpha times it).
+    pub alpha_scale: FloatInput,
+    /// The colour's scale, combined with the particle's colour by `color_blend`.
+    pub color_scale: VectorInput,
+    /// How the colour scale combines with the particle's colour.
+    pub color_blend: ColorBlend,
+    /// The share of the reach past which the light starts to fade out.
+    pub start_falloff: f32,
+    /// A spot light's reach along the particle's normal (0: a point light).
+    pub light_distance: f32,
+    /// A spot light's field of view, in degrees.
+    pub spot_fov: f32,
+    /// The texture it names (`materials/.../x.vtex`), which a deferred light does not draw.
+    pub texture: Option<String>,
+}
+
+/// How a renderer's colour scale combines with a particle's colour
+/// (`ParticleColorBlendType_t`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
+pub enum ColorBlend {
+    /// The colour times the scale.
+    #[default]
+    Multiply,
+    /// The colour times twice the scale.
+    Multiply2x,
+    /// The colour over the scale.
+    Divide,
+    /// The colour plus the scale.
+    Add,
+    /// The colour less the scale.
+    Subtract,
+    /// The colour times twice the scale (as `Multiply2x`).
+    Mod2x,
+    /// The colour screened by the scale.
+    Screen,
+    /// The larger of each channel.
+    Max,
+    /// The smaller of each channel.
+    Min,
+    /// The scale in place of the colour.
+    Replace,
+    /// The mean of the two.
+    Average,
+    /// The colour times the scale, inverted.
+    Negate,
+    /// The colour times the scale's luminance.
+    Luminance,
+}
+
+const COLOR_BLENDS: [&str; 13] = [
+    "PARTICLE_COLOR_BLEND_MULTIPLY",
+    "PARTICLE_COLOR_BLEND_MULTIPLY2X",
+    "PARTICLE_COLOR_BLEND_DIVIDE",
+    "PARTICLE_COLOR_BLEND_ADD",
+    "PARTICLE_COLOR_BLEND_SUBTRACT",
+    "PARTICLE_COLOR_BLEND_MOD2X",
+    "PARTICLE_COLOR_BLEND_SCREEN",
+    "PARTICLE_COLOR_BLEND_MAX",
+    "PARTICLE_COLOR_BLEND_MIN",
+    "PARTICLE_COLOR_BLEND_REPLACE",
+    "PARTICLE_COLOR_BLEND_AVERAGE",
+    "PARTICLE_COLOR_BLEND_NEGATE",
+    "PARTICLE_COLOR_BLEND_LUMINANCE",
+];
+
 /// The material a projected renderer has when its file names none.
 const BASE_PROJECTED: &str = "materials/particle/base_projected.vmat";
 /// The format that put a projected renderer's material into a list (`vpcf59`).
@@ -242,6 +318,7 @@ impl Renderer {
                 texture_v_offset: FloatInput::read(obj, "m_flTextureVOffset", 0.0)?,
             })),
             "C_OP_RenderProjected" => Self::Projected(Box::new(projected(obj, format)?)),
+            "C_OP_RenderDeferredLight" => Self::DeferredLight(Box::new(deferred_light(obj)?)),
             other => Self::Unsupported(other.to_owned()),
         })
     }
@@ -253,9 +330,48 @@ impl Renderer {
             Self::Trails(t) => Some(&t.look),
             Self::Ropes(r) => Some(&r.look),
             Self::Projected(p) => Some(&p.look),
-            Self::Unsupported(_) => None,
+            Self::DeferredLight(_) | Self::Unsupported(_) => None,
         }
     }
+}
+
+fn deferred_light(obj: &Obj<'_>) -> Result<DeferredLight> {
+    let layers = obj.array("m_vecTexturesInput", MAX_LAYERS)?;
+    let texture = match layers.first().map(Obj::new).transpose()? {
+        Some(layer) => layer.str("m_hTexture")?,
+        None => obj.str("m_hTexture")?,
+    };
+    if texture.is_some_and(|t| t.len() > MAX_NAME) {
+        return Err(malformed(
+            WHAT,
+            "a deferred light's texture path is too long",
+        ));
+    }
+    let blends = [
+        ColorBlend::Multiply,
+        ColorBlend::Multiply2x,
+        ColorBlend::Divide,
+        ColorBlend::Add,
+        ColorBlend::Subtract,
+        ColorBlend::Mod2x,
+        ColorBlend::Screen,
+        ColorBlend::Max,
+        ColorBlend::Min,
+        ColorBlend::Replace,
+        ColorBlend::Average,
+        ColorBlend::Negate,
+        ColorBlend::Luminance,
+    ];
+    Ok(DeferredLight {
+        radius_scale: FloatInput::read(obj, "m_flRadiusScale", 1.0)?,
+        alpha_scale: FloatInput::read(obj, "m_flAlphaScale", 1.0)?,
+        color_scale: VectorInput::read(obj, "m_vecColorScale", [1.0; 3])?,
+        color_blend: blends[obj.choice("m_nColorBlendType", &COLOR_BLENDS, 0)?],
+        start_falloff: obj.float("m_flStartFalloff", 0.25)?,
+        light_distance: obj.float("m_flLightDistance", 0.0)?,
+        spot_fov: obj.float("m_flSpotFoV", 60.0)?,
+        texture: texture.filter(|t| !t.is_empty()).map(str::to_owned),
+    })
 }
 
 fn projected(obj: &Obj<'_>, format: u32) -> Result<Projected> {

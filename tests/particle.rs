@@ -100,8 +100,8 @@ fn a_missile_reads_as_source_2_runs_it() {
 }
 
 /// Shadow Fiend's Shadowraze and Requiem of Souls: the raze's scorch is a projected decal whose
-/// material the format before `vpcf59` names on its own, and the requiem's line stops emitting
-/// after the duration its control point 2 gives, before it emits.
+/// material the format before `vpcf59` names on its own, the requiem's line stops emitting after
+/// the duration its control point 2 gives, before it emits, and the raze's light darkens.
 #[test]
 #[ignore = "needs a local Dota 2 install"]
 fn a_decal_and_a_pre_emission_operator_read_as_source_2_runs_them() {
@@ -133,4 +133,14 @@ fn a_decal_and_a_pre_emission_operator_read_as_source_2_runs_them() {
         }
     );
     assert!(stops, "{:?}", line.pre_emission);
+    let light = system(
+        &src,
+        &pak,
+        "particles/units/heroes/hero_nevermore/nevermore_shadowraze_h.vpcf",
+    );
+    let Renderer::DeferredLight(light) = &light.renderers[0].class else {
+        panic!("{:?}", light.renderers[0].class);
+    };
+    assert_eq!(light.alpha_scale, FloatInput::Literal(-4.0));
+    assert_eq!(light.start_falloff, 0.1);
 }
