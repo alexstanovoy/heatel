@@ -33,8 +33,8 @@ pub struct ExportedModel {
 pub struct ExportedClip {
     /// The animation's name in the model.
     pub name: String,
-    /// Seconds to its last keyframe: a clip that ends holding a pose stops where the pose
-    /// is reached.
+    /// Seconds to its last frame, `(frames - 1) / fps`: a clip that ends holding a pose holds
+    /// it to the end, as Dota plays it.
     pub duration: f32,
 }
 

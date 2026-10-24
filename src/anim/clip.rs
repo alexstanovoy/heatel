@@ -30,8 +30,8 @@ pub struct Clip {
 }
 
 /// A bone's keyframes in glTF's frame, linearly interpolated. A run of equal values keeps only
-/// its ends, so a channel stops at its last change: a clip that holds its pose (Pudge's hook
-/// throw) lasts until the last bone moves.
+/// its ends, the last frame's among them: a clip that ends holding its pose (a death's last
+/// frames, Pudge's hook throw) lasts its every frame, as Dota plays it.
 pub struct Track {
     /// Rotations as `[x, y, z, w]` quaternions.
     pub rotation: Keys<4>,
@@ -346,7 +346,9 @@ fn decode(
             writer.scale.keys.push(0.0, [1.0; 3]);
         }
     }
-    Ok(writers.into_iter().map(TrackWriter::finish).collect())
+    // The time of the last frame, which a run held to the end still reaches.
+    let end = frames.saturating_sub(1) as f32 / fps;
+    Ok(writers.into_iter().map(|w| w.finish(end)).collect())
 }
 
 /// A bone's local transform in glTF's frame: the decoded pose, moved by the root motion on a
@@ -461,11 +463,11 @@ struct TrackWriter {
 }
 
 impl TrackWriter {
-    fn finish(self) -> Track {
+    fn finish(self, end: f32) -> Track {
         Track {
-            rotation: self.rotation.keys,
-            translation: self.translation.keys,
-            scale: self.scale.keys,
+            rotation: self.rotation.finish(end),
+            translation: self.translation.finish(end),
+            scale: self.scale.finish(end),
         }
     }
 }
@@ -502,5 +504,13 @@ impl<const N: usize> KeyWriter<N> {
         self.keys.push(time, value);
         self.last = Some(value);
         Ok(())
+    }
+
+    /// The keys, with the end of a run that lasted to the last frame, at `end`.
+    fn finish(mut self, end: f32) -> Keys<N> {
+        if let Some(last) = self.last.filter(|_| self.skipped) {
+            self.keys.push(end, last);
+        }
+        self.keys
     }
 }

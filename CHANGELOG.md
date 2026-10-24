@@ -22,7 +22,8 @@ First release.
 - `model`, `vbib`, `vertices`, `meshopt`: models, their meshes (CTRL buffers, `VBIB` blocks,
   meshoptimizer and zstd compression), skeletons and skins.
 - `material`: `vmat_c` materials and their glTF form.
-- `anim`: embedded animation clips.
+- `anim`: embedded animation clips, each lasting to its last frame, `(frames - 1) / fps`, a pose
+  held to the end included.
 - `gltf`, `export`: models with materials, skeleton and clips as `.glb`, their images as PNG
   or KTX2.
 - `world`: entity lumps, placements, map lighting, and worlds exported as glTF.
