@@ -35,6 +35,7 @@ fuzz_target!(|data: &[u8]| {
             .collect(),
         meshes: Vec::new(),
         material_groups: Vec::new(),
+        attachments: Vec::new(),
     };
     for clip in &clips {
         let _ = clip.duration();

@@ -112,6 +112,7 @@ fn model(u: &mut Unstructured) -> Result<Model> {
             })
         })?,
         material_groups: Vec::new(),
+        attachments: Vec::new(),
     })
 }
 
