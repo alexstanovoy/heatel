@@ -203,10 +203,38 @@ pub enum Operator {
         /// Orientation from the velocity.
         orientation: bool,
     },
+    /// `C_OP_CPOffsetToPercentageBetweenCPs`: a control point set off from another by how far
+    /// a third has come from a start control point to an end one.
+    CpOffsetToPercentage(Box<CpOffset>),
     /// A class this crate does not read.
     Unsupported(String),
 }
 
+/// `C_OP_CPOffsetToPercentageBetweenCPs`' parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct CpOffset {
+    /// Where the way starts.
+    pub start: ControlPoint,
+    /// Where it ends.
+    pub end: ControlPoint,
+    /// What has come along it.
+    pub input: ControlPoint,
+    /// What the output is set off from.
+    pub origin: ControlPoint,
+    /// What is set.
+    pub output: ControlPoint,
+    /// The share of the way mapped to 0..1 (may run backwards).
+    pub input_range: [f32; 2],
+    /// The bias of that mapping (0.5 linear).
+    pub bias: f32,
+    /// The share is the distance from the start over the way's length, not the projection on it.
+    pub radial: bool,
+    /// The offset is in shares of the way's length.
+    pub scale_offset: bool,
+    /// The offset at a share of 1.
+    pub offset: [f32; 3],
+}
 /// `C_OP_PositionLock`'s parameters.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -358,15 +386,24 @@ impl Operator {
             "C_OP_SetControlPointsToParticle" if !obj.has("m_nSetParent") => {
                 Self::SetControlPointsToParticle(from_particles(obj)?)
             }
-            "C_OP_SetPerChildControlPoint" => Self::SetPerChildControlPoint {
-                group: obj.int_in("m_nChildGroupID", 0, -1, 1 << 16)? as i32,
-                control_point: obj.control_point("m_nFirstControlPoint", 0)?,
-                count: obj.int_clamped("m_nNumControlPoints", 1, 0, 64)? as i32,
-                first: FloatInput::read(obj, "m_nFirstSourcePoint", 0.0)?,
-                increment: FloatInput::read(obj, "m_nParticleIncrement", 1.0)?,
-                per_particle: obj.bool("m_bNumBasedOnParticleCount", false)?,
-                orientation: obj.bool("m_bSetOrientation", false)?,
-            },
+            "C_OP_SetPerChildControlPoint" => per_child(obj)?,
+            "C_OP_CPOffsetToPercentageBetweenCPs" => {
+                Self::CpOffsetToPercentage(Box::new(CpOffset {
+                    start: obj.control_point("m_nStartCP", 0)?,
+                    end: obj.control_point("m_nEndCP", 1)?,
+                    input: obj.control_point("m_nInputCP", 3)?,
+                    origin: obj.control_point("m_nOffsetCP", 2)?,
+                    output: obj.control_point("m_nOuputCP", 4)?,
+                    input_range: [
+                        obj.float("m_flInputMin", 0.0)?,
+                        obj.float("m_flInputMax", 1.0)?,
+                    ],
+                    bias: obj.float("m_flInputBias", 0.5)?,
+                    radial: obj.bool("m_bRadialCheck", true)?,
+                    scale_offset: obj.bool("m_bScaleOffset", false)?,
+                    offset: obj.vec3("m_vecOffset", [0.0; 3])?,
+                }))
+            }
             other => Self::Unsupported(other.to_owned()),
         })
     }
@@ -397,23 +434,7 @@ impl Operator {
                 time: obj.float("m_flFadeOutTime", 0.25)?,
                 field: obj.field("m_nFieldOutput", Field::ALPHA)?,
             },
-            "C_OP_FadeOut" => {
-                let (mut min, mut max) = (
-                    obj.float("m_flFadeOutTimeMin", 0.25)?,
-                    obj.float("m_flFadeOutTimeMax", 0.25)?,
-                );
-                // A random time from zero is an instant fade.
-                if min != max && min == 0.0 {
-                    (min, max) = (f32::EPSILON, f32::EPSILON);
-                }
-                Self::FadeOut {
-                    min,
-                    max,
-                    exponent: obj.float("m_flFadeOutTimeExp", 1.0)?,
-                    proportional: obj.bool("m_bProportional", true)?,
-                    ease: obj.bool("m_bEaseInAndOut", true)?,
-                }
-            }
+            "C_OP_FadeOut" => fade_out(obj)?,
             "C_OP_FadeAndKill" => fade_and_kill(obj)?,
             "C_OP_ColorInterpolate" => Self::ColorInterpolate {
                 fade: obj.color("m_ColorFade", [1.0; 3])?,
@@ -473,6 +494,36 @@ impl Operator {
             _ => return Ok(None),
         }))
     }
+}
+
+fn per_child(obj: &Obj<'_>) -> Result<Operator> {
+    Ok(Operator::SetPerChildControlPoint {
+        group: obj.int_in("m_nChildGroupID", 0, -1, 1 << 16)? as i32,
+        control_point: obj.control_point("m_nFirstControlPoint", 0)?,
+        count: obj.int_clamped("m_nNumControlPoints", 1, 0, 64)? as i32,
+        first: FloatInput::read(obj, "m_nFirstSourcePoint", 0.0)?,
+        increment: FloatInput::read(obj, "m_nParticleIncrement", 1.0)?,
+        per_particle: obj.bool("m_bNumBasedOnParticleCount", false)?,
+        orientation: obj.bool("m_bSetOrientation", false)?,
+    })
+}
+
+fn fade_out(obj: &Obj<'_>) -> Result<Operator> {
+    let (mut min, mut max) = (
+        obj.float("m_flFadeOutTimeMin", 0.25)?,
+        obj.float("m_flFadeOutTimeMax", 0.25)?,
+    );
+    // A random time from zero is an instant fade.
+    if min != max && min == 0.0 {
+        (min, max) = (f32::EPSILON, f32::EPSILON);
+    }
+    Ok(Operator::FadeOut {
+        min,
+        max,
+        exponent: obj.float("m_flFadeOutTimeExp", 1.0)?,
+        proportional: obj.bool("m_bProportional", true)?,
+        ease: obj.bool("m_bEaseInAndOut", true)?,
+    })
 }
 
 fn fade_and_kill(obj: &Obj<'_>) -> Result<Operator> {

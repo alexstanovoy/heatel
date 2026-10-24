@@ -264,34 +264,9 @@ impl Initializer {
             },
             "C_INIT_RingWave" => Self::RingWave(Box::new(ring(obj)?)),
             "C_INIT_RemapParticleCountToScalar" if !obj.has("m_nScaleControlPoint") => {
-                Self::RemapParticleCountToScalar {
-                    field: obj.field("m_nFieldOutput", Field::RADIUS)?,
-                    input: [obj.int("m_nInputMin", 0)?, obj.int("m_nInputMax", 10)?],
-                    output: [
-                        obj.float("m_flOutputMin", 0.0)?,
-                        obj.float("m_flOutputMax", 1.0)?,
-                    ],
-                    active_range: obj.bool("m_bActiveRange", false)?,
-                    invert: obj.bool("m_bInvert", false)?,
-                    wrap: obj.bool("m_bWrap", false)?,
-                    bias: obj.float("m_flRemapBias", 0.5)?,
-                    set_method: SetMethod::from_index(obj.choice(
-                        "m_nSetMethod",
-                        &SetMethod::NAMES,
-                        0,
-                    )?),
-                }
+                count_to_scalar(obj)?
             }
-            "C_INIT_AgeNoise" => Self::AgeNoise {
-                absolute: obj.bool("m_bAbsVal", false)?,
-                absolute_inverted: obj.bool("m_bAbsValInv", false)?,
-                offset: obj.float("m_flOffset", 0.0)?,
-                age_min: obj.float("m_flAgeMin", 0.0)?,
-                age_max: obj.float("m_flAgeMax", 1.0)?,
-                scale: obj.float("m_flNoiseScale", 1.0)?,
-                scale_location: obj.float("m_flNoiseScaleLoc", 1.0)?,
-                offset_location: obj.vec3("m_vecOffsetLoc", [0.0; 3])?,
-            },
+            "C_INIT_AgeNoise" => age_noise(obj)?,
             "C_INIT_InheritVelocity" => Self::InheritVelocity {
                 control_point: obj.control_point("m_nControlPointNumber", 0)?,
                 scale: obj.float("m_flVelocityScale", 1.0)?,
@@ -383,5 +358,34 @@ fn ring(obj: &Obj<'_>) -> Result<Ring> {
             FloatInput::read(obj, "m_flRoll", 0.0)?,
         ],
         xy_velocity_only: obj.bool("m_bXYVelocityOnly", true)?,
+    })
+}
+
+fn count_to_scalar(obj: &Obj<'_>) -> Result<Initializer> {
+    Ok(Initializer::RemapParticleCountToScalar {
+        field: obj.field("m_nFieldOutput", Field::RADIUS)?,
+        input: [obj.int("m_nInputMin", 0)?, obj.int("m_nInputMax", 10)?],
+        output: [
+            obj.float("m_flOutputMin", 0.0)?,
+            obj.float("m_flOutputMax", 1.0)?,
+        ],
+        active_range: obj.bool("m_bActiveRange", false)?,
+        invert: obj.bool("m_bInvert", false)?,
+        wrap: obj.bool("m_bWrap", false)?,
+        bias: obj.float("m_flRemapBias", 0.5)?,
+        set_method: SetMethod::from_index(obj.choice("m_nSetMethod", &SetMethod::NAMES, 0)?),
+    })
+}
+
+fn age_noise(obj: &Obj<'_>) -> Result<Initializer> {
+    Ok(Initializer::AgeNoise {
+        absolute: obj.bool("m_bAbsVal", false)?,
+        absolute_inverted: obj.bool("m_bAbsValInv", false)?,
+        offset: obj.float("m_flOffset", 0.0)?,
+        age_min: obj.float("m_flAgeMin", 0.0)?,
+        age_max: obj.float("m_flAgeMax", 1.0)?,
+        scale: obj.float("m_flNoiseScale", 1.0)?,
+        scale_location: obj.float("m_flNoiseScaleLoc", 1.0)?,
+        offset_location: obj.vec3("m_vecOffsetLoc", [0.0; 3])?,
     })
 }
