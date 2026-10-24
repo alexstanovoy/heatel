@@ -32,7 +32,14 @@ First release.
   format they are stored in, every value the file leaves out at the schema's default; `serde`
   feature for them. Pre-emission operators (`System::pre_emission`) and projected decals
   (`Renderer::Projected`, their materials by `System::materials`), refraction
-  (`Look::refract`) and deferred lights (`Renderer::DeferredLight`) included.
+  (`Look::refract`) and deferred lights (`Renderer::DeferredLight`) included. Constraints read
+  as typed functions (`System::constraints`: `Constraint`), with `C_OP_BasicMovement`'s
+  constraint passes; paths (`Path`, `SequentialPath`, `MaintainPath`), noise emitters and
+  forces (`NoiseEmitter`, `CreationNoise`, `CurlNoise`), boxes, epitrochoids, transform
+  remaps, model functions (`OnModel`, `LockToBone`) and model renderers (`Renderer::Models`,
+  their models by `System::models`) read, with the control point operators of a town portal
+  (`PreEmission::SetSingleControlPointPosition`, `ScalarExpressionToCp`, `DistanceBetweenCps`
+  and others).
 - `world`: entity lumps, placements, map lighting, and worlds exported as glTF.
 - `tooltips`, `shops`, `portraits`: Dota's item and ability tooltips, shop categories and
   portrait framings.

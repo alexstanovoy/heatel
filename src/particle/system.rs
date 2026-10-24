@@ -7,10 +7,12 @@ use crate::error::{Result, malformed};
 use crate::kv3::{Document, Value};
 use crate::resource::Resource;
 
+use super::constraint::Constraint;
 use super::emitter::Emitter;
 use super::format::format_number;
 use super::function::{Function, Timing};
 use super::initializer::Initializer;
+use super::models::MAX_MODELS;
 use super::operator::{Force, Operator};
 use super::pre_emission::PreEmission;
 use super::read::{MAX_FUNCTIONS, MAX_LAYERS, MAX_NAME, Obj, WHAT};
@@ -53,8 +55,8 @@ pub struct System {
     pub operators: Vec<Function<Operator>>,
     /// Force generators.
     pub forces: Vec<Function<Force>>,
-    /// Constraints, none of which this crate reads: their classes.
-    pub constraints: Vec<String>,
+    /// Constraints, which `C_OP_BasicMovement` runs after it moves the particles.
+    pub constraints: Vec<Function<Constraint>>,
     /// Renderers.
     pub renderers: Vec<Function<Renderer>>,
     /// Child systems.
@@ -134,18 +136,17 @@ impl System {
             constants: Constants::read(&root)?,
             group: root.int_in("m_nGroupID", 0, -1, 1 << 16)? as i32,
             pre_emission: functions(&root, "m_PreEmissionOperators", PreEmission::read)?,
-            emitters: functions(&root, "m_Emitters", Emitter::read)?,
+            emitters: functions(&root, "m_Emitters", |class, obj| {
+                Emitter::read(class, obj, behavior_version)
+            })?,
             initializers: functions(&root, "m_Initializers", |class, obj| {
-                Initializer::read(class, obj, format)
+                Initializer::read(class, obj, format, behavior_version)
             })?,
             operators: functions(&root, "m_Operators", Operator::read)?,
             forces: functions(&root, "m_ForceGenerators", |class, obj| {
                 Force::read(class, obj, behavior_version)
             })?,
-            constraints: functions(&root, "m_Constraints", |class, _| Ok(class.to_owned()))?
-                .into_iter()
-                .map(|f| f.class)
-                .collect(),
+            constraints: functions(&root, "m_Constraints", Constraint::read)?,
             renderers: functions(&root, "m_Renderers", |class, obj| {
                 Renderer::read(class, obj, format)
             })?,
@@ -182,19 +183,20 @@ impl System {
                 Renderer::DeferredLight(l) => {
                     l.texture.as_ref().is_some_and(|t| t.len() > MAX_NAME)
                 }
+                Renderer::Models(m) => {
+                    m.models.len() > MAX_MODELS
+                        || m.models.iter().any(|(path, _)| path.len() > MAX_NAME)
+                        || m.override_material
+                            .as_ref()
+                            .is_some_and(|o| o.len() > MAX_NAME)
+                }
                 _ => false,
             };
             if too_long {
                 return Err(malformed(WHAT, "too many materials or too long a path"));
             }
         }
-        for init in &self.initializers {
-            if let Initializer::SetHitboxToModel(hitbox) = &init.class
-                && hitbox.set.len() > MAX_NAME
-            {
-                return Err(malformed(WHAT, "a hitbox set's name is too long"));
-            }
-        }
+        self.validate_sets()?;
         if self.children.len() > MAX_CHILDREN
             || self.children.iter().any(|c| c.path.len() > MAX_PATH)
         {
@@ -207,6 +209,28 @@ impl System {
         }
         if !(self.max_time_step > 0.0 && self.max_time_step.is_finite()) {
             return Err(malformed(WHAT, "a time step that is not positive"));
+        }
+        Ok(())
+    }
+
+    /// Checks the hitbox sets its functions on a model name.
+    fn validate_sets(&self) -> Result<()> {
+        let sets = self
+            .initializers
+            .iter()
+            .filter_map(|init| match &init.class {
+                Initializer::SetHitboxToModel(hitbox) => Some(&hitbox.set),
+                Initializer::CreateOnModel(on_model) => Some(&on_model.set),
+                _ => None,
+            })
+            .chain(self.operators.iter().filter_map(|op| match &op.class {
+                Operator::LockToBone(lock) => Some(&lock.set),
+                _ => None,
+            }));
+        for set in sets {
+            if set.len() > MAX_NAME {
+                return Err(malformed(WHAT, "a hitbox set's name is too long"));
+            }
         }
         Ok(())
     }
@@ -233,6 +257,10 @@ impl System {
             Force::Unsupported(class) => Some(class.as_str()),
             _ => None,
         });
+        let constraints = self.constraints.iter().filter_map(|f| match &f.class {
+            Constraint::Unsupported(class) => Some(class.as_str()),
+            _ => None,
+        });
         let renderers = self.renderers.iter().filter_map(|f| match &f.class {
             Renderer::Unsupported(class) => Some(class.as_str()),
             _ => None,
@@ -242,9 +270,20 @@ impl System {
             .chain(initializers)
             .chain(operators)
             .chain(forces)
-            .chain(self.constraints.iter().map(String::as_str))
+            .chain(constraints)
             .chain(renderers)
             .collect()
+    }
+
+    /// The models its model renderers draw (`models/.../x.vmdl`).
+    pub fn models(&self) -> impl Iterator<Item = &str> {
+        self.renderers
+            .iter()
+            .filter_map(|r| match &r.class {
+                Renderer::Models(m) => Some(m.paths()),
+                _ => None,
+            })
+            .flatten()
     }
 
     /// The textures its renderers draw with (`materials/.../x.vtex`).

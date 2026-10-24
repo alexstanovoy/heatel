@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 
 use super::input::FloatInput;
+use super::noise::NoiseEmitter;
 use super::read::Obj;
 
 /// An emitter class.
@@ -31,12 +32,14 @@ pub enum Emitter {
         /// How long (0 forever).
         duration: FloatInput,
     },
+    /// `C_OP_NoiseEmitter`: a rate a second from noise over the system's age.
+    Noise(Box<NoiseEmitter>),
     /// A class this crate does not read.
     Unsupported(String),
 }
 
 impl Emitter {
-    pub(super) fn read(class: &str, obj: &Obj<'_>) -> Result<Self> {
+    pub(super) fn read(class: &str, obj: &Obj<'_>, behavior_version: i32) -> Result<Self> {
         Ok(match class {
             "C_OP_InstantaneousEmitter" if !obj.has("m_flInitFromKilledParentParticles") => {
                 Self::Instantaneous {
@@ -56,6 +59,9 @@ impl Emitter {
                     start_time: FloatInput::read(obj, "m_flStartTime", 0.0)?,
                     duration: FloatInput::read(obj, "m_flEmissionDuration", 0.0)?,
                 }
+            }
+            "C_OP_NoiseEmitter" => {
+                Self::Noise(Box::new(NoiseEmitter::read(obj, behavior_version)?))
             }
             other => Self::Unsupported(other.to_owned()),
         })

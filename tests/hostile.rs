@@ -430,6 +430,48 @@ fn a_particle_system_of_hostile_pre_emission_operators_or_materials_is_an_error(
     assert!(decal.materials().any(|m| m == "materials/d.vmat"));
 }
 
+/// The model renderers' lists and paths, the hitbox sets of the functions on a model and the
+/// constraints are bounded and checked like every other list and member.
+#[test]
+fn a_particle_system_of_hostile_models_or_constraints_is_an_error() {
+    let models = |count: usize, path: String| {
+        let entry = || K::Obj(vec![("m_model", K::Str(path.clone()))]);
+        operator(
+            "C_OP_RenderModels",
+            vec![("m_ModelList", K::Arr((0..count).map(|_| entry()).collect()))],
+        )
+    };
+    let renderers = |list: Vec<K>| particle_lists(vec![("m_Renderers", list)]);
+    assert!(renderers(vec![models(1000, "models/m.vmdl".to_owned())]).is_err());
+    assert!(renderers(vec![models(1, "m/".repeat(1000))]).is_err());
+    let on_model = |set: String| {
+        operator(
+            "C_INIT_CreateOnModel",
+            vec![("m_HitboxSetName", K::Str(set))],
+        )
+    };
+    let initializers = |list: Vec<K>| particle_lists(vec![("m_Initializers", list)]);
+    assert!(initializers(vec![on_model("s".repeat(1000))]).is_err());
+    let plane = |radius: K| operator("C_OP_PlanarConstraint", vec![("m_flRadiusScale", radius)]);
+    let constraints = |list: Vec<K>| particle_lists(vec![("m_Constraints", list)]);
+    assert!(constraints((0..1000).map(|_| plane(K::Float(1.0))).collect()).is_err());
+    assert!(constraints(vec![plane(K::Float(f64::NAN))]).is_err());
+    let fine = renderers(vec![models(2, "models/m.vmdl".to_owned())]).unwrap();
+    assert_eq!(fine.models().count(), 2);
+    assert!(
+        constraints(vec![plane(K::Float(1.0))])
+            .unwrap()
+            .unsupported_classes()
+            .is_empty()
+    );
+    assert!(
+        initializers(vec![on_model("default".to_owned())])
+            .unwrap()
+            .unsupported_classes()
+            .is_empty()
+    );
+}
+
 /// A package (VPK v1) of `files`, their bytes after the directory tree, and where each starts.
 fn package<'a>(files: &[(&'a str, Vec<u8>)]) -> (Vec<u8>, HashMap<u64, &'a str>) {
     let (mut tree, mut data, mut starts): (Vec<u8>, Vec<u8>, Vec<(u64, &str)>) =

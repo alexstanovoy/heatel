@@ -384,7 +384,7 @@ impl Bias {
 }
 
 impl Mapping {
-    fn read(input: &Obj<'_>) -> Result<Self> {
+    pub(super) fn read(input: &Obj<'_>) -> Result<Self> {
         let looped = input.str("m_nInputMode")? == Some("PF_INPUT_MODE_LOOPED");
         Ok(match input.choice("m_nMapType", &MAP_TYPES, 0)? {
             0 => Self::Direct,

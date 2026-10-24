@@ -1,28 +1,39 @@
+mod constraint;
 mod emitter;
 mod field;
 mod format;
 mod function;
 mod initializer;
 mod input;
+mod models;
+mod noise;
 mod operator;
+mod path;
 mod pre_emission;
 mod read;
 mod renderer;
 mod system;
 mod transform;
 
+pub use constraint::{Constraint, DistanceToPath, Planar, WorldTrace};
 pub use emitter::Emitter;
 pub use field::{Field, SetMethod};
 pub use function::{EndCap, Function, Timing};
 pub use initializer::{
-    DistanceToCp, Hitbox, Initializer, PlaceOnGround, Ring, Sphere, TraceMiss, Warp,
+    DistanceToCp, Epitrochoid, Hitbox, Initializer, PlaceOnGround, Ring, Sphere, TraceMiss,
+    TransformToVector, Warp, WithinBox,
 };
 pub use input::{Bias, Curve, FloatInput, Mapping, VectorInput};
+pub use models::{LockToBone, Models, OnModel};
+pub use noise::{CreationNoise, CurlNoise, DirectionNoise, NoiseEmitter};
 pub use operator::{
     ControlPointsFromParticles, CpOffset, DistanceToTransform, Force, GroundMovement, Operator,
-    Oscillate, PositionLock,
+    Oscillate, PercentageBetween, PositionLock,
 };
-pub use pre_emission::{ControlPointPositions, PreEmission};
+pub use path::{MaintainPath, Path, SequentialPath};
+pub use pre_emission::{
+    ControlPointPositions, DistanceBetweenCps, PreEmission, ScalarExpression, ScalarExpressionToCp,
+};
 pub use read::MAX_CONTROL_POINT;
 pub use renderer::{
     Blend, ColorBlend, DeferredLight, Look, Orientation, Projected, Renderer, Ropes, Sprites,

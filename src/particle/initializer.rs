@@ -7,6 +7,9 @@ use crate::error::{Result, malformed};
 
 use super::field::{Field, SetMethod};
 use super::input::{FloatInput, VectorInput};
+use super::models::OnModel;
+use super::noise::CreationNoise;
+use super::path::SequentialPath;
 use super::read::{MAX_CONTROL_POINT, MAX_NAME, Obj, WHAT};
 use super::transform::{ControlPoint, Transform};
 
@@ -212,8 +215,136 @@ pub enum Initializer {
     },
     /// `C_INIT_SetHitboxToModel`: a place on the model at a control point.
     SetHitboxToModel(Box<Hitbox>),
+    /// `C_INIT_CreateSequentialPath`: positions one after another along a path.
+    CreateSequentialPath(Box<SequentialPath>),
+    /// `C_INIT_CreateWithinBox`: a position in a box about a control point.
+    CreateWithinBox(Box<WithinBox>),
+    /// `C_INIT_CreateInEpitrochoid`: a position on an epitrochoid (the curve a point of a
+    /// circle rolling around another draws) by the particle's moment or number.
+    CreateInEpitrochoid(Box<Epitrochoid>),
+    /// `C_INIT_CreationNoise`: an attribute from noise at the particle's place and moment.
+    CreationNoise(Box<CreationNoise>),
+    /// `C_INIT_RandomSecondSequence`: a second sprite sheet sequence at random.
+    RandomSecondSequence {
+        /// The lowest.
+        min: i32,
+        /// The highest.
+        max: i32,
+    },
+    /// `C_INIT_RemapTransformToVector` (`C_INIT_RemapCPtoVector` before `vpcf46`): a vector
+    /// attribute from a transform's position, remapped per axis.
+    RemapTransformToVector(Box<TransformToVector>),
+    /// `C_INIT_NormalAlignToCP`: the normal along an axis of a transform.
+    NormalAlignToCp {
+        /// The transform.
+        transform: Transform,
+        /// Its axis: 0..2 X, Y, Z, 3..5 the same negated.
+        axis: u8,
+    },
+    /// `C_INIT_InheritFromParentParticles`: an attribute from one of the parent system's
+    /// particles.
+    InheritFromParentParticles {
+        /// The copy's scale.
+        scale: f32,
+        /// The attribute.
+        field: Field,
+        /// Parent particles between one particle and the next.
+        increment: i32,
+        /// A parent particle at random rather than in order.
+        random: bool,
+        /// The seed of the random choice (0 the system's).
+        random_seed: i32,
+        /// The parent particle's index and number are written (behaviour version 9 on).
+        write_parent: bool,
+    },
+    /// `C_INIT_RemapInitialDirectionToTransformToVector`
+    /// (`C_INIT_RemapInitialDirectionToCPToVector` before `vpcf47`): a vector attribute from
+    /// the direction from a transform to the particle, turned about an axis.
+    RemapInitialDirectionToTransformToVector {
+        /// The transform.
+        transform: Transform,
+        /// The attribute.
+        field: Field,
+        /// Times this.
+        scale: f32,
+        /// The turn, in degrees.
+        offset_rotation_degrees: f32,
+        /// The axis of the turn.
+        offset_axis: [f32; 3],
+        /// Of unit length.
+        normalize: bool,
+    },
+    /// `C_INIT_CreateOnModel`: a position in the hitboxes of the model a control point carries.
+    CreateOnModel(Box<OnModel>),
     /// A class this crate does not read.
     Unsupported(String),
+}
+
+/// `C_INIT_CreateWithinBox`' parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct WithinBox {
+    /// The low corner.
+    pub min: VectorInput,
+    /// The high corner.
+    pub max: VectorInput,
+    /// The control point it is about.
+    pub control_point: ControlPoint,
+    /// In the control point's frame.
+    pub local: bool,
+    /// Spread evenly (a low-discrepancy sequence keyed by the particle's number and this seed;
+    /// a negative seed is offset by the system's) rather than at random, if so.
+    pub even: Option<i32>,
+}
+
+/// `C_INIT_CreateInEpitrochoid`'s parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct Epitrochoid {
+    /// The two axes the curve lies in, 0..2 (none: that axis stays 0).
+    pub components: [Option<u8>; 2],
+    /// Its centre.
+    pub transform: Transform,
+    /// Radians of the curve per second of creation time (or per particle).
+    pub density: FloatInput,
+    /// The drawing point's distance from the rolling circle's centre.
+    pub offset: FloatInput,
+    /// The fixed circle's radius.
+    pub radius1: FloatInput,
+    /// The rolling circle's radius.
+    pub radius2: FloatInput,
+    /// By the particle's number rather than its creation time.
+    pub use_count: bool,
+    /// In the transform's frame.
+    pub local: bool,
+    /// Added to the position rather than set.
+    pub offset_existing: bool,
+}
+
+/// `C_INIT_RemapTransformToVector`'s parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct TransformToVector {
+    /// The attribute.
+    pub field: Field,
+    /// The positions mapped, per axis.
+    pub input: [[f32; 3]; 2],
+    /// To these values, clamped.
+    pub output: [[f32; 3]; 2],
+    /// The transform read.
+    pub transform: Transform,
+    /// A transform whose orientation turns the output, if any.
+    pub local: Option<Transform>,
+    /// Only particles created within this window of the system's age, if any.
+    pub window: Option<[f32; 2]>,
+    /// How it is written.
+    pub set_method: SetMethod,
+    /// Added to the attribute (and the previous position).
+    pub offset: bool,
+    /// As a velocity: times the step.
+    pub accelerate: bool,
+    /// A bias of the output (0.5 none).
+    pub bias: f32,
 }
 
 /// What a trace that does not reach the ground does (`ParticleTraceMissBehavior_t`).
@@ -393,7 +524,12 @@ pub struct Ring {
 }
 
 impl Initializer {
-    pub(super) fn read(class: &str, obj: &Obj<'_>, format: u32) -> Result<Self> {
+    pub(super) fn read(
+        class: &str,
+        obj: &Obj<'_>,
+        format: u32,
+        behavior_version: i32,
+    ) -> Result<Self> {
         Ok(match class {
             "C_INIT_InitFloat" => Self::InitFloat {
                 field: obj.field("m_nOutputField", Field::RADIUS)?,
@@ -447,12 +583,12 @@ impl Initializer {
                 control_point: obj.control_point("m_nControlPointNumber", 0)?,
                 scale: obj.float("m_flVelocityScale", 1.0)?,
             },
-            other => return Self::read_more(other, obj),
+            other => return Self::read_more(other, obj, behavior_version),
         })
     }
 
     /// The initializers of shadows, souls and the ground.
-    fn read_more(class: &str, obj: &Obj<'_>) -> Result<Self> {
+    fn read_more(class: &str, obj: &Obj<'_>, behavior_version: i32) -> Result<Self> {
         Ok(match class {
             "C_INIT_InitVec" => Self::InitVec {
                 field: obj.field("m_nOutputField", Field::COLOR)?,
@@ -484,9 +620,149 @@ impl Initializer {
                 sub_frame: obj.bool("m_bSubFrame", true)?,
             },
             "C_INIT_SetHitboxToModel" => Self::SetHitboxToModel(Box::new(hitbox(obj)?)),
+            other => return Self::read_shapes(other, obj, behavior_version),
+        })
+    }
+
+    /// The initializers of paths, boxes, curves and noise, the town portal's and the missiles'.
+    fn read_shapes(class: &str, obj: &Obj<'_>, behavior_version: i32) -> Result<Self> {
+        Ok(match class {
+            "C_INIT_CreateSequentialPath" => {
+                Self::CreateSequentialPath(Box::new(SequentialPath::read(obj)?))
+            }
+            "C_INIT_CreateWithinBox" => Self::CreateWithinBox(Box::new(within_box(obj)?)),
+            "C_INIT_CreateInEpitrochoid" => Self::CreateInEpitrochoid(Box::new(epitrochoid(obj)?)),
+            "C_INIT_CreationNoise" => Self::CreationNoise(Box::new(CreationNoise::read(obj)?)),
+            "C_INIT_RandomSecondSequence" => Self::RandomSecondSequence {
+                min: obj.int_in("m_nSequenceMin", 0, 0, 1 << 16)? as i32,
+                max: obj.int_in("m_nSequenceMax", 0, 0, 1 << 16)? as i32,
+            },
+            "C_INIT_RemapTransformToVector" | "C_INIT_RemapCPtoVector" => {
+                Self::RemapTransformToVector(Box::new(transform_to_vector(obj)?))
+            }
+            // Before `vpcf57` the transform was the control point `m_nControlPointNumber`.
+            "C_INIT_NormalAlignToCP" => Self::NormalAlignToCp {
+                transform: Transform::read_member(
+                    obj,
+                    "m_transformInput",
+                    "m_nControlPointNumber",
+                    true,
+                )?,
+                axis: obj.choice("m_nControlPointAxis", &AXES, 0)? as u8,
+            },
+            "C_INIT_InheritFromParentParticles" => Self::InheritFromParentParticles {
+                scale: obj.float("m_flScale", 1.0)?,
+                field: obj.field("m_nFieldOutput", Field::RADIUS)?,
+                increment: obj.int_in("m_nIncrement", 1, -(1 << 16), 1 << 16)? as i32,
+                random: obj.bool("m_bRandomDistribution", false)?,
+                random_seed: obj.int_in("m_nRandomSeed", 0, -(1 << 31), (1 << 31) - 1)? as i32,
+                write_parent: behavior_version >= 9,
+            },
+            // Before `vpcf47` the transform was the control point `m_nCP`.
+            "C_INIT_RemapInitialDirectionToTransformToVector"
+            | "C_INIT_RemapInitialDirectionToCPToVector" => {
+                Self::RemapInitialDirectionToTransformToVector {
+                    transform: Transform::read_member(obj, "m_TransformInput", "m_nCP", true)?,
+                    field: obj.field("m_nFieldOutput", Field::POSITION)?,
+                    scale: obj.float("m_flScale", 1.0)?,
+                    offset_rotation_degrees: obj.float("m_flOffsetRot", 0.0)?,
+                    offset_axis: obj.vec3("m_vecOffsetAxis", [0.0; 3])?,
+                    normalize: obj.bool("m_bNormalize", false)?,
+                }
+            }
+            "C_INIT_CreateOnModel" => match OnModel::read(obj)? {
+                Some(on_model) => Self::CreateOnModel(Box::new(on_model)),
+                None => Self::Unsupported(class.to_owned()),
+            },
             other => Self::Unsupported(other.to_owned()),
         })
     }
+}
+
+/// A control point's axes, in `ParticleControlPointAxis_t` order.
+const AXES: [&str; 6] = [
+    "PARTICLE_CP_AXIS_X",
+    "PARTICLE_CP_AXIS_Y",
+    "PARTICLE_CP_AXIS_Z",
+    "PARTICLE_CP_AXIS_NEGATIVE_X",
+    "PARTICLE_CP_AXIS_NEGATIVE_Y",
+    "PARTICLE_CP_AXIS_NEGATIVE_Z",
+];
+
+fn within_box(obj: &Obj<'_>) -> Result<WithinBox> {
+    let even = match obj.object("m_randomnessParameters")? {
+        Some(r) if r.bool("m_bDistributeEvenly", false)? => {
+            Some(r.int_in("m_nSeed", 0, -(1 << 31), (1 << 31) - 1)? as i32)
+        }
+        _ => None,
+    };
+    Ok(WithinBox {
+        min: VectorInput::read(obj, "m_vecMin", [0.0; 3])?,
+        max: VectorInput::read(obj, "m_vecMax", [0.0; 3])?,
+        control_point: obj.control_point("m_nControlPointNumber", 0)?,
+        local: obj.bool("m_bLocalSpace", false)?,
+        even,
+    })
+}
+
+fn epitrochoid(obj: &Obj<'_>) -> Result<Epitrochoid> {
+    let component = |key: &str, default: i64| -> Result<Option<u8>> {
+        Ok(u8::try_from(obj.int_clamped(key, default, -1, 2)?).ok())
+    };
+    Ok(Epitrochoid {
+        components: [
+            component("m_nComponent1", 0)?,
+            component("m_nComponent2", 1)?,
+        ],
+        // Before `vpcf55` the centre was the control point `m_nControlPointNumber`.
+        transform: Transform::read(obj, "m_nControlPointNumber", true)?,
+        density: FloatInput::read(obj, "m_flParticleDensity", 10.0)?,
+        offset: FloatInput::read(obj, "m_flOffset", 4.0)?,
+        radius1: FloatInput::read(obj, "m_flRadius1", 40.0)?,
+        radius2: FloatInput::read(obj, "m_flRadius2", 24.0)?,
+        use_count: obj.bool("m_bUseCount", false)?,
+        local: obj.bool("m_bUseLocalCoords", false)?,
+        offset_existing: obj.bool("m_bOffsetExistingPos", false)?,
+    })
+}
+
+fn transform_to_vector(obj: &Obj<'_>) -> Result<TransformToVector> {
+    // Before `vpcf46` the transform was the control point `m_nCPInput`, and a local frame the
+    // control point `m_nLocalSpaceCP` when set.
+    let local = if obj.has("m_LocalSpaceTransform") {
+        match Transform::read_member(obj, "m_LocalSpaceTransform", "", true)? {
+            Transform::Identity => None,
+            transform => Some(transform),
+        }
+    } else {
+        let cp = obj.int_in("m_nLocalSpaceCP", -1, -1, i64::from(MAX_CONTROL_POINT))?;
+        u8::try_from(cp)
+            .ok()
+            .and_then(ControlPoint::new)
+            .map(Transform::point)
+    };
+    let (start, end) = (
+        obj.float("m_flStartTime", -1.0)?,
+        obj.float("m_flEndTime", -1.0)?,
+    );
+    Ok(TransformToVector {
+        field: obj.field("m_nFieldOutput", Field::POSITION)?,
+        input: [
+            obj.vec3("m_vInputMin", [0.0; 3])?,
+            obj.vec3("m_vInputMax", [0.0; 3])?,
+        ],
+        output: [
+            obj.vec3("m_vOutputMin", [0.0; 3])?,
+            obj.vec3("m_vOutputMax", [0.0; 3])?,
+        ],
+        transform: Transform::read(obj, "m_nCPInput", true)?,
+        local,
+        window: (start != -1.0 && end != -1.0).then_some([start, end]),
+        set_method: SetMethod::from_index(obj.choice("m_nSetMethod", &SetMethod::NAMES, 0)?),
+        offset: obj.bool("m_bOffset", false)?,
+        accelerate: obj.bool("m_bAccelerate", false)?,
+        bias: obj.float("m_flRemapBias", 0.5)?,
+    })
 }
 
 fn ground(obj: &Obj<'_>) -> Result<PlaceOnGround> {

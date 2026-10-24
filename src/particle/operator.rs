@@ -8,6 +8,9 @@ use crate::error::Result;
 use super::field::{Field, SetMethod};
 use super::initializer::TraceMiss;
 use super::input::{FloatInput, VectorInput};
+use super::models::{LockToBone, model_control_point};
+use super::noise::CurlNoise;
+use super::path::{MaintainPath, Path};
 use super::read::{MAX_CONTROL_POINT, Obj};
 use super::transform::{ControlPoint, Transform};
 
@@ -22,6 +25,8 @@ pub enum Operator {
         gravity: VectorInput,
         /// The share of the speed lost each thirtieth of a second.
         drag: FloatInput,
+        /// How many times at most the system's constraints run after the move.
+        max_constraint_passes: u8,
     },
     /// `C_OP_Decay`: kills a particle past its lifetime.
     Decay {
@@ -304,8 +309,157 @@ pub enum Operator {
         /// That share.
         interpolation: FloatInput,
     },
+    /// `C_OP_LockToSavedSequentialPath`: particles moved as the point of the path they were
+    /// made at (saved by `C_INIT_CreateSequentialPath`) moves.
+    LockToSavedSequentialPath {
+        /// The path runs through every control point from the start to the end.
+        pairs: bool,
+        /// The path.
+        path: Path,
+    },
+    /// `C_OP_MaintainSequentialPath`: particles pulled to evenly spaced points of a path.
+    MaintainSequentialPath(Box<MaintainPath>),
+    /// `C_OP_MovementRotateParticleAroundAxis` (its transform the control point `m_nCP` before
+    /// `vpcf50`): particles turned about an axis through a transform.
+    MovementRotateParticleAroundAxis {
+        /// The axis.
+        axis: VectorInput,
+        /// Degrees a second.
+        rate: FloatInput,
+        /// Where the axis goes through.
+        transform: Transform,
+        /// The axis is in the transform's frame.
+        local: bool,
+    },
+    /// `C_OP_OscillateScalarSimple`: an attribute oscillates with the system's age.
+    OscillateScalarSimple {
+        /// The attribute.
+        field: Field,
+        /// The rate.
+        rate: f32,
+        /// The frequency.
+        frequency: f32,
+        /// The phase's multiplier.
+        multiplier: f32,
+        /// The phase's offset.
+        offset: f32,
+    },
+    /// `C_OP_PercentageBetweenTransforms` (`C_OP_PercentageBetweenCPs` before `vpcf49`): an
+    /// attribute from how far a particle has come from one transform to another.
+    PercentageBetweenTransforms(Box<PercentageBetween>),
+    /// `C_OP_SpinYaw`: the yaw turns at a rate.
+    SpinYaw {
+        /// The rate.
+        rate_degrees: i32,
+        /// The least rate.
+        min_rate_degrees: i32,
+        /// The share of the lifetime it slows to a stop over (0 never).
+        stop_time: f32,
+    },
+    /// `C_OP_RampScalarSplineSimple`: an attribute changes at a rate eased over a window.
+    RampScalarSplineSimple {
+        /// Per second.
+        rate: f32,
+        /// The window.
+        time: [f32; 2],
+        /// The attribute.
+        field: Field,
+        /// The rate rises to the window's middle and falls back.
+        ease_out: bool,
+    },
+    /// `C_OP_Noise`: an attribute from noise at the particle's position.
+    Noise {
+        /// The attribute; angles in degrees.
+        field: Field,
+        /// The output's low end.
+        min: FloatInput,
+        /// High end.
+        max: FloatInput,
+        /// Noise frequency in space.
+        scale: f32,
+        /// Noise frequency in time.
+        time_scale: f32,
+        /// Added per second rather than set.
+        additive: bool,
+    },
+    /// `C_OP_RadiusDecay`: kills a particle whose radius falls to a least one.
+    RadiusDecay {
+        /// The least radius.
+        min_radius: f32,
+    },
+    /// `C_OP_RemapCPVelocityToVector`: a vector attribute from a control point's velocity.
+    RemapCpVelocityToVector {
+        /// The control point.
+        control_point: ControlPoint,
+        /// The attribute.
+        field: Field,
+        /// Times this.
+        scale: f32,
+        /// Its direction only.
+        normalize: bool,
+    },
+    /// `C_OP_RemapVelocityToVector`: a vector attribute from the particle's velocity.
+    RemapVelocityToVector {
+        /// The attribute.
+        field: Field,
+        /// Times this.
+        scale: f32,
+        /// Its direction only.
+        normalize: bool,
+    },
+    /// `C_OP_RestartAfterDuration`: the system (or its children of a group) starts over
+    /// after a random duration.
+    RestartAfterDuration {
+        /// The duration's range.
+        duration: [f32; 2],
+        /// A control point component that scales the duration, if any.
+        control_point: Option<(ControlPoint, u8)>,
+        /// The children's group.
+        group: i32,
+        /// Only the children of the group start over.
+        only_children: bool,
+    },
+    /// `C_OP_RemapParticleCountOnScalarEndCap`: once the end cap begins, an attribute from
+    /// each particle's place in order.
+    RemapParticleCountOnScalarEndCap {
+        /// The attribute.
+        field: Field,
+        /// The places mapped.
+        input: [i32; 2],
+        /// To these values.
+        output: [f32; 2],
+        /// Counted from the last.
+        backwards: bool,
+        /// How it is written.
+        set_method: SetMethod,
+    },
+    /// `C_OP_LockToBone`: particles moved with the hitbox of the model a control point
+    /// carries.
+    LockToBone(Box<LockToBone>),
     /// A class this crate does not read.
     Unsupported(String),
+}
+
+/// `C_OP_PercentageBetweenTransforms`' parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct PercentageBetween {
+    /// The attribute.
+    pub field: Field,
+    /// The shares mapped.
+    pub input: [f32; 2],
+    /// To these values, clamped.
+    pub output: [f32; 2],
+    /// Where the way starts.
+    pub start: Transform,
+    /// Where it ends.
+    pub end: Transform,
+    /// How it is written.
+    pub set_method: SetMethod,
+    /// Only shares within the input.
+    pub active_range: bool,
+    /// The share is the distance from the start over the way's length, not the projection on it.
+    pub radial: bool,
 }
 
 /// `C_OP_DistanceToTransform`'s parameters.
@@ -490,6 +644,8 @@ pub enum Force {
         /// High corner.
         max: [f32; 3],
     },
+    /// `C_OP_CurlNoiseForce`: a push from noise at the particle's place.
+    CurlNoise(Box<CurlNoise>),
     /// `C_OP_TwistAroundAxis`: a push around an axis through a control point.
     TwistAroundAxis {
         /// The push.
@@ -509,17 +665,19 @@ pub enum Force {
 
 impl Operator {
     pub(super) fn read(class: &str, obj: &Obj<'_>) -> Result<Self> {
-        if let Some(op) = Self::read_life(class, obj)? {
-            return Ok(op);
-        }
-        if let Some(op) = Self::read_motion(class, obj)? {
-            return Ok(op);
-        }
-        if let Some(op) = Self::read_end(class, obj)? {
-            return Ok(op);
-        }
-        if let Some(op) = Self::read_follow(class, obj)? {
-            return Ok(op);
+        type Group = fn(&str, &Obj<'_>) -> Result<Option<Operator>>;
+        let groups: [Group; 6] = [
+            Self::read_life,
+            Self::read_motion,
+            Self::read_end,
+            Self::read_follow,
+            Self::read_paths,
+            Self::read_remaps,
+        ];
+        for group in groups {
+            if let Some(op) = group(class, obj)? {
+                return Ok(op);
+            }
         }
         Ok(match class {
             "C_OP_SetFloat" => Self::SetFloat {
@@ -558,21 +716,7 @@ impl Operator {
             }
             "C_OP_SetPerChildControlPoint" => per_child(obj)?,
             "C_OP_CPOffsetToPercentageBetweenCPs" => {
-                Self::CpOffsetToPercentage(Box::new(CpOffset {
-                    start: obj.control_point("m_nStartCP", 0)?,
-                    end: obj.control_point("m_nEndCP", 1)?,
-                    input: obj.control_point("m_nInputCP", 3)?,
-                    origin: obj.control_point("m_nOffsetCP", 2)?,
-                    output: obj.control_point("m_nOuputCP", 4)?,
-                    input_range: [
-                        obj.float("m_flInputMin", 0.0)?,
-                        obj.float("m_flInputMax", 1.0)?,
-                    ],
-                    bias: obj.float("m_flInputBias", 0.5)?,
-                    radial: obj.bool("m_bRadialCheck", true)?,
-                    scale_offset: obj.bool("m_bScaleOffset", false)?,
-                    offset: obj.vec3("m_vecOffset", [0.0; 3])?,
-                }))
+                Self::CpOffsetToPercentage(Box::new(cp_offset(obj)?))
             }
             other => Self::Unsupported(other.to_owned()),
         })
@@ -646,6 +790,7 @@ impl Operator {
             "C_OP_BasicMovement" => Self::BasicMovement {
                 gravity: VectorInput::read(obj, "m_Gravity", [0.0; 3])?,
                 drag: FloatInput::read(obj, "m_fDrag", 0.0)?,
+                max_constraint_passes: obj.int_clamped("m_nMaxConstraintPasses", 3, 0, 64)? as u8,
             },
             "C_OP_PositionLock" => Self::PositionLock(Box::new(position_lock(obj)?)),
             "C_OP_SpinUpdate" => Self::SpinUpdate,
@@ -661,6 +806,117 @@ impl Operator {
                 field: obj.field("m_nFieldOutput", Field::ROLL)?,
             },
             "C_OP_MaxVelocity" => max_velocity(obj)?,
+            "C_OP_MovementRotateParticleAroundAxis" => Self::MovementRotateParticleAroundAxis {
+                axis: VectorInput::read(obj, "m_vecRotAxis", [0.0, 0.0, 1.0])?,
+                rate: FloatInput::read(obj, "m_flRotRate", 180.0)?,
+                transform: Transform::read(obj, "m_nCP", true)?,
+                local: obj.bool("m_bLocalSpace", false)?,
+            },
+            "C_OP_SpinYaw" => Self::SpinYaw {
+                rate_degrees: obj.int_in("m_nSpinRateDegrees", 0, -(1 << 20), 1 << 20)? as i32,
+                min_rate_degrees: obj.int_in("m_nSpinRateMinDegrees", 0, -(1 << 20), 1 << 20)?
+                    as i32,
+                stop_time: obj.float("m_fSpinRateStopTime", 0.0)?,
+            },
+            "C_OP_OscillateScalarSimple" => Self::OscillateScalarSimple {
+                field: obj.field("m_nField", Field::ALPHA)?,
+                rate: obj.float("m_Rate", 0.0)?,
+                frequency: obj.float("m_Frequency", 1.0)?,
+                multiplier: obj.float("m_flOscMult", 2.0)?,
+                offset: obj.float("m_flOscAdd", 0.5)?,
+            },
+            _ => return Ok(None),
+        }))
+    }
+
+    /// The operators of paths and of a particle's place between control points.
+    fn read_paths(class: &str, obj: &Obj<'_>) -> Result<Option<Self>> {
+        Ok(Some(match class {
+            "C_OP_LockToSavedSequentialPath" => Self::LockToSavedSequentialPath {
+                pairs: obj.bool("m_bCPPairs", false)?,
+                path: Path::read(obj, "m_PathParams")?,
+            },
+            "C_OP_MaintainSequentialPath" => {
+                Self::MaintainSequentialPath(Box::new(MaintainPath::read(obj)?))
+            }
+            "C_OP_PercentageBetweenTransforms" | "C_OP_PercentageBetweenCPs" => {
+                Self::PercentageBetweenTransforms(Box::new(percentage_between(class, obj)?))
+            }
+            "C_OP_LockToBone" => match LockToBone::read(obj)? {
+                Some(lock) => Self::LockToBone(Box::new(lock)),
+                None => Self::Unsupported(class.to_owned()),
+            },
+            "C_OP_RestartAfterDuration" => {
+                let cp = obj.int_clamped("m_nCP", -1, -1, i64::from(MAX_CONTROL_POINT))?;
+                let field = obj.int_clamped("m_nCPField", 0, -1, 2)?;
+                Self::RestartAfterDuration {
+                    duration: [
+                        obj.float("m_flDurationMin", 0.0)?,
+                        obj.float("m_flDurationMax", 1.0)?,
+                    ],
+                    control_point: u8::try_from(cp)
+                        .ok()
+                        .and_then(ControlPoint::new)
+                        .zip(u8::try_from(field).ok()),
+                    group: obj.int_in("m_nChildGroupID", 0, -1, 1 << 16)? as i32,
+                    only_children: obj.bool("m_bOnlyChildren", false)?,
+                }
+            }
+            _ => return Ok(None),
+        }))
+    }
+
+    /// The operators that remap a velocity, a count or noise into an attribute.
+    fn read_remaps(class: &str, obj: &Obj<'_>) -> Result<Option<Self>> {
+        Ok(Some(match class {
+            "C_OP_RampScalarSplineSimple" => Self::RampScalarSplineSimple {
+                rate: obj.float("m_Rate", 0.0)?,
+                time: [
+                    obj.float("m_flStartTime", 0.0)?,
+                    obj.float("m_flEndTime", 1.0)?,
+                ],
+                field: obj.field("m_nField", Field::RADIUS)?,
+                ease_out: obj.bool("m_bEaseOut", false)?,
+            },
+            "C_OP_Noise" => Self::Noise {
+                field: obj.field("m_nFieldOutput", Field::RADIUS)?,
+                min: FloatInput::read(obj, "m_flOutputMin", 0.0)?,
+                max: FloatInput::read(obj, "m_flOutputMax", 1.0)?,
+                scale: obj.float("m_fl4NoiseScale", 0.1)?,
+                time_scale: obj.float("m_flNoiseAnimationTimeScale", 0.0)?,
+                additive: obj.bool("m_bAdditive", false)?,
+            },
+            "C_OP_RadiusDecay" => Self::RadiusDecay {
+                min_radius: obj.float("m_flMinRadius", 1.0)?,
+            },
+            "C_OP_RemapCPVelocityToVector" => Self::RemapCpVelocityToVector {
+                control_point: obj.control_point("m_nControlPoint", 0)?,
+                field: obj.field("m_nFieldOutput", Field::POSITION)?,
+                scale: obj.float("m_flScale", 1.0)?,
+                normalize: obj.bool("m_bNormalize", false)?,
+            },
+            "C_OP_RemapVelocityToVector" => Self::RemapVelocityToVector {
+                field: obj.field("m_nFieldOutput", Field::POSITION)?,
+                scale: obj.float("m_flScale", 1.0)?,
+                normalize: obj.bool("m_bNormalize", false)?,
+            },
+            "C_OP_RemapParticleCountOnScalarEndCap" => Self::RemapParticleCountOnScalarEndCap {
+                field: obj.field("m_nFieldOutput", Field::RADIUS)?,
+                input: [
+                    obj.int_clamped("m_nInputMin", 0, -(1 << 20), 1 << 20)? as i32,
+                    obj.int_clamped("m_nInputMax", 1, -(1 << 20), 1 << 20)? as i32,
+                ],
+                output: [
+                    obj.float("m_flOutputMin", 0.0)?,
+                    obj.float("m_flOutputMax", 1.0)?,
+                ],
+                backwards: obj.bool("m_bBackwards", false)?,
+                set_method: SetMethod::from_index(obj.choice(
+                    "m_nSetMethod",
+                    &SetMethod::NAMES,
+                    0,
+                )?),
+            },
             _ => return Ok(None),
         }))
     }
@@ -733,6 +989,24 @@ impl Operator {
             _ => return Ok(None),
         }))
     }
+}
+
+fn cp_offset(obj: &Obj<'_>) -> Result<CpOffset> {
+    Ok(CpOffset {
+        start: obj.control_point("m_nStartCP", 0)?,
+        end: obj.control_point("m_nEndCP", 1)?,
+        input: obj.control_point("m_nInputCP", 3)?,
+        origin: obj.control_point("m_nOffsetCP", 2)?,
+        output: obj.control_point("m_nOuputCP", 4)?,
+        input_range: [
+            obj.float("m_flInputMin", 0.0)?,
+            obj.float("m_flInputMax", 1.0)?,
+        ],
+        bias: obj.float("m_flInputBias", 0.5)?,
+        radial: obj.bool("m_bRadialCheck", true)?,
+        scale_offset: obj.bool("m_bScaleOffset", false)?,
+        offset: obj.vec3("m_vecOffset", [0.0; 3])?,
+    })
 }
 
 fn per_child(obj: &Obj<'_>) -> Result<Operator> {
@@ -854,6 +1128,36 @@ fn max_velocity(obj: &Obj<'_>) -> Result<Operator> {
     })
 }
 
+fn percentage_between(class: &str, obj: &Obj<'_>) -> Result<PercentageBetween> {
+    // Before `vpcf49` the ends were the control points `m_nStartCP` and `m_nEndCP` (1 by
+    // default).
+    let mut end = Transform::read_member(obj, "m_TransformEnd", "m_nEndCP", true)?;
+    if class == "C_OP_PercentageBetweenCPs" && !obj.has("m_nEndCP") {
+        end = Transform::point(ControlPoint::new(1).unwrap_or_default());
+    }
+    let alpha = matches!(
+        obj.field("m_nFieldOutput", Field::RADIUS)?,
+        Field::ALPHA | Field::ALPHA_ALTERNATE
+    );
+    let output = |key: &str, default: f32| -> Result<f32> {
+        let value = obj.float(key, default)?;
+        Ok(if alpha { value.clamp(0.0, 1.0) } else { value })
+    };
+    Ok(PercentageBetween {
+        field: obj.field("m_nFieldOutput", Field::RADIUS)?,
+        input: [
+            obj.float("m_flInputMin", 0.0)?,
+            obj.float("m_flInputMax", 1.0)?,
+        ],
+        output: [output("m_flOutputMin", 0.0)?, output("m_flOutputMax", 1.0)?],
+        start: Transform::read_member(obj, "m_TransformStart", "m_nStartCP", true)?,
+        end,
+        set_method: SetMethod::from_index(obj.choice("m_nSetMethod", &SetMethod::NAMES, 0)?),
+        active_range: obj.bool("m_bActiveRange", false)?,
+        radial: obj.bool("m_bRadialCheck", true)?,
+    })
+}
+
 fn distance_to_transform(obj: &Obj<'_>) -> Result<DistanceToTransform> {
     Ok(DistanceToTransform {
         field: obj.field("m_nFieldOutput", Field::RADIUS)?,
@@ -897,16 +1201,8 @@ fn ground_movement(obj: &Obj<'_>) -> Result<GroundMovement> {
 
 fn move_to_hitbox(obj: &Obj<'_>) -> Result<Operator> {
     // Before `vpcf57` the model was the control point `m_nControlPointNumber`.
-    let control_point = match obj.object("m_modelInput")? {
-        None => obj.control_point("m_nControlPointNumber", 0)?,
-        Some(model)
-            if model
-                .str("m_nType")?
-                .is_none_or(|t| t == "PM_TYPE_CONTROL_POINT") =>
-        {
-            model.control_point("m_nControlPoint", 0)?
-        }
-        Some(_) => return Ok(Operator::Unsupported("C_OP_MoveToHitbox".to_owned())),
+    let Some(control_point) = model_control_point(obj, "m_nControlPointNumber")? else {
+        return Ok(Operator::Unsupported("C_OP_MoveToHitbox".to_owned()));
     };
     let types = ["HITBOX_LERP_LIFETIME", "HITBOX_LERP_CONSTANT"];
     Ok(Operator::MoveToHitbox {
@@ -950,6 +1246,7 @@ impl Force {
                     component_scale: obj.vec3("m_vecComponentScale", [1.0; 3])?,
                 }
             }
+            "C_OP_CurlNoiseForce" => Self::CurlNoise(Box::new(CurlNoise::read(obj)?)),
             "C_OP_RandomForce" => Self::RandomForce {
                 min: obj.vec3("m_MinForce", [0.0; 3])?,
                 max: obj.vec3("m_MaxForce", [0.0; 3])?,

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Result, malformed};
 
 use super::input::{FloatInput, VectorInput};
+use super::models::Models;
 use super::read::{MAX_LAYERS, MAX_NAME, Obj, WHAT};
 
 /// A renderer class.
@@ -24,6 +25,14 @@ pub enum Renderer {
     /// `C_OP_RenderDeferredLight`: a light per particle, of its colour, its radius' reach and
     /// its alpha's intensity.
     DeferredLight(Box<DeferredLight>),
+    /// `C_OP_RenderModels`: a model per particle.
+    Models(Box<Models>),
+    /// `C_OP_RenderScreenVelocityRotate`: draws nothing; turns each particle's roll to the way
+    /// it moved on the screen over its last step, for the renderers after it.
+    ScreenVelocityRotate {
+        /// Added to the roll, in degrees.
+        forward_degrees: f32,
+    },
     /// A class this crate does not read.
     Unsupported(String),
 }
@@ -319,6 +328,10 @@ impl Renderer {
             })),
             "C_OP_RenderProjected" => Self::Projected(Box::new(projected(obj, format)?)),
             "C_OP_RenderDeferredLight" => Self::DeferredLight(Box::new(deferred_light(obj)?)),
+            "C_OP_RenderModels" => Self::Models(Box::new(Models::read(obj, format)?)),
+            "C_OP_RenderScreenVelocityRotate" => Self::ScreenVelocityRotate {
+                forward_degrees: obj.float("m_flForwardDegrees", -90.0)?,
+            },
             other => Self::Unsupported(other.to_owned()),
         })
     }
@@ -330,7 +343,10 @@ impl Renderer {
             Self::Trails(t) => Some(&t.look),
             Self::Ropes(r) => Some(&r.look),
             Self::Projected(p) => Some(&p.look),
-            Self::DeferredLight(_) | Self::Unsupported(_) => None,
+            Self::DeferredLight(_)
+            | Self::Models(_)
+            | Self::ScreenVelocityRotate { .. }
+            | Self::Unsupported(_) => None,
         }
     }
 }
