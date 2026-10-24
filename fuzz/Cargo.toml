@@ -69,6 +69,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "face"
+path = "fuzz_targets/face.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "vsnd"
 path = "fuzz_targets/vsnd.rs"
 test = false

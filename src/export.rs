@@ -76,6 +76,29 @@ pub struct ModelOptions<'a> {
     pub generator: &'a str,
 }
 
+/// Fills in the morph targets of the kept meshes that have a morph set, out of its atlas. A
+/// mesh of several vertex buffers keeps none: its morph grid is laid over one buffer's vertices.
+fn morph_targets(
+    src: &(impl Source + ?Sized),
+    packages: &[&Vpk],
+    model: &mut Model,
+    meshes: Option<&[&str]>,
+) -> Result<()> {
+    let kept = model
+        .meshes
+        .iter_mut()
+        .filter(|m| meshes.is_none_or(|keep| keep.contains(&m.name.as_str())));
+    for mesh in kept {
+        let (Some(set), [vertices]) = (&mesh.morph, mesh.vertices.as_slice()) else {
+            continue;
+        };
+        let atlas = Texture::parse(&read_from(src, packages, &format!("{}_c", set.atlas))?)?;
+        let size = (atlas.width() as usize, atlas.height() as usize);
+        mesh.targets = set.targets(&atlas.to_rgba8()?, size, vertices.len())?;
+    }
+    Ok(())
+}
+
 /// Converts the model at `path` (`models/.../x.vmdl_c`) from the first of `packages` that has
 /// it, with the materials it uses read from the same packages.
 ///
@@ -114,6 +137,7 @@ pub fn export_model_in_group(
     if let Some(group) = group {
         model.use_material_group(group)?;
     }
+    morph_targets(src, packages, &mut model, meshes)?;
     let clips = if skeleton {
         read_clips(&resource, anims)?
     } else {

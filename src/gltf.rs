@@ -1,6 +1,12 @@
 //! Writes a [`Model`] as binary glTF (`.glb`): one node per render mesh (`<model>.<mesh>`); with a skeleton, a root node named after the model
 //! holding the bones, the attachments they carry and one skin over all of them; textures as images next to the file.
 //!
+//! A face mesh's flexes are its morph targets (position and normal deltas), named in the mesh's
+//! `extras.targetNames`; how their weights follow the flex controllers is in `extras.flex`:
+//! `descs` (the mesh's flexes by name), `targets` (the flex of each morph target),
+//! `controllers` (`[name, min, max]`) and `rules` (`[flex, [[op, data?]...]]`, with ops `const`,
+//! `fetch1`, `fetch2`, `add`, `sub`, `mul`, `div`, `neg`, `max`, `min` as [`Op`](crate::face::Op)).
+//!
 //! The model's types are public, so the writer checks what it is given before writing: a model
 //! glTF cannot say (an index past its vertices, a bone parented after itself, a number that is
 //! not finite, attributes of unequal lengths) or one past 1 GiB is an error, never a
@@ -282,6 +288,7 @@ impl Builder {
     fn mesh_node(&mut self, mesh: &Mesh, options: &GltfOptions, skinned: bool) -> Result<usize> {
         let name = format!("{}.{}", options.name, mesh.name);
         let accessors: Vec<Json> = mesh.vertices.iter().map(|v| self.attributes(v)).collect();
+        let targets = self.targets(mesh);
         let mut primitives = Vec::new();
         for p in &mesh.primitives {
             let indices = self.indices(&p.indices);
@@ -289,16 +296,41 @@ impl Builder {
             if let Some(material) = self.material(&p.material, p.tint, options)? {
                 primitive["material"] = json!(material);
             }
+            if !targets.is_empty() {
+                primitive["targets"] = json!(targets);
+            }
             primitives.push(primitive);
         }
-        self.meshes
-            .push(json!({ "name": name, "primitives": primitives }));
+        let mut gltf_mesh = json!({ "name": name, "primitives": primitives });
+        if let (false, Some(set)) = (targets.is_empty(), &mesh.morph) {
+            gltf_mesh["extras"] = face_extras(mesh, &set.flex);
+        }
+        self.meshes.push(gltf_mesh);
         let mut node = json!({ "name": name, "mesh": self.meshes.len() - 1 });
         if skinned {
             node["skin"] = json!(0);
         }
         self.nodes.push(node);
         Ok(self.nodes.len() - 1)
+    }
+
+    /// The morph targets of a mesh's (one) vertex buffer: per target its position deltas and,
+    /// when the buffer has normals, its normal deltas.
+    fn targets(&mut self, mesh: &Mesh) -> Vec<Json> {
+        let normals = mesh.vertices.first().is_some_and(|v| v.normals.is_some());
+        let mut out = Vec::with_capacity(mesh.targets.len());
+        for target in &mesh.targets {
+            let position = self.floats_for(&target.positions, "VEC3", None);
+            let (min, max) = bounds(&target.positions);
+            self.accessors[position]["min"] = json!(min);
+            self.accessors[position]["max"] = json!(max);
+            let mut attributes = json!({ "POSITION": position });
+            if normals {
+                attributes["NORMAL"] = json!(self.floats_for(&target.normals, "VEC3", None));
+            }
+            out.push(attributes);
+        }
+        out
     }
 
     /// The clips, with the skeleton they animate.
@@ -404,6 +436,54 @@ impl Builder {
     }
 }
 
+/// A face's mesh extras: its targets' names (`targetNames`, as glTF readers name morph targets)
+/// and how their weights are worked out (`flex`): the flexes (`descs`), the flex each target is
+/// (`targets`), the controllers (`[name, min, max]`) and the rules (`[flex, [[op, data]...]]`).
+fn face_extras(mesh: &Mesh, flex: &crate::face::Flex) -> Json {
+    use crate::face::Op;
+    let names: Vec<&str> = mesh
+        .targets
+        .iter()
+        .map(|t| flex.descs.get(t.desc).map_or("", String::as_str))
+        .collect();
+    let rules: Vec<Json> = flex
+        .rules
+        .iter()
+        .map(|(flex, ops)| {
+            let ops: Vec<Json> = ops
+                .iter()
+                .map(|op| match *op {
+                    Op::Const(v) => json!(["const", v]),
+                    Op::Fetch1(i) => json!(["fetch1", i]),
+                    Op::Fetch2(i) => json!(["fetch2", i]),
+                    Op::Add => json!(["add"]),
+                    Op::Sub => json!(["sub"]),
+                    Op::Mul => json!(["mul"]),
+                    Op::Div => json!(["div"]),
+                    Op::Neg => json!(["neg"]),
+                    Op::Max => json!(["max"]),
+                    Op::Min => json!(["min"]),
+                })
+                .collect();
+            json!([flex, ops])
+        })
+        .collect();
+    let controllers: Vec<Json> = flex
+        .controllers
+        .iter()
+        .map(|c| json!([c.name, c.min, c.max]))
+        .collect();
+    json!({
+        "targetNames": names,
+        "flex": {
+            "descs": flex.descs,
+            "targets": mesh.targets.iter().map(|t| t.desc).collect::<Vec<_>>(),
+            "controllers": controllers,
+            "rules": rules,
+        },
+    })
+}
+
 fn bad(detail: impl Into<String>) -> crate::Error {
     malformed("glTF", detail)
 }
@@ -447,6 +527,7 @@ fn check(model: &Model, options: &GltfOptions) -> Result<()> {
         for v in &mesh.vertices {
             size += check_vertices(v, options.skeleton.then_some(model.bones.len()))?;
         }
+        size += check_targets(mesh)?;
         for (i, p) in mesh.primitives.iter().enumerate() {
             let count = mesh.vertices.get(p.vertices).map(Vertices::len);
             let count = count.ok_or_else(|| bad(format!("{}: draw call {i}", mesh.name)))?;
@@ -481,6 +562,22 @@ fn check(model: &Model, options: &GltfOptions) -> Result<()> {
         return Err(bad(format!("more than {MAX_GLB} bytes")));
     }
     Ok(())
+}
+
+/// The bytes a mesh's morph targets take, when each covers its (one) vertex buffer with finite
+/// deltas.
+fn check_targets(mesh: &Mesh) -> Result<usize> {
+    let n = mesh.vertices.first().map_or(0, Vertices::len);
+    let mut size = 0;
+    for target in &mesh.targets {
+        let fits =
+            mesh.vertices.len() == 1 && target.positions.len() == n && target.normals.len() == n;
+        if !fits || !finite(&target.positions) || !finite(&target.normals) {
+            return Err(bad(format!("{}: a morph target", mesh.name)));
+        }
+        size += n * 24 + 4 * JSON_ITEM;
+    }
+    Ok(size)
 }
 
 /// The bytes a vertex set takes, when its attributes are all as long as its positions and

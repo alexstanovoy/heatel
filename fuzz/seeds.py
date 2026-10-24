@@ -217,6 +217,8 @@ def formats(pak):
             if is_kv3(block) and len(block) <= MAX_KV3 and key not in kv3_seen:
                 kv3_seen.add(key)
                 write("kv3", f"{name}-{kind}", block)
+            if is_kv3(block) and len(block) <= MAX_KV3 and kind == "MRPH":
+                write("face", f"{name}-{kind}", block)
             if kind == "NTRO":
                 write("resource", f"ntro-{name}", data)
 

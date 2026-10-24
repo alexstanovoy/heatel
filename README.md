@@ -9,7 +9,8 @@ Reads Valve's Source 2 formats out of a local Dota 2 install and converts them t
 | KV3 blocks, NTRO data | [`kv3::Value`] | JSON (feature `serde`) |
 | scripts, localization (KV1 text) | [`keyvalues::Kv`], [`keyvalues::localization_table`] | |
 | `vtex_c` textures | [`Texture`](texture::Texture): every level, block formats as stored | PNG, KTX2 |
-| `vsnd_c` sounds | [`Sound`](sound::Sound) | the WAV or MP3 inside |
+| `vsnd_c` sounds | [`Sound`](sound::Sound), a voice line's [`Lipsync`](sound::Lipsync) (phonemes, baked morph curves) | the WAV or MP3 inside |
+| a mesh's `MRPH` morph set and `_vmorf.vtex` atlas, `phonemes.txt`, `vcd_c` scenes | [`MorphSet`](face::MorphSet) (flexes, controllers, rules), [`PhonemeTable`](face::PhonemeTable), [`Scene`](face::Scene) | glTF morph targets |
 | `vmdl_c` models, `vmat_c` materials, embedded animations | [`Model`](model::Model), [`Material`](material::Material), [`Clip`](anim::Clip) | `.glb` with PNG or KTX2 images |
 | `vpcf_c` particle systems | [`System`](particle::System): emitters, initializers, operators, forces, renderers, children | JSON (feature `serde`) |
 | `vwrld_c` worlds, `vents_c` entity lumps | [`EntityLump`](world::EntityLump), [`placements`](world::placements), [`lighting`](world::lighting) | `.gltf` + `.bin` |

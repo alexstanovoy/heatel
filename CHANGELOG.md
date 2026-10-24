@@ -19,7 +19,12 @@ First release.
   BC5 and BC7 decoding, sprite sheets (`Texture::sheet`: sequences and frames), mip generation,
   BC1/BC3/BC4/BC5 encoding (`encode` feature), PNG and KTX2 output, KTX2 block decoding
   (`ktx2_to_plain`).
-- `sound`: `vsnd_c` sounds as the WAV or MP3 file they hold.
+- `sound`: `vsnd_c` sounds as the WAV or MP3 file they hold; a voice line's lip sync
+  (`Lipsync`: its phonemes, emphasis and baked morph curves, in both the binary and the KV3
+  layout; `token`, Source 2's string token hash the curves are named by).
+- `face`: a mesh's morph set (`MorphSet`: flex deltas out of the `_vmorf` atlas, controllers,
+  flex rules), Valve's phoneme tables (`PhonemeTable`) and facial choreography scenes (`Scene`);
+  exported models carry face meshes' flexes as glTF morph targets, their rig in the mesh's extras.
 - `model`, `vbib`, `vertices`, `meshopt`: models, their meshes (CTRL buffers, `VBIB` blocks,
   meshoptimizer and zstd compression), skeletons, skins and attachments.
 - `material`: `vmat_c` materials and their glTF form.

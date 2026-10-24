@@ -3,6 +3,7 @@
 
 use crate::budget::Budget;
 use crate::error::{Result, malformed};
+use crate::face::{MorphSet, Target};
 use crate::kv3::{self, Value};
 use crate::resource::Resource;
 use crate::vbib::{self, Buffer};
@@ -61,6 +62,11 @@ pub struct Mesh {
     pub vertices: Vec<Vertices>,
     /// Its draw calls.
     pub primitives: Vec<Primitive>,
+    /// Its morph set, when it has one (a face).
+    pub morph: Option<MorphSet>,
+    /// The morph targets of its vertex buffer, out of the morph set's atlas (filled by the
+    /// export, which reads the atlas): the flexes that move a vertex.
+    pub targets: Vec<Target>,
 }
 
 /// One draw call: triangles over one of the mesh's vertex buffers with one material.
@@ -401,11 +407,21 @@ fn read_mesh(
             primitives.push(draw_call(call, &index_lists, &vertex_buffers, budget)?);
         }
     }
+    let atlas = embedded.get("morph_texture").and_then(Value::as_str);
+    let morph = match (block(&["m_nMorphBlock"]), atlas) {
+        (Some(set), Some(atlas)) => Some(MorphSet::read(
+            &kv3::decode(resource.bytes(set))?.root,
+            atlas,
+        )?),
+        _ => None,
+    };
     Ok((
         Mesh {
             name,
             vertices,
             primitives,
+            morph,
+            targets: Vec::new(),
         },
         data,
     ))
@@ -512,6 +528,8 @@ mod tests {
                 name: "m".to_owned(),
                 vertices: Vec::new(),
                 primitives: vec![call("a.vmat"), call("kept.vmat")],
+                morph: None,
+                targets: Vec::new(),
             }],
             material_groups: vec![
                 ("default".to_owned(), vec!["a.vmat".to_owned()]),

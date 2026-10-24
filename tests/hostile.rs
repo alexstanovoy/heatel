@@ -258,6 +258,8 @@ fn triangle(indices: Vec<u32>, normals: usize) -> Mesh {
             material: String::new(),
             tint: None,
         }],
+        morph: None,
+        targets: Vec::new(),
     }
 }
 

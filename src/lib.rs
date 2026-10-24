@@ -9,6 +9,7 @@ mod budget;
 mod bytes;
 mod error;
 pub mod export;
+pub mod face;
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub mod fuzzing;

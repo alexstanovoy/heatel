@@ -9,6 +9,7 @@ use heatel::Model;
 use heatel::anim::{Clip, Keys, Track};
 use heatel::gltf::{GltfOptions, write_glb};
 use heatel::material::Material;
+use heatel::face::Target;
 use heatel::model::{Bone, Mesh, Primitive};
 use heatel::vertices::{Attribute, Skin, Vertices};
 use libfuzzer_sys::arbitrary::{Arbitrary, Result, Unstructured};
@@ -107,6 +108,14 @@ fn model(u: &mut Unstructured) -> Result<Model> {
                         indices: list(u, 48, |u| Ok(u32::from(u8::arbitrary(u)?)))?,
                         material: String::arbitrary(u)?,
                         tint: Option::<[f32; 4]>::arbitrary(u)?,
+                    })
+                })?,
+                morph: None,
+                targets: list(u, 2, |u| {
+                    Ok(Target {
+                        desc: index(u)?,
+                        positions: list(u, 8, |u| <[f32; 3]>::arbitrary(u))?,
+                        normals: list(u, 8, |u| <[f32; 3]>::arbitrary(u))?,
                     })
                 })?,
             })
