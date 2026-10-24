@@ -12,7 +12,8 @@ use super::format::format_number;
 use super::function::{Function, Timing};
 use super::initializer::Initializer;
 use super::operator::{Force, Operator};
-use super::read::{MAX_FUNCTIONS, Obj, WHAT};
+use super::pre_emission::PreEmission;
+use super::read::{MAX_FUNCTIONS, MAX_LAYERS, MAX_NAME, Obj, WHAT};
 use super::renderer::Renderer;
 
 /// Most particles a system holds at once, whatever its definition asks for.
@@ -42,6 +43,8 @@ pub struct System {
     pub constants: Constants,
     /// The children's group, which their parent's functions address.
     pub group: i32,
+    /// Pre-emission operators.
+    pub pre_emission: Vec<Function<PreEmission>>,
     /// Emitters.
     pub emitters: Vec<Function<Emitter>>,
     /// Initializers.
@@ -109,11 +112,12 @@ impl System {
         {
             return Err(malformed(WHAT, "not a particle system definition"));
         }
+        let behavior_version = root.int_in("m_nBehaviorVersion", 0, 0, 1 << 16)? as i32;
         let max_particles = root
             .int("m_nMaxParticles", 1000)?
             .clamp(1, i64::from(MAX_PARTICLES)) as u32;
         let system = Self {
-            behavior_version: root.int_in("m_nBehaviorVersion", 0, 0, 1 << 16)? as i32,
+            behavior_version,
             first_multiple_override: root.int_in(
                 "m_nFirstMultipleOverride_BackwardCompat",
                 -1,
@@ -129,17 +133,22 @@ impl System {
                 .unwrap_or(0.1),
             constants: Constants::read(&root)?,
             group: root.int_in("m_nGroupID", 0, -1, 1 << 16)? as i32,
+            pre_emission: functions(&root, "m_PreEmissionOperators", PreEmission::read)?,
             emitters: functions(&root, "m_Emitters", Emitter::read)?,
             initializers: functions(&root, "m_Initializers", |class, obj| {
                 Initializer::read(class, obj, format)
             })?,
             operators: functions(&root, "m_Operators", Operator::read)?,
-            forces: functions(&root, "m_ForceGenerators", Force::read)?,
+            forces: functions(&root, "m_ForceGenerators", |class, obj| {
+                Force::read(class, obj, behavior_version)
+            })?,
             constraints: functions(&root, "m_Constraints", |class, _| Ok(class.to_owned()))?
                 .into_iter()
                 .map(|f| f.class)
                 .collect(),
-            renderers: functions(&root, "m_Renderers", Renderer::read)?,
+            renderers: functions(&root, "m_Renderers", |class, obj| {
+                Renderer::read(class, obj, format)
+            })?,
             children: children(&root)?,
         };
         system.validate()?;
@@ -149,6 +158,7 @@ impl System {
     /// Checks the bounds the reader keeps, for a system read back from elsewhere (a cache).
     pub fn validate(&self) -> Result<()> {
         let lists = [
+            ("pre-emission operators", self.pre_emission.len()),
             ("emitters", self.emitters.len()),
             ("initializers", self.initializers.len()),
             ("operators", self.operators.len()),
@@ -162,6 +172,24 @@ impl System {
                     WHAT,
                     format!("{len} {what}, more than {MAX_FUNCTIONS}"),
                 ));
+            }
+        }
+        for renderer in &self.renderers {
+            if let Renderer::Projected(p) = &renderer.class
+                && (p.materials.len() > MAX_LAYERS
+                    || p.materials.iter().any(|m| m.len() > MAX_NAME))
+            {
+                return Err(malformed(
+                    WHAT,
+                    "too many projected materials or too long a path",
+                ));
+            }
+        }
+        for init in &self.initializers {
+            if let Initializer::SetHitboxToModel(hitbox) = &init.class
+                && hitbox.set.len() > MAX_NAME
+            {
+                return Err(malformed(WHAT, "a hitbox set's name is too long"));
             }
         }
         if self.children.len() > MAX_CHILDREN
@@ -182,6 +210,10 @@ impl System {
 
     /// The classes of its functions and renderers this crate does not read, in file order.
     pub fn unsupported_classes(&self) -> Vec<&str> {
+        let pre_emission = self.pre_emission.iter().filter_map(|f| match &f.class {
+            PreEmission::Unsupported(class) => Some(class.as_str()),
+            _ => None,
+        });
         let emitters = self.emitters.iter().filter_map(|f| match &f.class {
             Emitter::Unsupported(class) => Some(class.as_str()),
             _ => None,
@@ -202,7 +234,8 @@ impl System {
             Renderer::Unsupported(class) => Some(class.as_str()),
             _ => None,
         });
-        emitters
+        pre_emission
+            .chain(emitters)
             .chain(initializers)
             .chain(operators)
             .chain(forces)
@@ -216,6 +249,19 @@ impl System {
         self.renderers
             .iter()
             .filter_map(|r| r.class.look()?.texture.as_deref())
+    }
+
+    /// The materials its projected renderers draw with (`materials/.../x.vmat`), whose
+    /// textures and blends are theirs.
+    pub fn materials(&self) -> impl Iterator<Item = &str> {
+        self.renderers
+            .iter()
+            .filter_map(|r| match &r.class {
+                Renderer::Projected(p) => Some(p.materials.iter().map(String::as_str)),
+                _ => None,
+            })
+            .flatten()
+            .filter(|m| !m.is_empty())
     }
 }
 

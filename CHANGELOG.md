@@ -30,7 +30,8 @@ First release.
 - `particle`: `vpcf_c` particle systems as typed definitions (emitters, initializers,
   operators, forces, renderers, children; inputs, curves and gradients), upgraded from the
   format they are stored in, every value the file leaves out at the schema's default; `serde`
-  feature for them.
+  feature for them. Pre-emission operators (`System::pre_emission`) and projected decals
+  (`Renderer::Projected`, their materials by `System::materials`) included.
 - `world`: entity lumps, placements, map lighting, and worlds exported as glTF.
 - `tooltips`, `shops`, `portraits`: Dota's item and ability tooltips, shop categories and
   portrait framings.

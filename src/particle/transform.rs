@@ -82,7 +82,18 @@ impl Transform {
         legacy_key: &str,
         legacy_orientation: bool,
     ) -> HeatelResult<Self> {
-        let Some(value) = obj.get("m_TransformInput") else {
+        Self::read_member(obj, "m_TransformInput", legacy_key, legacy_orientation)
+    }
+
+    /// The input `key` of `obj`, or in its place the control point `legacy_key`, as
+    /// [`read`](Self::read) reads `m_TransformInput`.
+    pub(super) fn read_member(
+        obj: &Obj<'_>,
+        key: &str,
+        legacy_key: &str,
+        legacy_orientation: bool,
+    ) -> HeatelResult<Self> {
+        let Some(value) = obj.get(key) else {
             let control_point = obj.control_point(legacy_key, 0)?;
             return Ok(Self::ControlPoint {
                 control_point,
@@ -91,7 +102,7 @@ impl Transform {
             });
         };
         if !matches!(value, Value::Object(_)) {
-            return Ok(Self::point(obj.control_point("m_TransformInput", 0)?));
+            return Ok(Self::point(obj.control_point(key, 0)?));
         }
         let input = Obj::new(value)?;
         let kinds = [

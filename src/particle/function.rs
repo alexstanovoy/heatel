@@ -46,6 +46,8 @@ pub struct Timing {
     pub fade_out: [f32; 2],
     /// The period the fades repeat with (0 never).
     pub oscillate: f32,
+    /// Only in the system's first frame (a pre-emission operator's `m_bRunOnce`).
+    pub run_once: bool,
 }
 
 impl Timing {
@@ -73,12 +75,14 @@ impl Timing {
                 obj.float("m_flOpEndFadeOutTime", 0.0)?,
             ],
             oscillate: obj.float("m_flOpFadeOscillatePeriod", 0.0)?,
+            run_once: obj.bool("m_bRunOnce", false)?,
         })
     }
 
     /// Whether it runs at full strength in every phase at every age.
     pub fn is_always(&self) -> bool {
-        self.end_cap == EndCap::Always
+        !self.run_once
+            && self.end_cap == EndCap::Always
             && self.strength == FloatInput::Literal(1.0)
             && self.fade_in == [0.0; 2]
             && self.fade_out == [0.0; 2]

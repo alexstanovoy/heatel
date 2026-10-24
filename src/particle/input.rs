@@ -161,6 +161,17 @@ pub enum VectorInput {
         /// High corner.
         max: [f32; 3],
     },
+    /// A uniform draw per component added to a vector attribute of the particle times a scale.
+    RandomOffset {
+        /// Low corner of the draw.
+        min: [f32; 3],
+        /// High corner.
+        max: [f32; 3],
+        /// The attribute.
+        field: Field,
+        /// Its scale.
+        scale: [f32; 3],
+    },
     /// A vector attribute of the particle times a scale.
     ParticleVector {
         /// The attribute.
@@ -178,6 +189,13 @@ pub enum VectorInput {
         control_point: ControlPoint,
         /// Its scale.
         scale: [f32; 3],
+    },
+    /// One control point's position less another's.
+    ControlPointDelta {
+        /// The control point.
+        control_point: ControlPoint,
+        /// The one it is taken from.
+        delta: ControlPoint,
     },
     /// A float input lerped from `output[0]` to `output[1]` as it goes `input[0]..input[1]`.
     FloatInterp {
@@ -579,21 +597,18 @@ impl VectorInput {
 
     fn parse(input: &Obj<'_>) -> Result<Self> {
         let kind = input.str("m_nType")?.unwrap_or("PVEC_TYPE_LITERAL");
-        let interp = |input: &Obj<'_>| -> Result<(Box<FloatInput>, [f32; 2])> {
-            Ok((
-                Box::new(FloatInput::read(input, "m_FloatInterp", 0.0)?),
-                [
-                    input.float("m_flInterpInput0", 0.0)?,
-                    input.float("m_flInterpInput1", 1.0)?,
-                ],
-            ))
-        };
         Ok(match kind {
             "PVEC_TYPE_LITERAL" => Self::Literal(input.vec3("m_vLiteralValue", [0.0; 3])?),
             "PVEC_TYPE_LITERAL_COLOR" => Self::Literal(input.color("m_LiteralColor", [0.0; 3])?),
             "PVEC_TYPE_RANDOM_UNIFORM" => Self::Random {
                 min: input.vec3("m_vRandomMin", [0.0; 3])?,
                 max: input.vec3("m_vRandomMax", [0.0; 3])?,
+            },
+            "PVEC_TYPE_RANDOM_UNIFORM_OFFSET" => Self::RandomOffset {
+                min: input.vec3("m_vRandomMin", [0.0; 3])?,
+                max: input.vec3("m_vRandomMax", [0.0; 3])?,
+                field: input.field("m_nVectorAttribute", Field::COLOR)?,
+                scale: input.vec3("m_vVectorAttributeScale", [1.0; 3])?,
             },
             "PVEC_TYPE_PARTICLE_VECTOR" | "PVEC_TYPE_PARTICLE_INITIAL_VECTOR" => {
                 Self::ParticleVector {
@@ -603,30 +618,17 @@ impl VectorInput {
                 }
             }
             "PVEC_TYPE_PARTICLE_VELOCITY" => Self::ParticleVelocity,
+            "PVEC_TYPE_CP_DELTA" => Self::ControlPointDelta {
+                control_point: input.control_point("m_nControlPoint", 0)?,
+                delta: input.control_point("m_nDeltaControlPoint", 0)?,
+            },
             "PVEC_TYPE_CP_VALUE" => Self::ControlPointValue {
                 control_point: input.control_point("m_nControlPoint", 0)?,
                 scale: input.vec3("m_vCPValueScale", [1.0; 3])?,
             },
-            "PVEC_TYPE_FLOAT_INTERP_CLAMPED" | "PVEC_TYPE_FLOAT_INTERP_OPEN" => {
-                let (float, range) = interp(input)?;
-                Self::FloatInterp {
-                    input: float,
-                    range,
-                    output: [
-                        input.vec3("m_vInterpOutput0", [0.0; 3])?,
-                        input.vec3("m_vInterpOutput1", [1.0; 3])?,
-                    ],
-                    clamped: kind == "PVEC_TYPE_FLOAT_INTERP_CLAMPED",
-                }
-            }
-            "PVEC_TYPE_FLOAT_INTERP_GRADIENT" => {
-                let (float, range) = interp(input)?;
-                Self::Gradient {
-                    input: float,
-                    range,
-                    stops: gradient(input)?,
-                }
-            }
+            "PVEC_TYPE_FLOAT_INTERP_CLAMPED"
+            | "PVEC_TYPE_FLOAT_INTERP_OPEN"
+            | "PVEC_TYPE_FLOAT_INTERP_GRADIENT" => Self::interpolated(input, kind)?,
             "PVEC_TYPE_FLOAT_COMPONENTS" => Self::Components(Box::new([
                 FloatInput::read(input, "m_FloatComponentX", 0.0)?,
                 FloatInput::read(input, "m_FloatComponentY", 0.0)?,
@@ -639,6 +641,31 @@ impl VectorInput {
         })
     }
 
+    /// A float input's interpolation, between two vectors or through a gradient.
+    fn interpolated(input: &Obj<'_>, kind: &str) -> Result<Self> {
+        let float = Box::new(FloatInput::read(input, "m_FloatInterp", 0.0)?);
+        let range = [
+            input.float("m_flInterpInput0", 0.0)?,
+            input.float("m_flInterpInput1", 1.0)?,
+        ];
+        if kind == "PVEC_TYPE_FLOAT_INTERP_GRADIENT" {
+            return Ok(Self::Gradient {
+                input: float,
+                range,
+                stops: gradient(input)?,
+            });
+        }
+        Ok(Self::FloatInterp {
+            input: float,
+            range,
+            output: [
+                input.vec3("m_vInterpOutput0", [0.0; 3])?,
+                input.vec3("m_vInterpOutput1", [1.0; 3])?,
+            ],
+            clamped: kind == "PVEC_TYPE_FLOAT_INTERP_CLAMPED",
+        })
+    }
+
     /// The same input with its output's Y negated.
     pub(super) fn negated_y(self) -> Self {
         let flip = |v: [f32; 3]| [v[0], -v[1], v[2]];
@@ -647,6 +674,17 @@ impl VectorInput {
             Self::Random { min, max } => Self::Random {
                 min: flip(min),
                 max: flip(max),
+            },
+            Self::RandomOffset {
+                min,
+                max,
+                field,
+                scale,
+            } => Self::RandomOffset {
+                min: flip(min),
+                max: flip(max),
+                field,
+                scale: flip(scale),
             },
             Self::ParticleVector {
                 field,

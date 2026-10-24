@@ -1,7 +1,7 @@
 //! Particle systems of a Dota 2 install: every one reads, and the definitions a missile is made
 //! of come out as Source 2 runs them, upgraded from the format they are stored in.
 
-use heatel::particle::{Emitter, FloatInput, Force, Operator, Renderer, System};
+use heatel::particle::{Emitter, FloatInput, Force, Operator, PreEmission, Renderer, System};
 use heatel::{DirSource, Resource, Vpk, find_game_dir};
 
 fn install() -> (DirSource, Vpk) {
@@ -97,4 +97,40 @@ fn a_missile_reads_as_source_2_runs_it() {
         Some("materials/particle/particle_glow_oval01.vtex")
     );
     assert_eq!(core.constants.radius, 72.0);
+}
+
+/// Shadow Fiend's Shadowraze and Requiem of Souls: the raze's scorch is a projected decal whose
+/// material the format before `vpcf59` names on its own, and the requiem's line stops emitting
+/// after the duration its control point 2 gives, before it emits.
+#[test]
+#[ignore = "needs a local Dota 2 install"]
+fn a_decal_and_a_pre_emission_operator_read_as_source_2_runs_them() {
+    let (src, pak) = install();
+    let ground = system(
+        &src,
+        &pak,
+        "particles/units/heroes/hero_nevermore/nevermore_shadowraze_ground.vpcf",
+    );
+    let Renderer::Projected(decal) = &ground.renderers[0].class else {
+        panic!("{:?}", ground.renderers[0].class);
+    };
+    assert_eq!(
+        decal.materials,
+        ["materials/particle/projected_groundcracks_02_modulate.vmat"]
+    );
+    assert!(decal.flip_horizontal);
+    let line = system(
+        &src,
+        &pak,
+        "particles/units/heroes/hero_nevermore/nevermore_requiemofsouls_line.vpcf",
+    );
+    let stops = matches!(
+        &line.pre_emission[0].class,
+        PreEmission::StopAfterDuration {
+            duration: FloatInput::ControlPointComponent { component: 1, .. },
+            play_end_cap: true,
+            ..
+        }
+    );
+    assert!(stops, "{:?}", line.pre_emission);
 }

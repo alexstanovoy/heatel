@@ -352,10 +352,17 @@ fn a_material_of_more_parameters_than_any_is_an_error() {
 
 /// A particle system definition whose operator list is `operators`, read from its KV3.
 fn particle_system(operators: Vec<K>) -> heatel::Result<System> {
-    let root = K::Obj(vec![
-        ("_class", s("CParticleSystemDefinition")),
-        ("m_Operators", K::Arr(operators)),
-    ]);
+    particle_lists(vec![("m_Operators", operators)])
+}
+
+/// A particle system definition of the function lists `lists`, read from its KV3.
+fn particle_lists(lists: Vec<(&'static str, Vec<K>)>) -> heatel::Result<System> {
+    let root = K::Obj(
+        [("_class", s("CParticleSystemDefinition"))]
+            .into_iter()
+            .chain(lists.into_iter().map(|(key, list)| (key, K::Arr(list))))
+            .collect(),
+    );
     System::from_document(&kv3::decode(&kv3_file(&root)).unwrap())
 }
 
@@ -398,6 +405,29 @@ fn a_particle_system_of_hostile_functions_is_an_error() {
         fine.operators[2].class,
         Operator::FadeOutSimple { time: 0.5, .. }
     ));
+}
+
+/// The pre-emission operators and the projected renderers' materials are bounded and checked
+/// like every other list and member.
+#[test]
+fn a_particle_system_of_hostile_pre_emission_operators_or_materials_is_an_error() {
+    let stop = |duration: K| operator("C_OP_StopAfterCPDuration", vec![("m_flDuration", duration)]);
+    let pre = |list: Vec<K>| particle_lists(vec![("m_PreEmissionOperators", list)]);
+    assert!(pre((0..1000).map(|_| stop(K::Float(1.0))).collect()).is_err());
+    assert!(pre(vec![stop(K::Float(f64::NAN))]).is_err());
+    let projected = |path: String| {
+        let material = K::Obj(vec![("m_hMaterial", K::Str(path))]);
+        operator(
+            "C_OP_RenderProjected",
+            vec![("m_vecProjectedMaterials", K::Arr(vec![material]))],
+        )
+    };
+    let renderers = |list: Vec<K>| particle_lists(vec![("m_Renderers", list)]);
+    assert!(renderers(vec![projected("m/".repeat(1000))]).is_err());
+    let fine = pre(vec![stop(K::Float(2.0))]).unwrap();
+    assert!(fine.unsupported_classes().is_empty());
+    let decal = renderers(vec![projected("materials/d.vmat".to_owned())]).unwrap();
+    assert!(decal.materials().any(|m| m == "materials/d.vmat"));
 }
 
 /// A package (VPK v1) of `files`, their bytes after the directory tree, and where each starts.

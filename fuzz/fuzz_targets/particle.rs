@@ -16,4 +16,5 @@ fuzz_target!(|data: &[u8]| {
     assert!(system.validate().is_ok());
     let _ = system.unsupported_classes();
     let _ = system.textures().count();
+    let _ = system.materials().count();
 });

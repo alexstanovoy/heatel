@@ -42,6 +42,10 @@ impl Field {
     pub const YAW: Self = Self(12);
     /// Second sprite sheet sequence.
     pub const SECOND_SEQUENCE_NUMBER: Self = Self(13);
+    /// The hitbox of the model a particle sits on.
+    pub const HITBOX_INDEX: Self = Self(14);
+    /// Where in that hitbox (vector); also a scratch vector of placing on the ground.
+    pub const HITBOX_OFFSET_POSITION: Self = Self(15);
     /// Alternate alpha.
     pub const ALPHA_ALTERNATE: Self = Self(16);
     /// Scratch vector.
@@ -60,8 +64,12 @@ impl Field {
     pub const SCRATCH_FLOAT_2: Self = Self(27);
     /// Second scratch vector.
     pub const SCRATCH_VECTOR_2: Self = Self(30);
+    /// The index of the parent's particle a particle was made from.
+    pub const PARENT_PARTICLE_INDEX: Self = Self(33);
     /// How much forces move the particle.
     pub const FORCE_SCALE: Self = Self(34);
+    /// The number of the parent's particle a particle was made from.
+    pub const PARENT_PARTICLE_ID: Self = Self(46);
     /// The highest number the table has.
     const LAST: u8 = 48;
 

@@ -3,11 +3,11 @@
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{Result, malformed};
 
 use super::field::{Field, SetMethod};
 use super::input::{FloatInput, VectorInput};
-use super::read::{MAX_CONTROL_POINT, Obj};
+use super::read::{MAX_CONTROL_POINT, MAX_NAME, Obj, WHAT};
 use super::transform::{ControlPoint, Transform};
 
 /// The format that turned the local speed of `C_INIT_CreateWithinSphereTransform` around its Y
@@ -156,8 +156,184 @@ pub enum Initializer {
         /// Times this.
         scale: f32,
     },
+    /// `C_INIT_InitVec`: a vector attribute from an input.
+    InitVec {
+        /// The attribute.
+        field: Field,
+        /// The value.
+        value: VectorInput,
+        /// How it is written.
+        set_method: SetMethod,
+        /// Normalized.
+        normalized: bool,
+        /// A position written to the previous position too.
+        write_previous: bool,
+    },
+    /// `C_INIT_PositionPlaceOnGround`: the position moved along a trace to the ground.
+    PositionPlaceOnGround(Box<PlaceOnGround>),
+    /// `C_INIT_PositionWarp`: the position scaled in a control point's frame.
+    PositionWarp(Box<Warp>),
+    /// `C_INIT_VelocityFromCP`: a velocity a control point gives.
+    VelocityFromCp {
+        /// The velocity.
+        velocity: VectorInput,
+        /// Whose orientation turns it.
+        transform: Transform,
+        /// Times this.
+        scale: f32,
+        /// Only its direction.
+        direction_only: bool,
+    },
+    /// `C_INIT_DistanceToCPInit`: an attribute from the distance to a control point.
+    DistanceToCp(Box<DistanceToCp>),
+    /// `C_INIT_Orient2DRelToCP`: an angle facing away from a control point on the ground
+    /// plane.
+    Orient2dRelToCp {
+        /// The control point.
+        control_point: ControlPoint,
+        /// The attribute.
+        field: Field,
+        /// Added to the angle, in degrees.
+        offset_degrees: f32,
+    },
+    /// `C_INIT_CreateFromParentParticles`: the position of one of the parent system's
+    /// particles.
+    CreateFromParentParticles {
+        /// The share of the parent's velocity kept.
+        velocity_scale: f32,
+        /// Parent particles between one particle and the next.
+        increment: f32,
+        /// A parent particle at random rather than in order.
+        random: bool,
+        /// The seed of the random choice (0 the system's).
+        random_seed: i32,
+        /// The position at the particle's moment within the step rather than at its end.
+        sub_frame: bool,
+    },
+    /// `C_INIT_SetHitboxToModel`: a place on the model at a control point.
+    SetHitboxToModel(Box<Hitbox>),
     /// A class this crate does not read.
     Unsupported(String),
+}
+
+/// What a trace that does not reach the ground does (`ParticleTraceMissBehavior_t`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum TraceMiss {
+    /// Nothing changes.
+    Nothing,
+    /// The particle dies.
+    Kill,
+    /// The particle goes to the trace's end.
+    #[default]
+    TraceEnd,
+}
+
+impl TraceMiss {
+    const NAMES: [&str; 3] = [
+        "PARTICLE_TRACE_MISS_BEHAVIOR_NONE",
+        "PARTICLE_TRACE_MISS_BEHAVIOR_KILL",
+        "PARTICLE_TRACE_MISS_BEHAVIOR_TRACE_END",
+    ];
+
+    pub(super) fn read(obj: &Obj<'_>) -> Result<Self> {
+        Ok([Self::Nothing, Self::Kill, Self::TraceEnd]
+            [obj.choice("m_nTraceMissBehavior", &Self::NAMES, 2)?])
+    }
+}
+
+/// `C_INIT_PositionPlaceOnGround`'s parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct PlaceOnGround {
+    /// How far above the ground it stays.
+    pub offset: FloatInput,
+    /// The longest trace.
+    pub max_trace_length: FloatInput,
+    /// Which way the trace goes.
+    pub direction: VectorInput,
+    /// What a trace that misses does.
+    pub miss: TraceMiss,
+    /// The attribute moved.
+    pub field: Field,
+    /// Only the previous position moves.
+    pub previous_only: bool,
+    /// The ground's normal is written.
+    pub set_normal: bool,
+    /// Where the normal goes.
+    pub normal: Field,
+    /// The radius times this is added to the offset.
+    pub offset_by_radius: f32,
+    /// A control point whose height above the start is kept as offset, if any.
+    pub preserve_offset: Option<ControlPoint>,
+}
+
+/// `C_INIT_PositionWarp`'s parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct Warp {
+    /// The scale at the warp's start, per axis.
+    pub min: VectorInput,
+    /// At its end.
+    pub max: VectorInput,
+    /// The frame's control point.
+    pub control_point: ControlPoint,
+    /// A control point whose position scales the warp, if any.
+    pub scale_control_point: Option<ControlPoint>,
+    /// The warp's component that scales the radius, if any.
+    pub radius_component: Option<u8>,
+    /// Over how long the warp goes from its start to its end (0: a random warp between them).
+    pub time: f32,
+    /// When it starts.
+    pub start_time: f32,
+    /// The previous position's warp is times this.
+    pub previous_scale: f32,
+    /// From end to start.
+    pub invert: bool,
+    /// The particles made so far count as the time.
+    pub use_count: bool,
+}
+
+/// `C_INIT_DistanceToCPInit`'s parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct DistanceToCp {
+    /// The attribute.
+    pub field: Field,
+    /// The distances mapped.
+    pub input: [FloatInput; 2],
+    /// To these values.
+    pub output: [FloatInput; 2],
+    /// The control point.
+    pub control_point: ControlPoint,
+    /// How it is written.
+    pub set_method: SetMethod,
+    /// Only distances within the input.
+    pub active_range: bool,
+    /// The distance's scale per axis.
+    pub distance_scale: [f32; 3],
+    /// A bias of the output (0.5 none).
+    pub bias: f32,
+}
+
+/// `C_INIT_SetHitboxToModel`'s parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct Hitbox {
+    /// The model's control point.
+    pub control_point: ControlPoint,
+    /// The hitbox set.
+    pub set: String,
+    /// One hitbox rather than any (-1 any).
+    pub desired: i32,
+    /// The hitboxes' scale.
+    pub scale: VectorInput,
+    /// A bias of the place within them.
+    pub direction_bias: [f32; 3],
+    /// The share of the hitbox's depth the place is within, from its surface.
+    pub shell_size: FloatInput,
+    /// The bones rather than the hitboxes.
+    pub use_bones: bool,
 }
 
 /// `C_INIT_CreateWithinSphereTransform`'s parameters.
@@ -271,9 +447,178 @@ impl Initializer {
                 control_point: obj.control_point("m_nControlPointNumber", 0)?,
                 scale: obj.float("m_flVelocityScale", 1.0)?,
             },
+            other => return Self::read_more(other, obj),
+        })
+    }
+
+    /// The initializers of shadows, souls and the ground.
+    fn read_more(class: &str, obj: &Obj<'_>) -> Result<Self> {
+        Ok(match class {
+            "C_INIT_InitVec" => Self::InitVec {
+                field: obj.field("m_nOutputField", Field::COLOR)?,
+                value: VectorInput::read(obj, "m_InputValue", [0.0; 3])?,
+                set_method: SetMethod::from_index(obj.choice(
+                    "m_nSetMethod",
+                    &SetMethod::NAMES,
+                    0,
+                )?),
+                normalized: obj.bool("m_bNormalizedOutput", false)?,
+                write_previous: obj.bool("m_bWritePreviousPosition", false)?,
+            },
+            "C_INIT_PositionPlaceOnGround" => Self::PositionPlaceOnGround(Box::new(ground(obj)?)),
+            "C_INIT_PositionWarp" => Self::PositionWarp(Box::new(warp(obj)?)),
+            "C_INIT_VelocityFromCP" => velocity_from_cp(obj)?,
+            "C_INIT_DistanceToCPInit" if !obj.bool("m_bLOS", false)? => {
+                Self::DistanceToCp(Box::new(distance_to_cp(obj)?))
+            }
+            "C_INIT_Orient2DRelToCP" => Self::Orient2dRelToCp {
+                control_point: obj.control_point("m_nCP", 0)?,
+                field: obj.field("m_nFieldOutput", Field::ROLL)?,
+                offset_degrees: obj.float("m_flRotOffset", 0.0)?,
+            },
+            "C_INIT_CreateFromParentParticles" => Self::CreateFromParentParticles {
+                velocity_scale: obj.float("m_flVelocityScale", 0.0)?,
+                increment: obj.float("m_flIncrement", 1.0)?.clamp(-1e4, 1e4),
+                random: obj.bool("m_bRandomDistribution", false)?,
+                random_seed: obj.int_in("m_nRandomSeed", 0, -(1 << 31), (1 << 31) - 1)? as i32,
+                sub_frame: obj.bool("m_bSubFrame", true)?,
+            },
+            "C_INIT_SetHitboxToModel" => Self::SetHitboxToModel(Box::new(hitbox(obj)?)),
             other => Self::Unsupported(other.to_owned()),
         })
     }
+}
+
+fn ground(obj: &Obj<'_>) -> Result<PlaceOnGround> {
+    let set_normal = obj.bool("m_bSetNormal", false)?;
+    let mut normal = obj.field("m_nGroundNormalAttribute", Field::NORMAL)?;
+    let mut direction = VectorInput::read(obj, "m_vecTraceDir", [0.0, 0.0, -1.0])?;
+    // Before `vpcf64` a trace along an attribute was a flag and that attribute.
+    if obj.bool("m_bTraceAlongNormal", false)? {
+        let along = obj.field("m_nTraceDirectionAttribute", Field::NORMAL)?;
+        if set_normal {
+            normal = along;
+        }
+        direction = VectorInput::ParticleVector {
+            field: along,
+            initial: false,
+            scale: [1.0; 3],
+        };
+    }
+    let preserve = obj.int_in("m_nPreserveOffsetCP", -1, -1, i64::from(MAX_CONTROL_POINT))?;
+    Ok(PlaceOnGround {
+        offset: FloatInput::read(obj, "m_flOffset", 0.0)?,
+        max_trace_length: FloatInput::read(obj, "m_flMaxTraceLength", 128.0)?,
+        direction,
+        miss: TraceMiss::read(obj)?,
+        field: obj.field("m_nAttribute", Field::POSITION)?,
+        previous_only: obj.bool("m_bSetPXYZOnly", false)?,
+        set_normal,
+        normal,
+        offset_by_radius: obj.float("m_flOffsetByRadiusFactor", 0.0)?,
+        preserve_offset: u8::try_from(preserve).ok().and_then(ControlPoint::new),
+    })
+}
+
+fn warp(obj: &Obj<'_>) -> Result<Warp> {
+    let scale = obj.int_in(
+        "m_nScaleControlPointNumber",
+        -1,
+        -1,
+        i64::from(MAX_CONTROL_POINT),
+    )?;
+    let radius = obj.int_clamped("m_nRadiusComponent", -1, -1, 2)?;
+    Ok(Warp {
+        min: VectorInput::read(obj, "m_vecWarpMin", [1.0; 3])?,
+        max: VectorInput::read(obj, "m_vecWarpMax", [1.0; 3])?,
+        control_point: obj.control_point("m_nControlPointNumber", 0)?,
+        scale_control_point: u8::try_from(scale).ok().and_then(ControlPoint::new),
+        radius_component: u8::try_from(radius).ok(),
+        time: obj.float("m_flWarpTime", 0.0)?,
+        start_time: obj.float("m_flWarpStartTime", 0.0)?,
+        previous_scale: obj.float("m_flPrevPosScale", 1.0)?,
+        invert: obj.bool("m_bInvertWarp", false)?,
+        use_count: obj.bool("m_bUseCount", false)?,
+    })
+}
+
+fn velocity_from_cp(obj: &Obj<'_>) -> Result<Initializer> {
+    // Before `vpcf57` the velocity was a control point's value, or its difference from a
+    // second one, in the frame of a third.
+    let (velocity, transform) = if obj.has("m_velocityInput") {
+        let transform = if obj.has("m_transformInput") {
+            Transform::read_member(obj, "m_transformInput", "m_nControlPointLocal", true)?
+        } else {
+            Transform::Identity
+        };
+        (
+            VectorInput::read(obj, "m_velocityInput", [0.0; 3])?,
+            transform,
+        )
+    } else {
+        let point = |key: &str, default: i64| -> Result<Option<ControlPoint>> {
+            let index = obj.int(key, default)?;
+            Ok(u8::try_from(index).ok().and_then(ControlPoint::new))
+        };
+        let velocity = match (
+            point("m_nControlPoint", 0)?,
+            point("m_nControlPointCompare", -1)?,
+        ) {
+            (Some(control_point), None) => VectorInput::ControlPointValue {
+                control_point,
+                scale: [1.0; 3],
+            },
+            (Some(control_point), Some(delta)) => VectorInput::ControlPointDelta {
+                control_point,
+                delta,
+            },
+            (None, _) => VectorInput::Literal([0.0; 3]),
+        };
+        let transform =
+            point("m_nControlPointLocal", -1)?.map_or(Transform::Identity, Transform::point);
+        (velocity, transform)
+    };
+    Ok(Initializer::VelocityFromCp {
+        velocity,
+        transform,
+        scale: obj.float("m_flVelocityScale", 1.0)?,
+        direction_only: obj.bool("m_bDirectionOnly", false)?,
+    })
+}
+
+fn distance_to_cp(obj: &Obj<'_>) -> Result<DistanceToCp> {
+    Ok(DistanceToCp {
+        field: obj.field("m_nFieldOutput", Field::RADIUS)?,
+        input: [
+            FloatInput::read(obj, "m_flInputMin", 0.0)?,
+            FloatInput::read(obj, "m_flInputMax", 128.0)?,
+        ],
+        output: [
+            FloatInput::read(obj, "m_flOutputMin", 0.0)?,
+            FloatInput::read(obj, "m_flOutputMax", 1.0)?,
+        ],
+        control_point: obj.control_point("m_nStartCP", 0)?,
+        set_method: SetMethod::from_index(obj.choice("m_nSetMethod", &SetMethod::NAMES, 0)?),
+        active_range: obj.bool("m_bActiveRange", false)?,
+        distance_scale: obj.vec3("m_vecDistanceScale", [1.0; 3])?,
+        bias: obj.float("m_flRemapBias", 0.5)?,
+    })
+}
+
+fn hitbox(obj: &Obj<'_>) -> Result<Hitbox> {
+    let set = obj.str("m_HitboxSetName")?.unwrap_or("default");
+    if set.len() > MAX_NAME {
+        return Err(malformed(WHAT, "a hitbox set's name is too long"));
+    }
+    Ok(Hitbox {
+        control_point: obj.control_point("m_nControlPointNumber", 0)?,
+        set: set.to_owned(),
+        desired: obj.int_in("m_nDesiredHitbox", -1, -1, 1 << 16)? as i32,
+        scale: VectorInput::read(obj, "m_vecHitBoxScale", [1.0; 3])?,
+        direction_bias: obj.vec3("m_vecDirectionBias", [0.0; 3])?,
+        shell_size: FloatInput::read(obj, "m_flShellSize", 1.0)?,
+        use_bones: obj.bool("m_bUseBones", false)?,
+    })
 }
 
 fn sphere(obj: &Obj<'_>, format: u32) -> Result<Sphere> {

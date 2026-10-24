@@ -13,6 +13,10 @@ pub(super) const WHAT: &str = "vpcf";
 pub const MAX_CONTROL_POINT: u8 = 63;
 /// Most functions in one of a system's lists; Dota's have up to ~30.
 pub(super) const MAX_FUNCTIONS: usize = 128;
+/// The longest name or path a function holds.
+pub(super) const MAX_NAME: usize = 256;
+/// Most texture layers or materials a renderer has.
+pub(super) const MAX_LAYERS: usize = 8;
 
 /// An object of a definition, read member by member.
 #[derive(Clone, Copy)]
@@ -137,28 +141,40 @@ impl<'a> Obj<'a> {
         Ok([number(key, &items[0])?, number(key, &items[1])?])
     }
 
-    /// A colour of 0..255 channels as 0..1, its alpha left out.
+    /// A colour of 0..255 channels as 0..1, its alpha (which some files leave null) left out.
     pub(super) fn color(&self, key: &str, default: [f32; 3]) -> Result<[f32; 3]> {
-        let Some(rgba) = self.color4(key)? else {
+        let Some(items) = self.color_items(key)? else {
             return Ok(default);
         };
-        Ok([rgba[0], rgba[1], rgba[2]])
+        let mut rgb = [0.0; 3];
+        for (out, item) in rgb.iter_mut().zip(items) {
+            *out = number(key, item)?.clamp(0.0, 255.0) / 255.0;
+        }
+        Ok(rgb)
     }
 
     /// A colour of 0..255 channels as 0..1, alpha 1 when it has none.
     pub(super) fn color4(&self, key: &str) -> Result<Option<[f32; 4]>> {
-        let Some(value) = self.get(key) else {
+        let Some(items) = self.color_items(key)? else {
             return Ok(None);
         };
-        let items = value
-            .as_array()
-            .filter(|a| (3..=4).contains(&a.len()))
-            .ok_or_else(|| malformed(WHAT, format!("{key} is not a colour")))?;
         let mut rgba = [1.0; 4];
         for (out, item) in rgba.iter_mut().zip(items) {
             *out = number(key, item)?.clamp(0.0, 255.0) / 255.0;
         }
         Ok(Some(rgba))
+    }
+
+    /// A colour's three or four channels.
+    fn color_items(&self, key: &str) -> Result<Option<&'a [Value]>> {
+        let Some(value) = self.get(key) else {
+            return Ok(None);
+        };
+        value
+            .as_array()
+            .filter(|a| (3..=4).contains(&a.len()))
+            .map(Some)
+            .ok_or_else(|| malformed(WHAT, format!("{key} is not a colour")))
     }
 
     /// A control point; -1, which some files use for none, reads as 0 as the game reads it.

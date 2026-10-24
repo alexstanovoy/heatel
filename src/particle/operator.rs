@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 
 use super::field::{Field, SetMethod};
+use super::initializer::TraceMiss;
 use super::input::{FloatInput, VectorInput};
-use super::read::Obj;
+use super::read::{MAX_CONTROL_POINT, Obj};
 use super::transform::{ControlPoint, Transform};
 
 /// An operator class.
@@ -114,6 +115,24 @@ pub enum Operator {
         /// The attribute.
         field: Field,
     },
+    /// `C_OP_RampScalarSpline`: an attribute changes at a random rate, biased over a random
+    /// window.
+    RampScalarSpline {
+        /// The rate's range.
+        rate: [f32; 2],
+        /// The window's start range.
+        start: [f32; 2],
+        /// The window's end range.
+        end: [f32; 2],
+        /// The bias over the window (0.5 linear).
+        bias: f32,
+        /// The window as shares of the lifetime.
+        proportional: bool,
+        /// The rate rises to the window's middle and falls back.
+        ease_out: bool,
+        /// The attribute.
+        field: Field,
+    },
     /// `C_OP_SpinUpdate`: the roll turns at the roll speed.
     SpinUpdate,
     /// `C_OP_Spin`: the roll turns at a rate.
@@ -206,8 +225,140 @@ pub enum Operator {
     /// `C_OP_CPOffsetToPercentageBetweenCPs`: a control point set off from another by how far
     /// a third has come from a start control point to an end one.
     CpOffsetToPercentage(Box<CpOffset>),
+    /// `C_OP_AlphaDecay`: kills a particle whose alphas fall to a least one.
+    AlphaDecay {
+        /// The least alpha.
+        min_alpha: f32,
+    },
+    /// `C_OP_DampenToCP`: particles slow down near a control point.
+    DampenToCp {
+        /// The control point.
+        control_point: ControlPoint,
+        /// The distance within which they slow.
+        range: f32,
+        /// The power of the falloff.
+        scale: f32,
+    },
+    /// `C_OP_LerpEndCapScalar`: an attribute moves to a value over a time from the end cap on.
+    LerpEndCapScalar {
+        /// The attribute.
+        field: Field,
+        /// The value.
+        output: f32,
+        /// The time.
+        lerp_time: f32,
+    },
+    /// `C_OP_Orient2DRelToCP`: an angle turns to face away from a control point on the ground
+    /// plane.
+    Orient2dRelToCp {
+        /// The control point.
+        control_point: ControlPoint,
+        /// The attribute.
+        field: Field,
+        /// Added to the angle, in degrees.
+        offset_degrees: f32,
+        /// How far it turns each step.
+        spin_strength: f32,
+    },
+    /// `C_OP_ClampScalar`: an attribute held within bounds.
+    ClampScalar {
+        /// The attribute.
+        field: Field,
+        /// The least value.
+        min: FloatInput,
+        /// The largest.
+        max: FloatInput,
+    },
+    /// `C_OP_DistanceToTransform` (`C_OP_DistanceToCP` before `vpcf49`): an attribute from the
+    /// distance to a transform.
+    DistanceToTransform(Box<DistanceToTransform>),
+    /// `C_OP_EndCapTimedDecay`: kills every particle a time into the end cap.
+    EndCapTimedDecay {
+        /// The time.
+        decay_time: FloatInput,
+    },
+    /// `C_OP_MovementPlaceOnGround`: particles kept on the ground below them.
+    MovementPlaceOnGround(Box<GroundMovement>),
+    /// `C_OP_InheritFromParentParticles`: an attribute copied from the parent system's
+    /// particles.
+    InheritFromParentParticles {
+        /// The copy's scale.
+        scale: f32,
+        /// The attribute.
+        field: Field,
+        /// Parent particles between one particle and the next.
+        increment: i32,
+        /// A parent particle at random rather than in order.
+        random: bool,
+    },
+    /// `C_OP_MoveToHitbox`: particles move to their place on the model at a control point.
+    MoveToHitbox {
+        /// The model's control point.
+        control_point: ControlPoint,
+        /// The window of the move, as ages in seconds (an end of 0 never ends).
+        lifetime: [f32; 2],
+        /// The share of the move the previous position follows.
+        previous_scale: f32,
+        /// A constant share each step (`interpolation`) rather than one growing over the window.
+        constant: bool,
+        /// That share.
+        interpolation: FloatInput,
+    },
     /// A class this crate does not read.
     Unsupported(String),
+}
+
+/// `C_OP_DistanceToTransform`'s parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct DistanceToTransform {
+    /// The attribute.
+    pub field: Field,
+    /// The distances mapped.
+    pub input: [FloatInput; 2],
+    /// To these values.
+    pub output: [FloatInput; 2],
+    /// Where the distance is from.
+    pub transform: Transform,
+    /// How it is written.
+    pub set_method: SetMethod,
+    /// Only distances within the input.
+    pub active_range: bool,
+    /// The value is added to the attribute.
+    pub additive: bool,
+    /// The distance's scale per axis.
+    pub component_scale: VectorInput,
+}
+
+/// `C_OP_MovementPlaceOnGround`'s parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct GroundMovement {
+    /// How far above the ground it stays.
+    pub offset: FloatInput,
+    /// The longest trace.
+    pub max_trace_length: f32,
+    /// How far a reference control point moves before the ground is traced again.
+    pub tolerance: f32,
+    /// Which way the trace goes.
+    pub direction: VectorInput,
+    /// How far behind the particle the trace starts.
+    pub trace_offset: f32,
+    /// Over how long a particle moves to the ground found (0 at once).
+    pub lerp_rate: f32,
+    /// Control points whose moves trace the ground again, if any.
+    pub references: [Option<ControlPoint>; 2],
+    /// A control point whose move over the tolerance is the share of the move to the ground,
+    /// if any.
+    pub lerp_control_point: Option<ControlPoint>,
+    /// What a trace that misses does.
+    pub miss: TraceMiss,
+    /// The ground's normal is written, and the offset is along it.
+    pub set_normal: bool,
+    /// The offset is times the radius.
+    pub scale_offset: bool,
+    /// A control point whose height below the particle's start is kept as offset, if any.
+    pub preserve_offset: Option<ControlPoint>,
 }
 
 /// `C_OP_CPOffsetToPercentageBetweenCPs`' parameters.
@@ -339,6 +490,19 @@ pub enum Force {
         /// High corner.
         max: [f32; 3],
     },
+    /// `C_OP_TwistAroundAxis`: a push around an axis through a control point.
+    TwistAroundAxis {
+        /// The push.
+        amount: f32,
+        /// The axis.
+        axis: [f32; 3],
+        /// The axis is in a control point's frame.
+        local: bool,
+        /// The control point the axis goes through.
+        control_point: ControlPoint,
+        /// The control point whose frame a local axis is in (0 below behaviour version 3).
+        axis_control_point: ControlPoint,
+    },
     /// A class this crate does not read.
     Unsupported(String),
 }
@@ -349,6 +513,12 @@ impl Operator {
             return Ok(op);
         }
         if let Some(op) = Self::read_motion(class, obj)? {
+            return Ok(op);
+        }
+        if let Some(op) = Self::read_end(class, obj)? {
+            return Ok(op);
+        }
+        if let Some(op) = Self::read_follow(class, obj)? {
             return Ok(op);
         }
         Ok(match class {
@@ -494,6 +664,75 @@ impl Operator {
             _ => return Ok(None),
         }))
     }
+
+    /// The operators of a particle's end and bounds: its decays, clamps and spline ramps.
+    fn read_end(class: &str, obj: &Obj<'_>) -> Result<Option<Self>> {
+        Ok(Some(match class {
+            "C_OP_RampScalarSpline" => Self::RampScalarSpline {
+                rate: [obj.float("m_RateMin", 0.0)?, obj.float("m_RateMax", 0.0)?],
+                start: [
+                    obj.float("m_flStartTime_min", 0.0)?,
+                    obj.float("m_flStartTime_max", 0.0)?,
+                ],
+                end: [
+                    obj.float("m_flEndTime_min", 1.0)?,
+                    obj.float("m_flEndTime_max", 1.0)?,
+                ],
+                bias: obj.float("m_flBias", 0.5)?,
+                proportional: obj.bool("m_bProportionalOp", true)?,
+                ease_out: obj.bool("m_bEaseOut", false)?,
+                field: obj.field("m_nField", Field::RADIUS)?,
+            },
+            "C_OP_AlphaDecay" => Self::AlphaDecay {
+                min_alpha: obj.float("m_flMinAlpha", 0.0)?.max(0.0),
+            },
+            "C_OP_LerpEndCapScalar" => Self::LerpEndCapScalar {
+                field: obj.field("m_nFieldOutput", Field::RADIUS)?,
+                output: obj.float("m_flOutput", 1.0)?,
+                lerp_time: obj.float("m_flLerpTime", 1.0)?,
+            },
+            "C_OP_ClampScalar" => Self::ClampScalar {
+                field: obj.field("m_nFieldOutput", Field::RADIUS)?,
+                min: FloatInput::read(obj, "m_flOutputMin", 0.0)?,
+                max: FloatInput::read(obj, "m_flOutputMax", 1.0)?,
+            },
+            "C_OP_EndCapTimedDecay" => Self::EndCapTimedDecay {
+                decay_time: FloatInput::read(obj, "m_flDecayTime", 0.0)?,
+            },
+            _ => return Ok(None),
+        }))
+    }
+
+    /// The operators that follow a control point, the ground, the parent or the body.
+    fn read_follow(class: &str, obj: &Obj<'_>) -> Result<Option<Self>> {
+        Ok(Some(match class {
+            "C_OP_DampenToCP" => Self::DampenToCp {
+                control_point: obj.control_point("m_nControlPointNumber", 0)?,
+                range: obj.float("m_flRange", 100.0)?,
+                scale: obj.float("m_flScale", 1.0)?,
+            },
+            "C_OP_Orient2DRelToCP" => Self::Orient2dRelToCp {
+                control_point: obj.control_point("m_nCP", 0)?,
+                field: obj.field("m_nFieldOutput", Field::ROLL)?,
+                offset_degrees: obj.float("m_flRotOffset", 0.0)?,
+                spin_strength: obj.float("m_flSpinStrength", 1.0)?,
+            },
+            "C_OP_DistanceToCP" | "C_OP_DistanceToTransform" if !obj.bool("m_bLOS", false)? => {
+                Self::DistanceToTransform(Box::new(distance_to_transform(obj)?))
+            }
+            "C_OP_MovementPlaceOnGround" => {
+                Self::MovementPlaceOnGround(Box::new(ground_movement(obj)?))
+            }
+            "C_OP_InheritFromParentParticles" => Self::InheritFromParentParticles {
+                scale: obj.float("m_flScale", 1.0)?,
+                field: obj.field("m_nFieldOutput", Field::RADIUS)?,
+                increment: obj.int_in("m_nIncrement", 1, -(1 << 16), 1 << 16)? as i32,
+                random: obj.bool("m_bRandomDistribution", false)?,
+            },
+            "C_OP_MoveToHitbox" => move_to_hitbox(obj)?,
+            _ => return Ok(None),
+        }))
+    }
 }
 
 fn per_child(obj: &Obj<'_>) -> Result<Operator> {
@@ -615,6 +854,73 @@ fn max_velocity(obj: &Obj<'_>) -> Result<Operator> {
     })
 }
 
+fn distance_to_transform(obj: &Obj<'_>) -> Result<DistanceToTransform> {
+    Ok(DistanceToTransform {
+        field: obj.field("m_nFieldOutput", Field::RADIUS)?,
+        input: [
+            FloatInput::read(obj, "m_flInputMin", 0.0)?,
+            FloatInput::read(obj, "m_flInputMax", 128.0)?,
+        ],
+        output: [
+            FloatInput::read(obj, "m_flOutputMin", 0.0)?,
+            FloatInput::read(obj, "m_flOutputMax", 1.0)?,
+        ],
+        // Before `vpcf49` the transform was the control point `m_nStartCP`.
+        transform: Transform::read_member(obj, "m_TransformStart", "m_nStartCP", true)?,
+        set_method: SetMethod::from_index(obj.choice("m_nSetMethod", &SetMethod::NAMES, 0)?),
+        active_range: obj.bool("m_bActiveRange", false)?,
+        additive: obj.bool("m_bAdditive", false)?,
+        component_scale: VectorInput::read(obj, "m_vecComponentScale", [1.0; 3])?,
+    })
+}
+
+fn ground_movement(obj: &Obj<'_>) -> Result<GroundMovement> {
+    let point = |key: &str| -> Result<Option<ControlPoint>> {
+        let index = obj.int_in(key, -1, -1, i64::from(MAX_CONTROL_POINT))?;
+        Ok(u8::try_from(index).ok().and_then(ControlPoint::new))
+    };
+    Ok(GroundMovement {
+        offset: FloatInput::read(obj, "m_flOffset", 0.0)?,
+        max_trace_length: obj.float("m_flMaxTraceLength", 128.0)?,
+        tolerance: obj.float("m_flTolerance", 32.0)?,
+        direction: VectorInput::read(obj, "m_vecTraceDir", [0.0, 0.0, -1.0])?,
+        trace_offset: obj.float("m_flTraceOffset", 64.0)?,
+        lerp_rate: obj.float("m_flLerpRate", 0.0)?,
+        references: [point("m_nRefCP1")?, point("m_nRefCP2")?],
+        lerp_control_point: point("m_nLerpCP")?,
+        miss: TraceMiss::read(obj)?,
+        set_normal: obj.bool("m_bSetNormal", false)?,
+        scale_offset: obj.bool("m_bScaleOffset", false)?,
+        preserve_offset: point("m_nPreserveOffsetCP")?,
+    })
+}
+
+fn move_to_hitbox(obj: &Obj<'_>) -> Result<Operator> {
+    // Before `vpcf57` the model was the control point `m_nControlPointNumber`.
+    let control_point = match obj.object("m_modelInput")? {
+        None => obj.control_point("m_nControlPointNumber", 0)?,
+        Some(model)
+            if model
+                .str("m_nType")?
+                .is_none_or(|t| t == "PM_TYPE_CONTROL_POINT") =>
+        {
+            model.control_point("m_nControlPoint", 0)?
+        }
+        Some(_) => return Ok(Operator::Unsupported("C_OP_MoveToHitbox".to_owned())),
+    };
+    let types = ["HITBOX_LERP_LIFETIME", "HITBOX_LERP_CONSTANT"];
+    Ok(Operator::MoveToHitbox {
+        control_point,
+        lifetime: [
+            obj.float("m_flLifeTimeLerpStart", 0.0)?,
+            obj.float("m_flLifeTimeLerpEnd", 1.0)?,
+        ],
+        previous_scale: obj.float("m_flPrevPosScale", 1.0)?,
+        constant: obj.choice("m_nLerpType", &types, 0)? == 1,
+        interpolation: FloatInput::read(obj, "m_flInterpolation", 1.0)?,
+    })
+}
+
 fn from_particles(obj: &Obj<'_>) -> Result<ControlPointsFromParticles> {
     let first_control_point = obj.control_point("m_nFirstControlPoint", 0)?;
     let count = obj.int_clamped("m_nNumControlPoints", 1, 0, 64)?;
@@ -629,7 +935,7 @@ fn from_particles(obj: &Obj<'_>) -> Result<ControlPointsFromParticles> {
 }
 
 impl Force {
-    pub(super) fn read(class: &str, obj: &Obj<'_>) -> Result<Self> {
+    pub(super) fn read(class: &str, obj: &Obj<'_>, behavior_version: i32) -> Result<Self> {
         Ok(match class {
             "C_OP_AttractToControlPoint" if !obj.bool("m_bApplyMinForce", false)? => {
                 Self::AttractToControlPoint {
@@ -648,6 +954,20 @@ impl Force {
                 min: obj.vec3("m_MinForce", [0.0; 3])?,
                 max: obj.vec3("m_MaxForce", [0.0; 3])?,
             },
+            "C_OP_TwistAroundAxis" => {
+                let control_point = obj.control_point("m_nControlPointNumber", 0)?;
+                Self::TwistAroundAxis {
+                    amount: obj.float("m_fForceAmount", 0.0)?,
+                    axis: obj.vec3("m_TwistAxis", [0.0, 0.0, 1.0])?,
+                    local: obj.bool("m_bLocalSpace", false)?,
+                    control_point,
+                    axis_control_point: if behavior_version >= 3 {
+                        control_point
+                    } else {
+                        ControlPoint::default()
+                    },
+                }
+            }
             other => Self::Unsupported(other.to_owned()),
         })
     }

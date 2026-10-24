@@ -3,13 +3,10 @@
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{Result, malformed};
 
 use super::input::{FloatInput, VectorInput};
-use super::read::Obj;
-
-/// Most texture layers a renderer has.
-const MAX_LAYERS: usize = 8;
+use super::read::{MAX_LAYERS, MAX_NAME, Obj, WHAT};
 
 /// A renderer class.
 #[derive(Clone, Debug, PartialEq)]
@@ -22,6 +19,8 @@ pub enum Renderer {
     Trails(Box<Trails>),
     /// `C_OP_RenderRopes`: a ribbon through the particles in order.
     Ropes(Box<Ropes>),
+    /// `C_OP_RenderProjected`: a decal per particle, projected onto what is below it.
+    Projected(Box<Projected>),
     /// A class this crate does not read.
     Unsupported(String),
 }
@@ -166,6 +165,29 @@ pub struct Ropes {
     pub texture_v_offset: FloatInput,
 }
 
+/// `C_OP_RenderProjected`'s parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct Projected {
+    /// The shared parameters; the materials, not these, name the texture and the blend.
+    pub look: Look,
+    /// The materials (`materials/.../x.vmat`) a particle picks one of.
+    pub materials: Vec<String>,
+    /// Which material, by index (clamped to the list).
+    pub material_selection: FloatInput,
+    /// The texture mirrored left to right.
+    pub flip_horizontal: bool,
+    /// The decal faces along the particle's normal rather than down.
+    pub orient_to_normal: bool,
+    /// How far below and above the particle the decal reaches, when set rather than its width.
+    pub projection_depth: Option<[f32; 2]>,
+}
+
+/// The material a projected renderer has when its file names none.
+const BASE_PROJECTED: &str = "materials/particle/base_projected.vmat";
+/// The format that put a projected renderer's material into a list (`vpcf59`).
+const PROJECTED_LIST: u32 = 59;
+
 const BLENDS: [&str; 7] = [
     "PARTICLE_OUTPUT_BLEND_MODE_ALPHA",
     "PARTICLE_OUTPUT_BLEND_MODE_ADD",
@@ -186,7 +208,7 @@ const ORIENTATIONS: [&str; 6] = [
 ];
 
 impl Renderer {
-    pub(super) fn read(class: &str, obj: &Obj<'_>) -> Result<Self> {
+    pub(super) fn read(class: &str, obj: &Obj<'_>, format: u32) -> Result<Self> {
         Ok(match class {
             "C_OP_RenderSprites" => Self::Sprites(Box::new(Sprites {
                 look: Look::read(obj)?,
@@ -216,6 +238,7 @@ impl Renderer {
                 texture_v_scroll_rate: FloatInput::read(obj, "m_flTextureVScrollRate", 0.0)?,
                 texture_v_offset: FloatInput::read(obj, "m_flTextureVOffset", 0.0)?,
             })),
+            "C_OP_RenderProjected" => Self::Projected(Box::new(projected(obj, format)?)),
             other => Self::Unsupported(other.to_owned()),
         })
     }
@@ -226,9 +249,43 @@ impl Renderer {
             Self::Sprites(s) => Some(&s.look),
             Self::Trails(t) => Some(&t.look),
             Self::Ropes(r) => Some(&r.look),
+            Self::Projected(p) => Some(&p.look),
             Self::Unsupported(_) => None,
         }
     }
+}
+
+fn projected(obj: &Obj<'_>, format: u32) -> Result<Projected> {
+    let mut materials = Vec::new();
+    for entry in obj.array("m_vecProjectedMaterials", MAX_LAYERS)? {
+        let path = Obj::new(entry)?.str("m_hMaterial")?.unwrap_or_default();
+        materials.push(path.to_owned());
+    }
+    // Before `vpcf59` the one material was a member of its own, appended to the list.
+    if format < PROJECTED_LIST && materials.len() < MAX_LAYERS {
+        let path = obj.str("m_hProjectedMaterial")?.unwrap_or(BASE_PROJECTED);
+        materials.push(path.to_owned());
+    }
+    if materials.iter().any(|m| m.len() > MAX_NAME) {
+        return Err(malformed(WHAT, "a projected material's path is too long"));
+    }
+    let depth = obj
+        .bool("m_bEnableProjectedDepthControls", false)?
+        .then(|| -> Result<[f32; 2]> {
+            Ok([
+                obj.float("m_flMinProjectionDepth", -128.0)?,
+                obj.float("m_flMaxProjectionDepth", 128.0)?,
+            ])
+        })
+        .transpose()?;
+    Ok(Projected {
+        look: Look::read(obj)?,
+        materials,
+        material_selection: FloatInput::read(obj, "m_flMaterialSelection", 0.0)?,
+        flip_horizontal: obj.bool("m_bFlipHorizontal", false)?,
+        orient_to_normal: obj.bool("m_bOrientToNormal", false)?,
+        projection_depth: depth,
+    })
 }
 
 impl Look {
