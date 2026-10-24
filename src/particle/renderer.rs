@@ -79,6 +79,144 @@ pub enum Orientation {
     Full,
 }
 
+/// How a texture layer gives a card its colour and alpha (Source's spritecard channel mix):
+/// `A` is what the layers before it give (white and opaque before the first), `B` this layer's
+/// texel; a luminance is Rec. 709's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
+pub enum TextureChannels {
+    /// Colour from `B`, alpha from `A`.
+    Rgb,
+    /// Colour and alpha from `B` (the usual).
+    Rgba,
+    /// Colour from `A`, alpha from `B`.
+    A,
+    /// Colour from `B`, alpha `A`'s times `B`'s.
+    RgbA,
+    /// `B`'s colour over `A`'s by `B`'s alpha, `A`'s alpha.
+    RgbAlphaMask,
+    /// `B`'s colour over `A`'s by `B`'s luminance, `A`'s alpha.
+    RgbRgbMask,
+    /// Colour from `B`, alpha `B`'s luminance.
+    RgbaRgbAlpha,
+    /// Colour from `A`, alpha `B`'s luminance.
+    ARgbAlpha,
+    /// Colour from `A`, alpha `A`'s times `B`'s luminance.
+    RgbARgbAlpha,
+    /// `B`'s red as colour, alpha from `A`.
+    R,
+    /// `B`'s green as colour, alpha from `A`.
+    G,
+    /// `B`'s blue as colour, alpha from `A`.
+    B,
+    /// `B`'s red as colour and alpha.
+    RAlpha,
+    /// `B`'s green as colour and alpha.
+    GAlpha,
+    /// `B`'s blue as colour and alpha.
+    BAlpha,
+}
+
+/// How a texture layer after the first combines with what the ones before it give.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
+pub enum LayerBlend {
+    /// Their product.
+    Multiply,
+    /// Twice their product: 0.5 in the layer leaves it.
+    Mod2x,
+    /// The layer alone.
+    Replace,
+    /// Their sum.
+    Add,
+    /// The one before less the layer.
+    Subtract,
+    /// Their mean.
+    Average,
+    /// What is before scaled by the layer's luminance, with the layer's alpha.
+    Luminance,
+}
+
+/// A texture layer after a renderer's first.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct TextureLayer {
+    /// The texture (`materials/.../x.vtex`).
+    pub texture: String,
+    /// How it gives colour and alpha.
+    pub channels: TextureChannels,
+    /// How it combines with the layers before it.
+    pub blend: LayerBlend,
+    /// Its V scale and offset, then its U scale and offset.
+    pub transform: [f32; 4],
+}
+
+const CHANNELS: [&str; 15] = [
+    "SPRITECARD_TEXTURE_CHANNEL_MIX_RGB",
+    "SPRITECARD_TEXTURE_CHANNEL_MIX_RGBA",
+    "SPRITECARD_TEXTURE_CHANNEL_MIX_A",
+    "SPRITECARD_TEXTURE_CHANNEL_MIX_RGB_A",
+    "SPRITECARD_TEXTURE_CHANNEL_MIX_RGB_ALPHAMASK",
+    "SPRITECARD_TEXTURE_CHANNEL_MIX_RGB_RGBMASK",
+    "SPRITECARD_TEXTURE_CHANNEL_MIX_RGBA_RGBALPHA",
+    "SPRITECARD_TEXTURE_CHANNEL_MIX_A_RGBALPHA",
+    "SPRITECARD_TEXTURE_CHANNEL_MIX_RGB_A_RGBALPHA",
+    "SPRITECARD_TEXTURE_CHANNEL_MIX_R",
+    "SPRITECARD_TEXTURE_CHANNEL_MIX_G",
+    "SPRITECARD_TEXTURE_CHANNEL_MIX_B",
+    "SPRITECARD_TEXTURE_CHANNEL_MIX_RALPHA",
+    "SPRITECARD_TEXTURE_CHANNEL_MIX_GALPHA",
+    "SPRITECARD_TEXTURE_CHANNEL_MIX_BALPHA",
+];
+
+const LAYER_BLENDS: [&str; 7] = [
+    "SPRITECARD_TEXTURE_BLEND_MULTIPLY",
+    "SPRITECARD_TEXTURE_BLEND_MOD2X",
+    "SPRITECARD_TEXTURE_BLEND_REPLACE",
+    "SPRITECARD_TEXTURE_BLEND_ADD",
+    "SPRITECARD_TEXTURE_BLEND_SUBTRACT",
+    "SPRITECARD_TEXTURE_BLEND_AVERAGE",
+    "SPRITECARD_TEXTURE_BLEND_LUMINANCE",
+];
+
+impl TextureChannels {
+    fn read(layer: &Obj<'_>) -> Result<Self> {
+        Ok([
+            Self::Rgb,
+            Self::Rgba,
+            Self::A,
+            Self::RgbA,
+            Self::RgbAlphaMask,
+            Self::RgbRgbMask,
+            Self::RgbaRgbAlpha,
+            Self::ARgbAlpha,
+            Self::RgbARgbAlpha,
+            Self::R,
+            Self::G,
+            Self::B,
+            Self::RAlpha,
+            Self::GAlpha,
+            Self::BAlpha,
+        ][layer.choice("m_nTextureChannels", &CHANNELS, 1)?])
+    }
+}
+
+impl LayerBlend {
+    fn read(layer: &Obj<'_>) -> Result<Self> {
+        Ok([
+            Self::Multiply,
+            Self::Mod2x,
+            Self::Replace,
+            Self::Add,
+            Self::Subtract,
+            Self::Average,
+            Self::Luminance,
+        ][layer.choice("m_nTextureBlendMode", &LAYER_BLENDS, 0)?])
+    }
+}
+
 /// What every renderer reads: its texture and how its colour reaches the screen.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -87,6 +225,10 @@ pub struct Look {
     pub texture: Option<String>,
     /// The texture's V scale and offset, then its U scale and offset.
     pub texture_transform: [f32; 4],
+    /// How the first layer's texture gives colour and alpha.
+    pub channels: TextureChannels,
+    /// The texture layers after the first, in order.
+    pub layers: Vec<TextureLayer>,
     /// The blend.
     pub blend: Blend,
     /// The colour's scale before blending.
@@ -423,37 +565,63 @@ fn projected(obj: &Obj<'_>, format: u32) -> Result<Projected> {
     })
 }
 
+/// A texture layer's V scale and offset, then its U scale and offset (`m_TextureControls`).
+fn texture_transform(layer: Option<&Obj<'_>>) -> Result<[f32; 4]> {
+    let controls = layer
+        .map(|layer| layer.object("m_TextureControls"))
+        .transpose()?
+        .flatten();
+    let control = |key: &str, default: f32| -> Result<f32> {
+        let Some(controls) = &controls else {
+            return Ok(default);
+        };
+        // Per-frame texture animation is not read: its literal value stands.
+        Ok(match FloatInput::read(controls, key, default)? {
+            FloatInput::Literal(value) => value,
+            FloatInput::Unsupported { literal, .. } => literal,
+            _ => default,
+        })
+    };
+    Ok([
+        control("m_flFinalTextureScaleV", 1.0)?,
+        control("m_flFinalTextureOffsetV", 0.0)?,
+        control("m_flFinalTextureScaleU", 1.0)?,
+        control("m_flFinalTextureOffsetU", 0.0)?,
+    ])
+}
+
 impl Look {
     fn read(obj: &Obj<'_>) -> Result<Self> {
-        let layers = obj.array("m_vecTexturesInput", MAX_LAYERS)?;
-        let first = layers.first().map(Obj::new).transpose()?;
-        let texture = match first {
+        let entries = obj.array("m_vecTexturesInput", MAX_LAYERS)?;
+        let mut entries = entries.iter().map(Obj::new);
+        let first = entries.next().transpose()?;
+        let texture = match &first {
             Some(layer) => layer.str("m_hTexture")?,
             None => obj.str("m_hTexture")?,
         };
-        let controls = first
-            .map(|layer| layer.object("m_TextureControls"))
-            .transpose()?
-            .flatten();
-        let control = |key: &str, default: f32| -> Result<f32> {
-            let Some(controls) = controls else {
-                return Ok(default);
+        let mut layers = Vec::new();
+        for layer in entries {
+            let layer = layer?;
+            let Some(texture) = layer.str("m_hTexture")?.filter(|t| !t.is_empty()) else {
+                continue;
             };
-            // Per-frame texture animation is not read: its literal value stands.
-            Ok(match FloatInput::read(&controls, key, default)? {
-                FloatInput::Literal(value) => value,
-                FloatInput::Unsupported { literal, .. } => literal,
-                _ => default,
-            })
-        };
+            if texture.len() > MAX_NAME {
+                return Err(malformed(WHAT, "a texture layer's path is too long"));
+            }
+            layers.push(TextureLayer {
+                texture: texture.to_owned(),
+                channels: TextureChannels::read(&layer)?,
+                blend: LayerBlend::read(&layer)?,
+                transform: texture_transform(Some(&layer))?,
+            });
+        }
         Ok(Self {
             texture: texture.filter(|t| !t.is_empty()).map(str::to_owned),
-            texture_transform: [
-                control("m_flFinalTextureScaleV", 1.0)?,
-                control("m_flFinalTextureOffsetV", 0.0)?,
-                control("m_flFinalTextureScaleU", 1.0)?,
-                control("m_flFinalTextureOffsetU", 0.0)?,
-            ],
+            texture_transform: texture_transform(first.as_ref())?,
+            channels: first
+                .as_ref()
+                .map_or(Ok(TextureChannels::Rgba), TextureChannels::read)?,
+            layers,
             blend: [
                 Blend::Alpha,
                 Blend::Add,

@@ -39,7 +39,9 @@ First release.
   remaps, model functions (`OnModel`, `LockToBone`) and model renderers (`Renderer::Models`,
   their models by `System::models`) read, with the control point operators of a town portal
   (`PreEmission::SetSingleControlPointPosition`, `ScalarExpressionToCp`, `DistanceBetweenCps`
-  and others).
+  and others). A renderer's texture layers: each one's channel mix (`Look::channels`,
+  `TextureChannels`) and the layers after the first (`Look::layers`: `TextureLayer`, combined
+  by `LayerBlend`); `System::textures` lists theirs too.
 - `world`: entity lumps, placements, map lighting, and worlds exported as glTF.
 - `tooltips`, `shops`, `portraits`: Dota's item and ability tooltips, shop categories and
   portrait framings.

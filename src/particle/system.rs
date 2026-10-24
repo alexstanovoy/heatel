@@ -290,7 +290,11 @@ impl System {
     pub fn textures(&self) -> impl Iterator<Item = &str> {
         self.renderers
             .iter()
-            .filter_map(|r| r.class.look()?.texture.as_deref())
+            .filter_map(|r| r.class.look())
+            .flat_map(|look| {
+                let more = look.layers.iter().map(|l| l.texture.as_str());
+                look.texture.as_deref().into_iter().chain(more)
+            })
     }
 
     /// The materials its projected renderers draw with (`materials/.../x.vmat`), whose

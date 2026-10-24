@@ -36,8 +36,8 @@ pub use pre_emission::{
 };
 pub use read::MAX_CONTROL_POINT;
 pub use renderer::{
-    Blend, ColorBlend, DeferredLight, Look, Orientation, Projected, Renderer, Ropes, Sprites,
-    Trails,
+    Blend, ColorBlend, DeferredLight, LayerBlend, Look, Orientation, Projected, Renderer, Ropes,
+    Sprites, TextureChannels, TextureLayer, Trails,
 };
 pub use system::{Child, Constants, MAX_CHILDREN, MAX_PARTICLES, System};
 pub use transform::{ControlPoint, Transform};
