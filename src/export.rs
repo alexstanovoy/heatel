@@ -88,6 +88,19 @@ pub fn export_model(
     path: &str,
     options: &ModelOptions<'_>,
 ) -> Result<ExportedModel> {
+    export_model_in_group(src, packages, path, options, None)
+}
+
+/// [`export_model`] with the model's skin `group` (a name of its material groups, `"1"` for the
+/// sentry ward's) in place of its default one: each draw call's material is swapped for the one
+/// the group lists at the same place. A group the model lacks is an error.
+pub fn export_model_in_group(
+    src: &(impl Source + ?Sized),
+    packages: &[&Vpk],
+    path: &str,
+    options: &ModelOptions<'_>,
+    group: Option<&str>,
+) -> Result<ExportedModel> {
     let ModelOptions {
         meshes,
         skeleton,
@@ -97,7 +110,10 @@ pub fn export_model(
     } = *options;
     let bytes = read_from(src, packages, path)?;
     let resource = Resource::parse(&bytes)?;
-    let model = Model::read(&resource)?;
+    let mut model = Model::read(&resource)?;
+    if let Some(group) = group {
+        model.use_material_group(group)?;
+    }
     let clips = if skeleton {
         read_clips(&resource, anims)?
     } else {

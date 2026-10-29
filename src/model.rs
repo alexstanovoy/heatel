@@ -133,6 +133,26 @@ impl Model {
     }
 }
 
+impl Model {
+    /// Swaps every draw call's material for the one skin `group` lists where the default skin
+    /// (the first group) lists the call's; a call whose material is not in the default skin keeps it.
+    pub fn use_material_group(&mut self, group: &str) -> Result<()> {
+        let (Some((_, default)), Some((_, skin))) = (
+            self.material_groups.first(),
+            self.material_groups.iter().find(|(name, _)| name == group),
+        ) else {
+            return Err(malformed("model", format!("no material group {group:?}")));
+        };
+        for primitive in self.meshes.iter_mut().flat_map(|m| &mut m.primitives) {
+            let place = default.iter().position(|m| *m == primitive.material);
+            if let Some(material) = place.and_then(|i| skin.get(i)) {
+                primitive.material.clone_from(material);
+            }
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn array(value: Option<&Value>) -> &[Value] {
     value.and_then(Value::as_array).unwrap_or_default()
 }
@@ -473,4 +493,48 @@ fn draw_call(
         material: material.to_owned(),
         tint,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model() -> Model {
+        let call = |material: &str| Primitive {
+            vertices: 0,
+            indices: Vec::new(),
+            material: material.to_owned(),
+            tint: None,
+        };
+        Model {
+            bones: Vec::new(),
+            meshes: vec![Mesh {
+                name: "m".to_owned(),
+                vertices: Vec::new(),
+                primitives: vec![call("a.vmat"), call("kept.vmat")],
+            }],
+            material_groups: vec![
+                ("default".to_owned(), vec!["a.vmat".to_owned()]),
+                ("1".to_owned(), vec!["b.vmat".to_owned()]),
+            ],
+            attachments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_skin_swaps_the_materials_the_default_skin_lists_and_no_other() {
+        let mut model = model();
+        model.use_material_group("1").unwrap();
+        let used: Vec<&str> = model.meshes[0]
+            .primitives
+            .iter()
+            .map(|p| p.material.as_str())
+            .collect();
+        assert_eq!(used, ["b.vmat", "kept.vmat"]);
+    }
+
+    #[test]
+    fn a_skin_the_model_lacks_is_an_error() {
+        assert!(model().use_material_group("9").is_err());
+    }
 }

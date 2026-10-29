@@ -25,6 +25,8 @@ First release.
 - `material`: `vmat_c` materials and their glTF form.
 - `anim`: embedded animation clips, each lasting to its last frame, `(frames - 1) / fps`, a pose
   held to the end included.
+- `export::export_model_in_group`: a model drawn with one of its skins (material groups), such as
+  the sentry ward's.
 - `gltf`, `export`: models with materials, skeleton, attachments (nodes under their bones) and
   clips as `.glb`, their images as PNG or KTX2.
 - `particle`: `vpcf_c` particle systems as typed definitions (emitters, initializers,

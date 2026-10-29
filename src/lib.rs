@@ -41,7 +41,7 @@ pub mod vpk;
 pub mod world;
 
 pub use error::{Error, Result};
-pub use export::{export_model, read_from};
+pub use export::{export_model, export_model_in_group, read_from};
 #[cfg(any(unix, windows))]
 pub use locate::find_game_dir;
 pub use model::Model;
