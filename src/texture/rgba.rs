@@ -23,9 +23,7 @@ pub(super) fn decode(
         PixelFormat::Bc7 => texture2ddecoder::decode_bc7,
         other => return Err(malformed(WHAT, format!("no RGBA8 decoding of {other:?}"))),
     };
-    let mut px = vec![0u32; w * h];
-    decoder(level, w, h, &mut px)
-        .map_err(|e| malformed(WHAT, format!("{format:?} blocks: {e}")))?;
+    let px = decode_blocks(format, decoder, level, (w, h))?;
     Ok(px
         .iter()
         .flat_map(|p| {
@@ -33,6 +31,68 @@ pub(super) fn decode(
             [r, g, b, a]
         })
         .collect())
+}
+
+/// The pixels of a block-compressed level as the decoder makes them, packed as it packs them (a
+/// byte each of blue, green, red and alpha from the lowest), with the channels that `fix`
+/// rewrites made whole: texture2ddecoder reads the 48 bits of indices of a BC3 alpha or a BC4 or
+/// BC5 channel into a `usize`, which keeps 32 of them on a 32-bit target (the browser's wasm), so
+/// the last five texels of every block were drawn as the block's first value there.
+pub(super) fn decode_blocks(
+    format: PixelFormat,
+    decoder: fn(&[u8], usize, usize, &mut [u32]) -> std::result::Result<(), &'static str>,
+    level: &[u8],
+    (w, h): (usize, usize),
+) -> Result<Vec<u32>> {
+    let mut px = vec![0u32; w * h];
+    decoder(level, w, h, &mut px)
+        .map_err(|e| malformed(WHAT, format!("{format:?} blocks: {e}")))?;
+    // (offset of the channel's 8 bytes in a block, the channel's place in the packed pixel)
+    let channels: &[(usize, u32)] = match format {
+        PixelFormat::Bc3 => &[(0, 3)],
+        PixelFormat::Bc4 => &[(0, 2)],
+        PixelFormat::Bc5 => &[(0, 2), (8, 1)],
+        _ => &[],
+    };
+    let (bytes, blocks_x) = (format.block().2, w.div_ceil(4));
+    for (block, data) in level.chunks_exact(bytes).enumerate() {
+        let (bx, by) = (block % blocks_x * 4, block / blocks_x * 4);
+        for &(at, channel) in channels {
+            for (i, value) in channel_values(&data[at..at + 8]).into_iter().enumerate() {
+                let (x, y) = (bx + i % 4, by + i / 4);
+                if x < w && y < h {
+                    let p = &mut px[y * w + x];
+                    *p = *p & !(0xFF << (channel * 8)) | u32::from(value) << (channel * 8);
+                }
+            }
+        }
+    }
+    Ok(px)
+}
+
+/// The 16 values of a block's 8-byte channel (the alpha of BC3, BC4's red, each of BC5's two), in
+/// reading order: two end values and sixteen 3-bit steps between them.
+fn channel_values(block: &[u8]) -> [u8; 16] {
+    let (a, b) = (u16::from(block[0]), u16::from(block[1]));
+    let mut steps = [a, b, 0, 0, 0, 0, 0, 255];
+    if a > b {
+        for (i, step) in steps.iter_mut().enumerate().skip(2) {
+            *step = ((8 - i as u16) * a + (i as u16 - 1) * b) / 7;
+        }
+    } else {
+        for (i, step) in steps.iter_mut().enumerate().take(6).skip(2) {
+            *step = ((6 - i as u16) * a + (i as u16 - 1) * b) / 5;
+        }
+        steps[6] = 0;
+    }
+    let mut bits = u64::from_le_bytes([
+        block[2], block[3], block[4], block[5], block[6], block[7], 0, 0,
+    ]);
+    std::array::from_fn(|_| {
+        let value = steps[(bits & 7) as usize] as u8;
+        bits >>= 3;
+        value
+    })
 }
 
 /// A PNG file of RGBA8 `pixels`.

@@ -378,3 +378,33 @@ fn block_texels_decode_to_rgba8() {
     let float = Vtex::new(1, 1, 8, vec![vec![0, 0]]).bytes();
     assert!(Texture::parse(&float).unwrap().to_rgba8().is_err());
 }
+
+/// A BC3 alpha (or BC4/BC5 channel) block: ends 255 and 0, and the steps 0 to 7 in turn over the
+/// sixteen texels, so the indices of the last ones sit above the 32nd bit of the block's 48.
+const CHANNEL_BLOCK: [u8; 8] = [255, 0, 0x88, 0xC6, 0xFA, 0x88, 0xC6, 0xFA];
+/// The values those steps stand for.
+const CHANNEL_STEPS: [u8; 8] = [255, 0, 218, 182, 145, 109, 72, 36];
+
+#[test]
+fn every_texel_of_a_blocks_alpha_and_channels_reads_its_own_step() {
+    // The block's 16 texels' steps: 0..8 twice.
+    let steps: Vec<u8> = (0..16).map(|i| CHANNEL_STEPS[i % 8]).collect();
+    // DXT5: the alpha block, then one DXT1 block of two equal reds.
+    let mut dxt5 = CHANNEL_BLOCK.to_vec();
+    dxt5.extend([0x00, 0xF8, 0x00, 0xF8, 0, 0, 0, 0]);
+    let rgba = Texture::parse(&Vtex::new(4, 4, 2, vec![dxt5]).bytes())
+        .unwrap()
+        .to_rgba8()
+        .unwrap();
+    let alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+    assert_eq!(alpha, steps, "DXT5 alpha");
+    // BC5: red from the first block, green from the second.
+    let mut bc5 = CHANNEL_BLOCK.to_vec();
+    bc5.extend(CHANNEL_BLOCK);
+    let rgba = Texture::parse(&Vtex::new(4, 4, 21, vec![bc5]).bytes())
+        .unwrap()
+        .to_rgba8()
+        .unwrap();
+    let (red, green): (Vec<u8>, Vec<u8>) = rgba.chunks_exact(4).map(|p| (p[0], p[1])).unzip();
+    assert_eq!((red, green), (steps.clone(), steps), "BC5 channels");
+}

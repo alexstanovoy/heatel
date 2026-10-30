@@ -2,7 +2,8 @@
 //! "special dependencies" (what the texture compiler was asked to do): scaled YCoCg images and
 //! tangent-space normals. Both are decoded to RGBA8, as the game's tools show them.
 
-use crate::error::{Result, malformed};
+use super::format::PixelFormat;
+use crate::error::Result;
 use crate::resource::Resource;
 
 const YCOCG: &str = "Texture Compiler Version Image YCoCg Conversion";
@@ -52,10 +53,12 @@ impl Content {
 
     /// The RGBA8 pixels of a DXT5 level `width` x `height`, read as `self`.
     pub(super) fn decode_bc3(self, level: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
-        let (w, h) = (width as usize, height as usize);
-        let mut px = vec![0u32; w * h];
-        texture2ddecoder::decode_bc3(level, w, h, &mut px)
-            .map_err(|e| malformed("vtex", format!("DXT5 blocks: {e}")))?;
+        let px = super::rgba::decode_blocks(
+            PixelFormat::Bc3,
+            texture2ddecoder::decode_bc3,
+            level,
+            (width as usize, height as usize),
+        )?;
         let mut out = Vec::with_capacity(px.len() * 4);
         for p in px {
             let [b, g, r, a] = p.to_le_bytes();
