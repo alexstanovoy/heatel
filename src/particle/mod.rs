@@ -39,5 +39,5 @@ pub use renderer::{
     Blend, ColorBlend, DeferredLight, LayerBlend, Look, Orientation, Projected, Renderer, Ropes,
     Sprites, TextureChannels, TextureLayer, Trails,
 };
-pub use system::{BOUNDS, Child, Constants, MAX_CHILDREN, MAX_PARTICLES, SLEEP_AFTER, System};
+pub use system::{Child, Constants, MAX_CHILDREN, MAX_PARTICLES, System};
 pub use transform::{ControlPoint, Transform};

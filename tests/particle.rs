@@ -144,29 +144,3 @@ fn a_decal_and_a_pre_emission_operator_read_as_source_2_runs_them() {
     assert_eq!(light.alpha_scale, FloatInput::Literal(-4.0));
     assert_eq!(light.start_falloff, 0.1);
 }
-
-/// How long a system goes undrawn before it sleeps, and the box its bounds are padded by: a
-/// lamp's flame says 2 s and ±300 units, Shadow Fiend's trail leaves the time to the schema's
-/// 8 s and pads by its own box.
-#[test]
-#[ignore = "needs a local Dota 2 install"]
-fn a_systems_sleep_time_and_bounding_box_read() {
-    let (src, pak) = install();
-    let lamp = system(
-        &src,
-        &pak,
-        "particles/addons_gameplay/lamp_flame_tintable.vpcf",
-    );
-    assert_eq!(lamp.sleep_after, 2.0);
-    assert_eq!(
-        lamp.bounds,
-        [[-300.0, -300.0, -300.0], [300.0, 300.0, 10.0]]
-    );
-    let trail = system(
-        &src,
-        &pak,
-        "particles/units/heroes/hero_nevermore/nevermore_trail.vpcf",
-    );
-    assert_eq!(trail.sleep_after, heatel::particle::SLEEP_AFTER);
-    assert_eq!(trail.bounds, [[-10.0, -50.0, 0.0], [10.0, 10.0, 240.0]]);
-}
