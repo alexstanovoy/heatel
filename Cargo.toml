@@ -55,3 +55,14 @@ rustdoc-args = ["--cfg", "docsrs"]
 [lints.rust]
 # The fuzz targets build with `--cfg fuzzing` (fuzz/fuzz.sh); docs.rs with `--cfg docsrs`.
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)", "cfg(docsrs)"] }
+
+# What the tests are built with: release's optimisation (a debug build is too slow to test with) and the checks a debug build
+# has, overflow checks and debug assertions, in the crates of this repository. The dependencies stay as release builds them.
+[profile.test-release]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true
+
+[profile.test-release.package."*"]
+debug-assertions = false
+overflow-checks = false
