@@ -32,6 +32,7 @@ pub mod particle;
 pub mod portraits;
 /// Compiled Source 2 resources: the block container every `*_c` file is.
 pub mod resource;
+pub mod scripts;
 pub mod shops;
 pub mod sound;
 /// Where files are read from: a folder on disk, or in-memory and browser files.
@@ -47,6 +48,11 @@ pub mod vpk;
 pub mod world;
 
 pub use error::{Error, Result};
+
+/// Bumped whenever an export's output changes for the same input (a converter's fix, a changed
+/// format of what it writes): a consumer's cache fingerprint includes it, so caches made by an
+/// older converter are made again.
+pub const OUTPUT_REV: u32 = 1;
 pub use export::{export_model, export_model_in_group, read_from};
 #[cfg(any(unix, windows))]
 pub use locate::find_game_dir;

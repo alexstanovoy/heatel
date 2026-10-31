@@ -174,6 +174,16 @@ fn quoted_end(bytes: &[u8], from: usize) -> Option<usize> {
 /// block key reopens the first block of that key in its place. Blocks nested deeper than 64
 /// are an error.
 pub fn parse_kv(text: &str) -> Result<Kv> {
+    parse(text, false)
+}
+
+/// [`parse_kv`] that keeps every repeated string key (a `precache` block lists its particles
+/// under one key, `"particle"`, many times); [`Block::get`] still finds the first.
+pub fn parse_kv_repeats(text: &str) -> Result<Kv> {
+    parse(text, true)
+}
+
+fn parse(text: &str, keep_repeats: bool) -> Result<Kv> {
     // Each open block: its items, and its key and place in its parent (none for a dropped one).
     let mut stack: Vec<Open> = vec![(Block::default(), None)];
     let mut key: Option<String> = None;
@@ -204,7 +214,7 @@ pub fn parse_kv(text: &str) -> Result<Kv> {
                 None => key = Some(s.to_owned()),
                 Some(k) => {
                     let top = &mut stack.last_mut().expect("the root stays").0;
-                    if top.position(&k).is_none() {
+                    if keep_repeats || top.position(&k).is_none() {
                         top.push(k, Kv::Text(s.to_owned()));
                     }
                 }
