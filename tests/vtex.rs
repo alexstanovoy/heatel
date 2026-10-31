@@ -396,7 +396,7 @@ fn every_texel_of_a_blocks_alpha_and_channels_reads_its_own_step() {
         .unwrap()
         .to_rgba8()
         .unwrap();
-    let alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+    let alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
     assert_eq!(alpha, steps, "DXT5 alpha");
     // BC5: red from the first block, green from the second.
     let mut bc5 = CHANNEL_BLOCK.to_vec();
@@ -405,6 +405,7 @@ fn every_texel_of_a_blocks_alpha_and_channels_reads_its_own_step() {
         .unwrap()
         .to_rgba8()
         .unwrap();
-    let (red, green): (Vec<u8>, Vec<u8>) = rgba.chunks_exact(4).map(|p| (p[0], p[1])).unzip();
+    let (red, green): (Vec<u8>, Vec<u8>) =
+        rgba.as_chunks::<4>().0.iter().map(|p| (p[0], p[1])).unzip();
     assert_eq!((red, green), (steps.clone(), steps), "BC5 channels");
 }

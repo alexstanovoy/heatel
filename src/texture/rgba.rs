@@ -33,6 +33,10 @@ pub(super) fn decode(
         .collect())
 }
 
+/// texture2ddecoder's block decoders: blocks, width, height, packed pixels out.
+pub(super) type BlockDecoder =
+    fn(&[u8], usize, usize, &mut [u32]) -> std::result::Result<(), &'static str>;
+
 /// The pixels of a block-compressed level as the decoder makes them, packed as it packs them (a
 /// byte each of blue, green, red and alpha from the lowest), with the channels that `fix`
 /// rewrites made whole: texture2ddecoder reads the 48 bits of indices of a BC3 alpha or a BC4 or
@@ -40,7 +44,7 @@ pub(super) fn decode(
 /// the last five texels of every block were drawn as the block's first value there.
 pub(super) fn decode_blocks(
     format: PixelFormat,
-    decoder: fn(&[u8], usize, usize, &mut [u32]) -> std::result::Result<(), &'static str>,
+    decoder: BlockDecoder,
     level: &[u8],
     (w, h): (usize, usize),
 ) -> Result<Vec<u32>> {
