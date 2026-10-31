@@ -238,6 +238,7 @@ def models(pak):
         if {"ANIM", "AGRP"} & has and animated < 16:
             animated += 1
             write("anim", name, data)
+            write("sequence", name, data)
         for kind, block, _ in blocks(data):
             if kind in ("VBIB", "MBUF") and len(block) <= 128 << 10:
                 write("vbib", f"{name}-{kind}", block + b"\x03")

@@ -130,7 +130,7 @@ pub fn read_clips(resource: &Resource, names: &[&str]) -> Result<Vec<Clip>> {
 }
 
 /// The KV3 block `CTRL.embedded_animation.<key>` addresses; none for an index of zero or less.
-fn block(resource: &Resource, embedded: &Value, key: &str) -> Result<Option<Value>> {
+pub(super) fn block(resource: &Resource, embedded: &Value, key: &str) -> Result<Option<Value>> {
     let Some(index) = embedded.get(key).and_then(Value::as_i64) else {
         return Ok(None);
     };
@@ -190,7 +190,7 @@ fn channels(key: Option<&Value>, bones: &[SourceBone]) -> Result<Vec<Channel>> {
 /// The model's clips as Source2Viewer lists them: per sequence (`ASEQ`), its name and the
 /// animation its first fetch reference names; then every animation no sequence took the name
 /// of. Without sequences, the animations themselves.
-fn listing<'a>(
+pub(super) fn listing<'a>(
     sequences: Option<&'a Value>,
     descs: &'a [Value],
 ) -> Vec<(&'a str, &'a Value, Option<&'a Value>)> {

@@ -3,7 +3,8 @@
 #![warn(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-/// Animation clips of a model's embedded animation.
+/// Animation clips of a model's embedded animation, and what its sequences say about when they
+/// play (activities) and what happens in them (events).
 pub mod anim;
 mod budget;
 mod bytes;

@@ -30,6 +30,9 @@ First release.
 - `material`: `vmat_c` materials and their glTF form.
 - `anim`: embedded animation clips, each lasting to its last frame, `(frames - 1) / fps`, a pose
   held to the end included.
+- `anim::read_sequences`: a model's sequences without decoding a frame: activities with their
+  modifiers and weights, looping, frames, frame rate, and animation events by frame (sounds,
+  particles with their configuration, attack sounds, speech, props, tag suppression).
 - `export::export_model_in_group`: a model drawn with one of its skins (material groups), such as
   the sentry ward's.
 - `gltf`, `export`: models with materials, skeleton, attachments (nodes under their bones) and
