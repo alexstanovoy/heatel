@@ -15,6 +15,8 @@ pub mod face;
 #[doc(hidden)]
 pub mod fuzzing;
 pub mod gltf;
+/// The cosmetics of `items_game.txt`: the models and effects a hero wears, by item.
+pub mod items_game;
 pub mod keyvalues;
 pub mod kv3;
 #[cfg(any(unix, windows))]
@@ -34,6 +36,8 @@ pub mod shops;
 pub mod sound;
 /// Where files are read from: a folder on disk, or in-memory and browser files.
 pub mod source;
+/// Response rules (`vrr_c`): which voice line a unit says when.
+pub mod talker;
 pub mod texture;
 pub mod tooltips;
 pub mod vbib;

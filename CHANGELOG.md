@@ -33,6 +33,14 @@ First release.
 - `anim::read_sequences`: a model's sequences without decoding a frame: activities with their
   modifiers and weights, looping, frames, frame rate, and animation events by frame (sounds,
   particles with their configuration, attack sounds, speech, props, tag suppression).
+- `sound::read_sound_events`: a `vsndevts_c`'s events with their files, volume, pitch jitter, sound
+  level, distance, mix group, fades and layers.
+- `talker::read_response_rules`: a `vrr_c`'s response groups with their requirements and
+  responses, its criteria and includes.
+- `items_game::read_hero_items`: the hero cosmetics of `items_game.txt` (slot, model, default
+  cosmetics, `particle_create`, `particle`, `sound`, `activity` and control point modifiers),
+  streamed from the 52 MB file.
+- `particle::control_point_configurations`: a `vpcf_c`'s control point drivers and preview state.
 - `export::export_model_in_group`: a model drawn with one of its skins (material groups), such as
   the sentry ward's.
 - `gltf`, `export`: models with materials, skeleton, attachments (nodes under their bones) and

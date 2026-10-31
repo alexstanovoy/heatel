@@ -172,3 +172,17 @@ path = "fuzz_targets/sequence.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "presentation"
+path = "fuzz_targets/presentation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "items_game"
+path = "fuzz_targets/items_game.rs"
+test = false
+doc = false
+bench = false

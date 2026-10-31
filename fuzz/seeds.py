@@ -212,6 +212,8 @@ def formats(pak):
             write("vsnd", name, data)
         else:
             write("resource", name, data)
+            if ext in ("vsndevts_c", "vrr_c", "vpcf_c"):
+                write("presentation", name, data)
         for kind, block, _ in blocks(data):
             key = (ext, kind, block[:1])
             if is_kv3(block) and len(block) <= MAX_KV3 and key not in kv3_seen:
@@ -345,6 +347,9 @@ def texts(pak):
     write("tooltips", "abilities", bundle(files))
     write("portraits", "excerpt", read("scripts/npc/portraits.txt")[: 200 << 10].encode())
     write("shop", "shops", read("scripts/shops.txt").encode())
+    items = read("scripts/items/items_game.txt")
+    start = items.find('\t"items"')
+    write("items_game", "items", ("\"items_game\"\n{\n" + items[start : start + (200 << 10)]).encode())
 
 
 def main(game):

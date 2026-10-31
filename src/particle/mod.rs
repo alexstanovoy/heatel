@@ -10,6 +10,7 @@ mod noise;
 mod operator;
 mod path;
 mod pre_emission;
+mod preview;
 mod read;
 mod renderer;
 mod system;
@@ -34,6 +35,7 @@ pub use path::{MaintainPath, Path, SequentialPath};
 pub use pre_emission::{
     ControlPointPositions, DistanceBetweenCps, PreEmission, ScalarExpression, ScalarExpressionToCp,
 };
+pub use preview::{ControlPointConfig, ControlPointDriver, control_point_configurations};
 pub use read::MAX_CONTROL_POINT;
 pub use renderer::{
     Blend, ColorBlend, DeferredLight, LayerBlend, Look, Orientation, Projected, Renderer, Ropes,
