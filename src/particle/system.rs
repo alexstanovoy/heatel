@@ -20,6 +20,23 @@ use super::renderer::Renderer;
 
 /// Most particles a system holds at once, whatever its definition asks for.
 pub const MAX_PARTICLES: u32 = 5000;
+/// Seconds undrawn before a system sleeps when its definition does not say (the schema's
+/// `m_flNoDrawTimeToGoToSleep`).
+pub const SLEEP_AFTER: f32 = 8.0;
+/// The padding box when its definition does not say (the schema's `m_BoundingBoxMin`,
+/// `m_BoundingBoxMax`).
+pub const BOUNDS: [[f32; 3]; 2] = [[-10.0; 3], [10.0; 3]];
+
+#[cfg(feature = "serde")]
+fn default_sleep() -> f32 {
+    SLEEP_AFTER
+}
+
+#[cfg(feature = "serde")]
+fn default_bounds() -> [[f32; 3]; 2] {
+    BOUNDS
+}
+
 /// Most children a system has; Dota's have up to ~20.
 pub const MAX_CHILDREN: usize = 64;
 /// The longest path of a child.
@@ -41,6 +58,14 @@ pub struct System {
     pub initial_particles: u32,
     /// The longest simulation step, in seconds.
     pub max_time_step: f32,
+    /// Seconds a system goes undrawn before it sleeps: no longer simulated until it is
+    /// drawn again (`m_flNoDrawTimeToGoToSleep`).
+    #[cfg_attr(feature = "serde", serde(default = "default_sleep"))]
+    pub sleep_after: f32,
+    /// The box its particles' bounds are padded by, about each of them, for whether it is in
+    /// view (`m_BoundingBoxMin`, `m_BoundingBoxMax`).
+    #[cfg_attr(feature = "serde", serde(default = "default_bounds"))]
+    pub bounds: [[f32; 3]; 2],
     /// What a particle starts with before the initializers.
     pub constants: Constants,
     /// The children's group, which their parent's functions address.
@@ -133,6 +158,14 @@ impl System {
             max_time_step: Some(root.float("m_flMaximumTimeStep", 0.1)?)
                 .filter(|t| *t > 0.0)
                 .unwrap_or(0.1),
+            sleep_after: Some(root.float("m_flNoDrawTimeToGoToSleep", SLEEP_AFTER)?)
+                .filter(|t| t.is_finite())
+                .unwrap_or(SLEEP_AFTER)
+                .max(0.0),
+            bounds: [
+                root.vec3("m_BoundingBoxMin", BOUNDS[0])?,
+                root.vec3("m_BoundingBoxMax", BOUNDS[1])?,
+            ],
             constants: Constants::read(&root)?,
             group: root.int_in("m_nGroupID", 0, -1, 1 << 16)? as i32,
             pre_emission: functions(&root, "m_PreEmissionOperators", PreEmission::read)?,
@@ -167,6 +200,14 @@ impl System {
             ("constraints", self.constraints.len()),
             ("renderers", self.renderers.len()),
         ];
+        if !(self.sleep_after >= 0.0 && self.sleep_after.is_finite())
+            || !self.bounds.iter().flatten().all(|v| v.is_finite())
+        {
+            return Err(malformed(
+                WHAT,
+                "a sleep time or bounding box that is no number",
+            ));
+        }
         for (what, len) in lists {
             if len > MAX_FUNCTIONS {
                 return Err(malformed(
