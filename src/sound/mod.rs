@@ -7,6 +7,8 @@ mod mp3;
 mod vsnd;
 mod wav;
 
-pub use events::{SoundEvent, SoundLayer, read_sound_events};
+pub use events::{
+    SoundEvent, SoundLayer, SoundLimits, SoundStack, read_sound_events, read_sound_stacks,
+};
 pub use lipsync::{Lipsync, MorphCurves, Phoneme, token};
 pub use vsnd::{Sound, SoundFormat};

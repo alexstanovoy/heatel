@@ -29,6 +29,7 @@ pub struct Sound<'a> {
     bits: u16,
     samples: u64,
     duration: f32,
+    looping: bool,
     data: &'a [u8],
 }
 
@@ -77,8 +78,14 @@ impl<'a> Sound<'a> {
             bits,
             samples: info.samples,
             duration: info.duration,
+            looping: info.looping,
             data,
         })
+    }
+
+    /// Whether the sound repeats until it is stopped: it has a loop start.
+    pub fn looping(&self) -> bool {
+        self.looping
     }
 
     /// The kind of audio file it holds.
@@ -135,6 +142,9 @@ impl<'a> Sound<'a> {
     }
 }
 
+/// The loop start the older layouts hold for a sound that does not loop.
+const NO_LOOP: u32 = u32::MAX;
+
 /// What a `vsnd_c` says about its sound.
 struct Info {
     /// Bits per sample when the audio is PCM; none for MP3.
@@ -143,6 +153,8 @@ struct Info {
     channels: u16,
     samples: u64,
     duration: f32,
+    /// Whether the sound has a loop start.
+    looping: bool,
     /// Bytes of audio after the resource.
     size: usize,
 }
@@ -175,6 +187,10 @@ impl Info {
                 .get("m_flDuration")
                 .and_then(Value::as_f64)
                 .ok_or_else(|| malformed(WHAT, "no m_flDuration"))? as f32,
+            looping: sound
+                .get("m_nLoopStart")
+                .and_then(Value::as_i64)
+                .is_some_and(|start| start >= 0),
             size: usize::try_from(number("m_nStreamingSize")?)
                 .map_err(|_| malformed(WHAT, "size"))?,
         })
@@ -189,7 +205,7 @@ impl Info {
     fn from_data(data: &[u8], version: u16) -> Result<Self> {
         let mut c = Cursor::new(data, WHAT);
         let packed = c.u32()?;
-        c.u32()?;
+        let loop_start = c.u32()?;
         let samples = u64::from(c.u32()?);
         let duration = f32::from_bits(c.u32()?);
         c.take(12)?;
@@ -220,6 +236,7 @@ impl Info {
             channels,
             samples,
             duration,
+            looping: loop_start != NO_LOOP,
             size,
         })
     }

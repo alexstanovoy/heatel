@@ -8,7 +8,7 @@
 
 use heatel::items_game::{HeroItem, ModifierKind, read_hero_items};
 use heatel::particle::control_point_configurations;
-use heatel::sound::read_sound_events;
+use heatel::sound::{Sound, read_sound_events, read_sound_stacks};
 use heatel::talker::{ResponseKind, read_response_rules};
 use heatel::{DirSource, Resource, Vpk, find_game_dir};
 
@@ -104,6 +104,40 @@ fn shadow_fiend_sound_events() {
     assert_eq!(raze.mix_group.as_deref(), Some("Weapons"));
     assert_eq!(raze.spread_radius, Some(300.0));
     assert!((raze.volume.unwrap() - 0.8).abs() < 1e-3);
+}
+
+/// The `dota_src1_3d` type blocks a repeat within 0.05 s and 100 units and counts instances per
+/// entity; Creep_Good_Engine.Move keeps one at a time; Rot's file loops and a creep's blow does not.
+#[test]
+#[ignore = "needs a local Dota 2 install"]
+fn sound_event_types_limits_and_loops() {
+    let (src, pak) = install();
+    let stacks = read_sound_stacks(
+        &Resource::parse(&read(
+            &src,
+            &pak,
+            "soundstacks/soundstacks_dota_core.vsndstck_c",
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let stack = stacks.iter().find(|s| s.name == "dota_src1_3d").unwrap();
+    assert_eq!(stack.limits.block_multiple_instances, Some(true));
+    assert_eq!(stack.limits.block_duration, Some(0.05));
+    assert_eq!(stack.limits.block_distance, Some(100.0));
+    assert_eq!(stack.limits.limiter_match_entity, Some(true));
+    assert_eq!(stack.limits.limiter_stop_oldest, Some(true));
+    let bytes = read(&src, &pak, "soundevents/game_sounds_creeps.vsndevts_c");
+    let events = read_sound_events(&Resource::parse(&bytes).unwrap()).unwrap();
+    let engine = events
+        .iter()
+        .find(|e| e.name == "Creep_Good_Engine.Move")
+        .unwrap();
+    assert_eq!(engine.limits.limiter_max, Some(1.0));
+    assert_eq!(engine.limits.limiter_on, Some(true));
+    let looping = |path: &str| Sound::parse(&read(&src, &pak, path)).unwrap().looping();
+    assert!(looping("sounds/weapons/hero/pudge/rot.vsnd_c"));
+    assert!(!looping("sounds/weapons/creep/shared/melee_hit01.vsnd_c"));
 }
 
 /// Shadow Fiend's 135 response groups: a spawn line needs the `Spawn` concept and his class.
