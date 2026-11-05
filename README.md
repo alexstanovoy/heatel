@@ -1,6 +1,9 @@
 # heatel
 
-Reads Valve's Source 2 formats out of a local Dota 2 install and converts them to open ones:
+Reads Valve's Source 2 formats out of a local Dota 2 install and converts them to open ones: models with their
+skeletons, animations and faces to glTF, textures to PNG or KTX2, sounds to WAV or MP3, particle systems and KV3 data
+to JSON. Pure Rust with no `unsafe`, hardened and fuzzed against hostile files, and it runs in a browser on files the
+user picks, reading only the bytes it needs.
 
 | Dota's file | heatel reads it as | and writes |
 |---|---|---|
@@ -90,6 +93,13 @@ Every reader treats its file as hostile: reads are range-checked, allocations, r
 work are bounded by what a real file of the kind needs, and a malformed file is an
 [`Error`], never a panic. The readers are fuzzed (`fuzz/`, libFuzzer on stable Rust), and the
 crate has no `unsafe` code (`#![forbid(unsafe_code)]`).
+
+## Limits
+
+heatel is built and tested against Dota 2; other Source 2 games may use versions of the formats it doesn't know. It
+reads and converts, never writes Valve's formats. Materials are mapped by texture name rather than by running Valve's
+compiled shaders, so base colour and normals are right and the other channels are approximate. Particle systems are
+read as definitions; simulating and drawing them is up to you.
 
 ## Features
 
