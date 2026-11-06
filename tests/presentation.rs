@@ -146,8 +146,39 @@ fn sound_event_types_limits_and_loops() {
 fn shadow_fiend_response_rules() {
     let (src, pak) = install();
     let bytes = read(&src, &pak, "scripts/talker/response_rules_nevermore.vrr_c");
-    let rules = read_response_rules(&Resource::parse(&bytes).unwrap()).unwrap();
+    let resource = Resource::parse(&bytes).unwrap();
+    let data = resource.data().expect("DATA").expect("KV3");
+    let groups = data
+        .get("m_ResponseGroups")
+        .and_then(heatel::kv3::Value::as_array)
+        .expect("groups");
+    let bounty = groups
+        .iter()
+        .find(|g| {
+            g.get("m_name").and_then(heatel::kv3::Value::as_str)
+                == Some("nevermore_PowerupIsPowerupBounty")
+        })
+        .expect("bounty group");
+    let params = bounty
+        .get("m_responses")
+        .and_then(heatel::kv3::Value::as_array)
+        .expect("responses")[0]
+        .get("m_params")
+        .expect("parameters");
+    assert_eq!(
+        params
+            .get("m_respeakdelay.start")
+            .and_then(heatel::kv3::Value::as_f64),
+        Some(300.0)
+    );
+    let rules = read_response_rules(&resource).unwrap();
     assert_eq!(rules.groups.len(), 135);
+    let bounty = rules
+        .groups
+        .iter()
+        .find(|g| g.name == "nevermore_PowerupIsPowerupBounty")
+        .expect("bounty group");
+    assert_eq!(bounty.responses[0].respeak_delay, Some(300.0));
     assert_eq!(rules.includes, ["scripts/talker/response_rules_shared.vrr"]);
     let spawn = rules
         .groups

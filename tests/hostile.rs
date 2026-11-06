@@ -866,3 +866,27 @@ fn response_rules_read_a_line_respeak_delay() {
     let rules = heatel::talker::read_response_rules(&resource).expect("response rules");
     assert_eq!(rules.groups[0].responses[0].respeak_delay, Some(42.0));
 }
+
+#[test]
+fn response_rules_read_nested_delay_ranges() {
+    let data = K::Obj(vec![(
+        "m_ResponseGroups",
+        K::Arr(vec![K::Obj(vec![(
+            "m_responses",
+            K::Arr(vec![K::Obj(vec![
+                ("m_type", s("SPEAK")),
+                (
+                    "m_params",
+                    K::Obj(vec![(
+                        "m_respeakdelay",
+                        K::Obj(vec![("start", K::Float(42.0))]),
+                    )]),
+                ),
+            ])]),
+        )])]),
+    )]);
+    let file = resource(&[(b"DATA", kv3_file(&data))]);
+    let resource = Resource::parse(&file).expect("synthetic resource");
+    let rules = heatel::talker::read_response_rules(&resource).expect("response rules");
+    assert_eq!(rules.groups[0].responses[0].respeak_delay, Some(42.0));
+}

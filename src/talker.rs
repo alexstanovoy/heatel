@@ -184,7 +184,10 @@ fn group(v: &Value) -> Result<ResponseGroup> {
 
 fn response(v: &Value) -> Response {
     let params = v.get("m_params");
-    let start = |key: &str| number(params.and_then(|p| p.get(key)));
+    let start = |key: &str| {
+        number(params.and_then(|p| p.get(&format!("{key}.start"))))
+            .or_else(|| number(params.and_then(|p| p.get(key)?.get("start"))))
+    };
     let kind = match text(v, "m_type").unwrap_or_default().as_str() {
         "SPEAK" => ResponseKind::Speak,
         "SCENE" => ResponseKind::Scene,
@@ -196,9 +199,9 @@ fn response(v: &Value) -> Response {
         kind,
         value: text(v, "m_value"),
         speak_once: params.and_then(|p| p.get("m_bSpeakOnce")?.as_bool()) == Some(true),
-        respeak_delay: start("m_respeakdelay.start"),
-        pre_delay: start("m_predelay.start"),
-        weapon_delay: start("m_weapondelay.start"),
+        respeak_delay: start("m_respeakdelay"),
+        pre_delay: start("m_predelay"),
+        weapon_delay: start("m_weapondelay"),
         followup: v.get("m_pConceptFollowup").map(|f| Followup {
             target: text(f, "m_target").unwrap_or_default(),
             concept: text(f, "m_concept").unwrap_or_default(),
