@@ -436,6 +436,33 @@ pub enum Operator {
     /// `C_OP_LockToBone`: particles moved with the hitbox of the model a control point
     /// carries.
     LockToBone(Box<LockToBone>),
+    /// A control point or transform's pitch, yaw and roll, or its forward direction as a normal.
+    RemapOrientationToRotations {
+        /// The oriented input, a control point in older formats.
+        transform: Transform,
+        /// The offset in degrees: pitch/yaw/roll for angles, roll/pitch/yaw for quaternions.
+        rotation_offset: [f32; 3],
+        /// `m_bUseQuat`: use roll/pitch/yaw offset order instead of pitch/yaw/roll.
+        use_quaternion: bool,
+        /// Write the forward direction into the normal instead of pitch, yaw and roll.
+        write_normal: bool,
+    },
+    /// `C_OP_SetToCP`: snap position and previous position to a control point plus an offset.
+    /// VRF Particles/Operators/SetToCP.cs:33-34 fills both columns (revision
+    /// 81f3ff8daf4a5d69862b0e0cda1f981e6205890d).
+    SetToControlPoint {
+        /// The control point followed.
+        control_point: ControlPoint,
+        /// The displacement from that control point.
+        offset: [f32; 3],
+        /// The displacement is in the control point's frame instead of the world's.
+        local: bool,
+    },
+    /// `C_OP_NormalLock`: rotate normals by a control point's change of orientation.
+    NormalLock {
+        /// The control point followed.
+        control_point: ControlPoint,
+    },
     /// A class this crate does not read.
     Unsupported(String),
 }
@@ -888,6 +915,22 @@ impl Operator {
             },
             "C_OP_RadiusDecay" => Self::RadiusDecay {
                 min_radius: obj.float("m_flMinRadius", 1.0)?,
+            },
+            "C_OP_RemapCPOrientationToRotations" | "C_OP_RemapTransformOrientationToRotations" => {
+                Self::RemapOrientationToRotations {
+                    transform: Transform::read(obj, "m_nCP", true)?,
+                    rotation_offset: obj.vec3("m_vecRotation", [0.0; 3])?,
+                    use_quaternion: obj.bool("m_bUseQuat", false)?,
+                    write_normal: obj.bool("m_bWriteNormal", false)?,
+                }
+            }
+            "C_OP_SetToCP" => Self::SetToControlPoint {
+                control_point: obj.control_point("m_nControlPointNumber", 0)?,
+                offset: obj.vec3("m_vecOffset", [0.0; 3])?,
+                local: obj.bool("m_bOffsetLocal", false)?,
+            },
+            "C_OP_NormalLock" => Self::NormalLock {
+                control_point: obj.control_point("m_nControlPointNumber", 0)?,
             },
             "C_OP_RemapCPVelocityToVector" => Self::RemapCpVelocityToVector {
                 control_point: obj.control_point("m_nControlPoint", 0)?,

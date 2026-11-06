@@ -668,3 +668,170 @@ fn scripts_with_an_unclosed_quote_read_in_linear_time() {
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].name, "item_blink");
 }
+
+#[test]
+fn flagbearer_particle_operators_read_synthetic_orientation_and_object_scale() {
+    use heatel::particle::PreEmission;
+    let definition = synthetic_flagbearer_orientation();
+    let PreEmission::SetControlPointFromObjectScale { input, output } =
+        &definition.pre_emission[0].class
+    else {
+        panic!("object scale")
+    };
+    assert_eq!((input.index(), output.index()), (62, 63));
+    let PreEmission::SetControlPointFromObjectScale { input, output } =
+        &definition.pre_emission[1].class
+    else {
+        panic!("default object scale")
+    };
+    assert_eq!((input.index(), output.index()), (0, 1));
+    let Operator::RemapOrientationToRotations {
+        transform,
+        rotation_offset,
+        use_quaternion,
+        write_normal,
+    } = &definition.operators[0].class
+    else {
+        panic!("legacy orientation")
+    };
+    assert_eq!(transform.control_point().expect("control point").index(), 7);
+    assert_eq!(*rotation_offset, [10.0, 20.0, 30.0]);
+    assert!(*use_quaternion);
+    assert!(*write_normal);
+    let Operator::RemapOrientationToRotations {
+        transform,
+        rotation_offset,
+        use_quaternion,
+        write_normal,
+    } = &definition.operators[1].class
+    else {
+        panic!("transform orientation")
+    };
+    assert_eq!(transform.control_point().expect("control point").index(), 3);
+    assert_eq!(*rotation_offset, [0.0; 3]);
+    assert!(!*use_quaternion);
+    assert!(!*write_normal);
+}
+
+#[test]
+fn flagbearer_particle_operators_read_synthetic_snap_and_normal_lock() {
+    let definition = particle_system(vec![
+        operator(
+            "C_OP_SetToCP",
+            vec![
+                ("m_nControlPointNumber", K::Int(4)),
+                ("m_vecOffset", particle_vector([1.0, 2.0, 3.0])),
+                ("m_bOffsetLocal", K::Int(1)),
+            ],
+        ),
+        operator("C_OP_SetToCP", vec![]),
+        operator(
+            "C_OP_NormalLock",
+            vec![("m_nControlPointNumber", K::Int(5))],
+        ),
+        operator("C_OP_NormalLock", vec![]),
+    ])
+    .expect("synthetic KV3 definitions");
+    let Operator::SetToControlPoint {
+        control_point,
+        offset,
+        local,
+    } = &definition.operators[0].class
+    else {
+        panic!("snap")
+    };
+    assert_eq!(control_point.index(), 4);
+    assert_eq!(*offset, [1.0, 2.0, 3.0]);
+    assert!(*local);
+    let Operator::SetToControlPoint {
+        control_point,
+        offset,
+        local,
+    } = &definition.operators[1].class
+    else {
+        panic!("default snap")
+    };
+    assert_eq!(control_point.index(), 0);
+    assert_eq!(*offset, [0.0; 3]);
+    assert!(!*local);
+    let Operator::NormalLock { control_point } = &definition.operators[2].class else {
+        panic!("normal lock")
+    };
+    assert_eq!(control_point.index(), 5);
+    let Operator::NormalLock { control_point } = &definition.operators[3].class else {
+        panic!("default normal lock")
+    };
+    assert_eq!(control_point.index(), 0);
+}
+
+#[test]
+fn flagbearer_particle_operators_refuse_synthetic_control_points_beyond_the_schema_bounds() {
+    for (class, key, list) in [
+        (
+            "C_OP_SetControlPointFromObjectScale",
+            "m_nCPInput",
+            "m_PreEmissionOperators",
+        ),
+        (
+            "C_OP_SetControlPointFromObjectScale",
+            "m_nCPOutput",
+            "m_PreEmissionOperators",
+        ),
+        ("C_OP_RemapCPOrientationToRotations", "m_nCP", "m_Operators"),
+        ("C_OP_SetToCP", "m_nControlPointNumber", "m_Operators"),
+        ("C_OP_NormalLock", "m_nControlPointNumber", "m_Operators"),
+    ] {
+        for bad in [-2, 64] {
+            let error = particle_lists(vec![(
+                list,
+                vec![operator(class, vec![(key, K::Int(bad))])],
+            )])
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("vpcf: {key} {bad} is outside -1..=63")
+            );
+        }
+    }
+}
+
+fn particle_vector(values: [f64; 3]) -> K {
+    K::Arr(values.into_iter().map(K::Float).collect())
+}
+
+fn synthetic_flagbearer_orientation() -> System {
+    let scale = operator(
+        "C_OP_SetControlPointFromObjectScale",
+        vec![("m_nCPInput", K::Int(62)), ("m_nCPOutput", K::Int(63))],
+    );
+    let legacy = operator(
+        "C_OP_RemapCPOrientationToRotations",
+        vec![
+            ("m_nCP", K::Int(7)),
+            ("m_vecRotation", particle_vector([10.0, 20.0, 30.0])),
+            ("m_bUseQuat", K::Int(1)),
+            ("m_bWriteNormal", K::Int(1)),
+        ],
+    );
+    let modern = operator(
+        "C_OP_RemapTransformOrientationToRotations",
+        vec![(
+            "m_TransformInput",
+            K::Obj(vec![
+                ("m_nType", s("PT_TYPE_CONTROL_POINT")),
+                ("m_nControlPoint", K::Int(3)),
+            ]),
+        )],
+    );
+    particle_lists(vec![
+        (
+            "m_PreEmissionOperators",
+            vec![
+                scale,
+                operator("C_OP_SetControlPointFromObjectScale", vec![]),
+            ],
+        ),
+        ("m_Operators", vec![legacy, modern]),
+    ])
+    .expect("synthetic KV3 definitions")
+}

@@ -85,6 +85,13 @@ pub enum PreEmission {
         /// Away from the control point rather than at it.
         point_away: bool,
     },
+    /// `C_OP_SetControlPointFromObjectScale`: the bound object's scale in an output position.
+    SetControlPointFromObjectScale {
+        /// The control point bound to an object (none: scale one).
+        input: ControlPoint,
+        /// The control point whose position receives the scale in each component.
+        output: ControlPoint,
+    },
     /// A class this crate does not read.
     Unsupported(String),
 }
@@ -259,6 +266,10 @@ impl PreEmission {
                     orient: obj.bool("m_bOrient", false)?,
                 }))
             }
+            "C_OP_SetControlPointFromObjectScale" => Self::SetControlPointFromObjectScale {
+                input: obj.control_point("m_nCPInput", 0)?,
+                output: obj.control_point("m_nCPOutput", 1)?,
+            },
             "C_OP_StopAfterCPDuration" => Self::StopAfterDuration {
                 duration: FloatInput::read(obj, "m_flDuration", 1.0)?,
                 destroy: obj.bool("m_bDestroyImmediately", false)?,

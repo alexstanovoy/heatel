@@ -170,3 +170,55 @@ fn a_systems_sleep_time_and_bounding_box_read() {
     assert_eq!(trail.sleep_after, heatel::particle::SLEEP_AFTER);
     assert_eq!(trail.bounds, [[-10.0, -50.0, 0.0], [10.0, 10.0, 240.0]]);
 }
+
+/// The flag is a model particle, bound to the lane creep's attach_banner node.
+#[test]
+#[ignore = "needs a local Dota 2 install"]
+fn flagbearer_banner_operators_are_read_instead_of_silently_ignored() {
+    for side in ["radiant", "dire"] {
+        let (source, pak) = install();
+        let banner = system(
+            &source,
+            &pak,
+            &format!("particles/props/creep_banners/{side}_creep_banner.vpcf"),
+        );
+        assert!(
+            banner
+                .pre_emission
+                .iter()
+                .all(|op| !matches!(op.class, PreEmission::Unsupported(_))),
+            "the banner's object-scale input must be read"
+        );
+        assert!(
+            banner
+                .operators
+                .iter()
+                .all(|op| !matches!(op.class, Operator::Unsupported(_))),
+            "the banner must follow its attachment's orientation"
+        );
+        assert!(
+            banner
+                .renderers
+                .iter()
+                .any(|op| matches!(op.class, Renderer::Models(_)))
+        );
+        for suffix in [
+            "_ring",
+            "_ring_circle",
+            "_ring_ray",
+            "_ring_rope",
+            "_ring_embers",
+        ] {
+            let aura = system(
+                &source,
+                &pak,
+                &format!("particles/props/creep_banners/{side}_creep_banner{suffix}.vpcf"),
+            );
+            assert!(
+                aura.unsupported_classes().is_empty(),
+                "{side}{suffix}: {:?}",
+                aura.unsupported_classes()
+            );
+        }
+    }
+}
