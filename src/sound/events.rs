@@ -49,6 +49,12 @@ pub struct SoundEvent {
     pub fade_out: Option<f32>,
     /// The length of the longest of its files, in seconds.
     pub duration: Option<f32>,
+    /// The factor the volume gets on the entity of the player the game is played on.
+    pub volume_on_player_mult: Option<f32>,
+    /// Whether the volume follows the fog of war: heard only where the source is in sight.
+    pub use_fog_of_war: Option<bool>,
+    /// The radius about the source within which sight counts, when it follows the fog of war.
+    pub fog_of_war_radius: Option<f32>,
     /// The events it plays along with.
     pub layers: Vec<SoundLayer>,
     /// How many of it may sound at once, and the instances that are repeats of one sound;
@@ -91,6 +97,23 @@ pub struct SoundStack {
     pub name: String,
     /// The limits its events get where they state none.
     pub limits: SoundLimits,
+    /// The rest of what its events get where they state none.
+    pub defaults: SoundDefaults,
+}
+
+/// What a sound event type gives the events that state none of these themselves.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SoundDefaults {
+    /// The sound level in decibels.
+    pub sound_level: Option<f32>,
+    /// The distance beyond which it is not heard; negative for none.
+    pub distance_max: Option<f32>,
+    /// The factor on the entity of the player.
+    pub volume_on_player_mult: Option<f32>,
+    /// Whether the volume follows the fog of war.
+    pub use_fog_of_war: Option<bool>,
+    /// The radius about the source within which sight counts.
+    pub fog_of_war_radius: Option<f32>,
 }
 
 /// An event played along with another.
@@ -152,6 +175,9 @@ fn event(name: &str, v: &Value) -> Result<SoundEvent> {
         fade_in: number("volume_fade_in"),
         fade_out: number("volume_fade_out"),
         duration: number("vsnd_duration"),
+        volume_on_player_mult: number("volume_on_player_mult"),
+        use_fog_of_war: number("volume_use_FOW").map(|n| n != 0.0),
+        fog_of_war_radius: number("volume_FOW_radius"),
         limits: limits(|key| v.get(key)),
         layers: LAYERS
             .iter()
@@ -239,12 +265,33 @@ pub fn read_sound_stacks(resource: &Resource) -> Result<Vec<SoundStack>> {
         };
         // Each variable is `{data_type, value}`.
         let limits = limits(|key| variables.get(key).and_then(|v| v.get("value")));
+        let defaults = stack_defaults(|key| variables.get(key).and_then(|v| v.get("value")));
         out.push(SoundStack {
             name: name.to_owned(),
             limits,
+            defaults,
         });
     }
     Ok(out)
+}
+
+/// The defaults a stack states under their keys; a stack states its numbers as strings.
+fn stack_defaults<'a>(get: impl Fn(&str) -> Option<&'a Value>) -> SoundDefaults {
+    let float = |key: &str| {
+        get(key)
+            .and_then(|v| match v {
+                Value::String(text) => text.trim().parse::<f64>().ok(),
+                other => other.as_f64(),
+            })
+            .map(|n| finite(n as f32))
+    };
+    SoundDefaults {
+        sound_level: float("soundlevel"),
+        distance_max: float("distance_max"),
+        volume_on_player_mult: float("volume_on_player_mult"),
+        use_fog_of_war: float("volume_use_FOW").map(|n| n != 0.0),
+        fog_of_war_radius: float("volume_FOW_radius"),
+    }
 }
 
 impl SoundLimits {
@@ -292,5 +339,37 @@ mod tests {
         let err = event_with_volume(Value::String("0.8,1.0".to_owned())).unwrap_err();
         assert!(err.to_string().contains("Test.Event"), "{err}");
         assert!(err.to_string().contains("volume is not a number"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod default_tests {
+    use super::*;
+    use crate::kv3::Object;
+
+    #[test]
+    fn a_stack_states_its_defaults_as_strings_and_an_event_its_player_and_fog_fields_as_numbers() {
+        let mut stack = Object::with_capacity(2);
+        stack.push("soundlevel".to_owned(), Value::String("70".to_owned()));
+        stack.push(
+            "volume_on_player_mult".to_owned(),
+            Value::String("1.250000".to_owned()),
+        );
+        stack.push(
+            "volume_use_FOW".to_owned(),
+            Value::String("0.000000".to_owned()),
+        );
+        let defaults = stack_defaults(|key| stack.get(key));
+        assert_eq!(defaults.sound_level, Some(70.0));
+        assert_eq!(defaults.volume_on_player_mult, Some(1.25));
+        assert_eq!(defaults.use_fog_of_war, Some(false));
+        assert_eq!(defaults.distance_max, None);
+
+        let mut object = Object::with_capacity(2);
+        object.push("volume_use_FOW".to_owned(), Value::Float(1.0));
+        object.push("volume_FOW_radius".to_owned(), Value::Float(300.0));
+        let event = event("Test.Event", &Value::Object(object)).expect("an event");
+        assert_eq!(event.use_fog_of_war, Some(true));
+        assert_eq!(event.fog_of_war_radius, Some(300.0));
     }
 }
