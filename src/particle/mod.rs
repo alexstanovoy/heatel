@@ -16,7 +16,7 @@ mod renderer;
 mod system;
 mod transform;
 
-pub use constraint::{Constraint, DistanceToPath, Planar, WorldTrace};
+pub use constraint::{Constraint, Distance, DistanceToPath, Planar, WorldTrace};
 pub use emitter::Emitter;
 pub use field::{Field, SetMethod};
 pub use function::{EndCap, Function, Timing};
@@ -33,7 +33,8 @@ pub use operator::{
 };
 pub use path::{MaintainPath, Path, SequentialPath};
 pub use pre_emission::{
-    ControlPointPositions, DistanceBetweenCps, PreEmission, ScalarExpression, ScalarExpressionToCp,
+    ControlPointPositions, DistanceBetweenCps, ParentSet, PreEmission, ScalarExpression,
+    ScalarExpressionToCp,
 };
 pub use preview::{ControlPointConfig, ControlPointDriver, control_point_configurations};
 pub use read::MAX_CONTROL_POINT;

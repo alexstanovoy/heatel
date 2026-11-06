@@ -6,10 +6,10 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 
 use super::field::Field;
-use super::input::FloatInput;
+use super::input::{FloatInput, VectorInput};
 use super::path::Path;
 use super::read::Obj;
-use super::transform::ControlPoint;
+use super::transform::{ControlPoint, Transform};
 
 /// A constraint class.
 #[derive(Clone, Debug, PartialEq)]
@@ -26,6 +26,24 @@ pub enum Constraint {
     WorldTrace(Box<WorldTrace>),
     /// A class this crate does not read.
     Unsupported(String),
+    /// `C_OP_ConstrainDistance`: particles kept within a spherical shell.
+    Distance(Box<Distance>),
+}
+
+/// `C_OP_ConstrainDistance`'s parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct Distance {
+    /// Inner radius of the shell.
+    pub min_distance: FloatInput,
+    /// Outer radius, at least the inner radius.
+    pub max_distance: FloatInput,
+    /// The frame the centre follows.
+    pub transform: Transform,
+    /// Offset in that frame, or a world position when `global_center` is set.
+    pub center_offset: VectorInput,
+    /// The centre is a world position instead of following a control point.
+    pub global_center: bool,
 }
 
 /// `C_OP_ConstrainDistanceToPath`'s parameters.
@@ -103,6 +121,18 @@ pub struct WorldTrace {
 impl Constraint {
     pub(super) fn read(class: &str, obj: &Obj<'_>) -> Result<Self> {
         Ok(match class {
+            "C_OP_ConstrainDistance" => Self::Distance(Box::new(Distance {
+                min_distance: FloatInput::read(obj, "m_fMinDistance", 0.0)?,
+                max_distance: FloatInput::read(obj, "m_fMaxDistance", 100.0)?,
+                transform: Transform::read_member(
+                    obj,
+                    "m_nControlPointNumber",
+                    "m_nControlPointNumber",
+                    true,
+                )?,
+                center_offset: VectorInput::read(obj, "m_CenterOffset", [0.0; 3])?,
+                global_center: obj.bool("m_bGlobalCenter", false)?,
+            })),
             "C_OP_ConstrainDistanceToPath" => {
                 let min = obj.float("m_fMinDistance", 0.0)?;
                 Self::DistanceToPath(Box::new(DistanceToPath {

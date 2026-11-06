@@ -19,6 +19,7 @@ use heatel::{Model, Resource, SliceSource, Source, Vpk, kv3};
 
 /// A KV3 value to write.
 enum K {
+    Bool(bool),
     Int(i64),
     UInt(u64),
     Float(f64),
@@ -46,6 +47,7 @@ fn kv3_file(root: &K) -> Vec<u8> {
     }
     fn value(v: &K, ids: &HashMap<&str, i32>, out: &mut Vec<u8>) {
         match v {
+            K::Bool(b) => out.extend([2, u8::from(*b)]),
             K::Int(n) => out.extend([3].into_iter().chain(n.to_le_bytes())),
             K::UInt(n) => out.extend([4].into_iter().chain(n.to_le_bytes())),
             K::Float(f) => out.extend([5].into_iter().chain(f.to_le_bytes())),
@@ -370,6 +372,163 @@ fn particle_lists(lists: Vec<(&'static str, Vec<K>)>) -> heatel::Result<System> 
 
 fn operator(class: &str, members: Vec<(&'static str, K)>) -> K {
     K::Obj([("_class", s(class))].into_iter().chain(members).collect())
+}
+
+#[test]
+fn distance_constraints_read_the_shell_and_its_control_point() {
+    let system = particle_lists(vec![(
+        "m_Constraints",
+        vec![operator(
+            "C_OP_ConstrainDistance",
+            vec![
+                ("m_fMinDistance", K::Float(5.0)),
+                ("m_fMaxDistance", K::Float(75.0)),
+                (
+                    "m_CenterOffset",
+                    K::Arr(vec![K::Float(5.0), K::Float(-7.0), K::Float(50.0)]),
+                ),
+                ("m_nControlPointNumber", K::Int(63)),
+                ("m_bGlobalCenter", K::Bool(true)),
+            ],
+        )],
+    )])
+    .expect("distance constraint");
+    assert!(
+        system.unsupported_classes().is_empty(),
+        "the shell is simulated"
+    );
+    #[cfg(feature = "serde")]
+    {
+        let json =
+            serde_json::to_value(&system.constraints[0].class).expect("serialized definition");
+        assert_eq!(
+            json["Distance"]["min_distance"],
+            serde_json::json!({"Literal": 5.0})
+        );
+        assert_eq!(
+            json["Distance"]["max_distance"],
+            serde_json::json!({"Literal": 75.0})
+        );
+        assert_eq!(
+            json["Distance"]["transform"]["ControlPoint"]["control_point"],
+            63
+        );
+        assert_eq!(json["Distance"]["global_center"], true);
+        assert_eq!(
+            json["Distance"]["center_offset"],
+            serde_json::json!({"Literal": [5.0, -7.0, 50.0]})
+        );
+    }
+}
+
+#[test]
+fn distance_constraints_reject_control_points_outside_the_table() {
+    let result = particle_lists(vec![(
+        "m_Constraints",
+        vec![operator(
+            "C_OP_ConstrainDistance",
+            vec![("m_nControlPointNumber", K::Int(64))],
+        )],
+    )]);
+    assert_eq!(
+        result
+            .expect_err("control point 64 is outside the table")
+            .to_string(),
+        "vpcf: m_nControlPointNumber 64 is outside -1..=63"
+    );
+}
+
+#[test]
+fn distance_constraints_read_collection_inputs_without_losing_the_transform() {
+    use heatel::particle::{Constraint, ControlPoint, FloatInput, Transform, VectorInput};
+    let system = particle_lists(vec![(
+        "m_Constraints",
+        vec![operator(
+            "C_OP_ConstrainDistance",
+            vec![
+                (
+                    "m_fMaxDistance",
+                    K::Obj(vec![("m_flLiteralValue", K::Float(75.0))]),
+                ),
+                (
+                    "m_nControlPointNumber",
+                    K::Obj(vec![
+                        ("m_nControlPoint", K::Int(7)),
+                        ("m_bUseOrientation", K::Bool(false)),
+                    ]),
+                ),
+                (
+                    "m_CenterOffset",
+                    K::Obj(vec![(
+                        "m_vLiteralValue",
+                        K::Arr(vec![K::Float(1.0), K::Float(2.0), K::Float(3.0)]),
+                    )]),
+                ),
+            ],
+        )],
+    )])
+    .expect("collection inputs");
+    let Constraint::Distance(d) = &system.constraints[0].class else {
+        panic!("distance");
+    };
+    assert_eq!(d.max_distance, FloatInput::Literal(75.0));
+    assert_eq!(
+        d.transform,
+        Transform::ControlPoint {
+            control_point: ControlPoint::new(7).expect("CP7"),
+            orientation: false,
+            range_max: None,
+        }
+    );
+    assert_eq!(d.center_offset, VectorInput::Literal([1.0, 2.0, 3.0]));
+}
+
+#[test]
+fn center_control_points_read_offsets_averaging_and_parent_scope() {
+    let system = particle_lists(vec![(
+        "m_PreEmissionOperators",
+        vec![operator(
+            "C_OP_SetControlPointToCenter",
+            vec![
+                ("m_nCP1", K::Int(2)),
+                (
+                    "m_vecCP1Pos",
+                    K::Arr(vec![K::Float(1.0), K::Float(-2.0), K::Float(3.0)]),
+                ),
+                ("m_bUseAvgParticlePos", K::Bool(true)),
+                ("m_nSetParent", s("PARTICLE_SET_PARENT_ROOT")),
+            ],
+        )],
+    )])
+    .expect("centre control point");
+    assert!(
+        system.unsupported_classes().is_empty(),
+        "the centre setter must be simulated"
+    );
+    #[cfg(feature = "serde")]
+    {
+        let json = serde_json::to_value(&system.pre_emission[0].class).expect("serialized setter");
+        let value = &json["SetControlPointToCenter"];
+        assert_eq!(value["control_point"], 2);
+        assert_eq!(value["offset"], serde_json::json!([1.0, -2.0, 3.0]));
+        assert_eq!(value["average"], true);
+        assert_eq!(value["target"], "Root");
+    }
+}
+
+#[test]
+fn center_control_points_reject_an_output_past_the_table() {
+    let result = particle_lists(vec![(
+        "m_PreEmissionOperators",
+        vec![operator(
+            "C_OP_SetControlPointToCenter",
+            vec![("m_nCP1", K::Int(64))],
+        )],
+    )]);
+    assert_eq!(
+        result.expect_err("CP64").to_string(),
+        "vpcf: m_nCP1 64 is outside -1..=63"
+    );
 }
 
 /// A particle system's lists are bounded (Dota's have up to ~30 functions), and every

@@ -94,6 +94,42 @@ pub enum PreEmission {
     },
     /// A class this crate does not read.
     Unsupported(String),
+    /// `C_OP_SetControlPointToCenter`: a point at the system's last bounds or live mean.
+    SetControlPointToCenter {
+        /// The point to write.
+        control_point: ControlPoint,
+        /// A world-space offset from the centre.
+        offset: [f32; 3],
+        /// Average live positions instead of using the last calculated bounds.
+        average: bool,
+        /// Which ancestor starts the write down the system tree.
+        target: ParentSet,
+    },
+}
+
+/// Where a control-point position write starts (`ParticleParentSetMode_t`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
+pub enum ParentSet {
+    /// This system and its descendants.
+    #[default]
+    Own,
+    /// Its immediate parent (or this system at the root) and that parent's descendants.
+    Parent,
+    /// The root and the whole tree below it.
+    Root,
+}
+
+impl ParentSet {
+    fn read(obj: &Obj<'_>) -> Result<Self> {
+        let names = [
+            "PARTICLE_SET_PARENT_NO",
+            "PARTICLE_SET_PARENT_IMMEDIATE",
+            "PARTICLE_SET_PARENT_ROOT",
+        ];
+        Ok([Self::Own, Self::Parent, Self::Root][obj.choice("m_nSetParent", &names, 0)?])
+    }
 }
 
 /// How two numbers make one (`ScalarExpressionType_t`).
@@ -246,6 +282,12 @@ pub struct ControlPointPositions {
 impl PreEmission {
     pub(super) fn read(class: &str, obj: &Obj<'_>) -> Result<Self> {
         Ok(match class {
+            "C_OP_SetControlPointToCenter" => Self::SetControlPointToCenter {
+                control_point: obj.control_point("m_nCP1", 1)?,
+                offset: obj.vec3("m_vecCP1Pos", [0.0; 3])?,
+                average: obj.bool("m_bUseAvgParticlePos", false)?,
+                target: ParentSet::read(obj)?,
+            },
             "C_OP_SetControlPointPositions" => {
                 let point = |n: u8, place: [f32; 3]| -> Result<(ControlPoint, [f32; 3])> {
                     Ok((

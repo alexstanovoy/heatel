@@ -66,6 +66,9 @@ pub struct System {
     /// view (`m_BoundingBoxMin`, `m_BoundingBoxMax`).
     #[cfg_attr(feature = "serde", serde(default = "default_bounds"))]
     pub bounds: [[f32; 3]; 2],
+    /// An unbounded system contributes nothing to its parent's bounds (`m_bInfiniteBounds`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub infinite_bounds: bool,
     /// What a particle starts with before the initializers.
     pub constants: Constants,
     /// The children's group, which their parent's functions address.
@@ -166,6 +169,7 @@ impl System {
                 root.vec3("m_BoundingBoxMin", BOUNDS[0])?,
                 root.vec3("m_BoundingBoxMax", BOUNDS[1])?,
             ],
+            infinite_bounds: root.bool("m_bInfiniteBounds", false)?,
             constants: Constants::read(&root)?,
             group: root.int_in("m_nGroupID", 0, -1, 1 << 16)? as i32,
             pre_emission: functions(&root, "m_PreEmissionOperators", PreEmission::read)?,
