@@ -15,6 +15,9 @@ First release.
 
 ### Added
 
+- `sound::read_sound_mixer` reads Dota's `scripts/soundmixers.txt` (mix groups matched by the
+  path of a sound, the levels of each mix, and the layers that duck groups while another
+  sounds), and `kv3::parse_text` reads the text KeyValues3 it is written in, both bounded.
 - In-place animation export by activity through `anim::read_clips_in_place` and
   `ModelOptions::in_place_activities`, retaining authored bone poses. Raw export keeps root
   trajectories by default. `ModelOptions::new` supports struct update syntax for defaults.
