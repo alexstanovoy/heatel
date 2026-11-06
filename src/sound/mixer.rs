@@ -176,7 +176,11 @@ fn number(object: &Object, key: &str, default: f32) -> Result<f32> {
     match object.get(key) {
         None => Ok(default),
         Some(value) => match value.as_f64() {
-            Some(n) if n.is_finite() => Ok(n as f32),
+            Some(n) if n.is_finite() && (n as f32).is_finite() => Ok(n as f32),
+            Some(n) if n.is_finite() => Err(malformed(
+                "soundmixers",
+                format!("{key} does not fit a number"),
+            )),
             _ => Err(malformed("soundmixers", format!("{key} is not a number"))),
         },
     }
@@ -329,6 +333,16 @@ mod tests {
         let bad = FILE.replace("vol = 0.4", "vol = \"loud\"");
         let err = read_sound_mixer(bad.as_bytes()).unwrap_err();
         assert!(err.to_string().contains("vol is not a number"), "{err}");
+    }
+
+    #[test]
+    fn a_volume_too_large_for_a_number_refuses_the_file_naming_the_field() {
+        let bad = FILE.replace("vol = 0.4", "vol = 1e300");
+        let err = read_sound_mixer(bad.as_bytes()).unwrap_err();
+        assert!(
+            err.to_string().contains("vol does not fit a number"),
+            "{err}"
+        );
     }
 
     #[test]

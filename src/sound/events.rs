@@ -147,7 +147,23 @@ pub fn read_sound_events(resource: &Resource) -> Result<Vec<SoundEvent>> {
 }
 
 fn event(name: &str, v: &Value) -> Result<SoundEvent> {
-    let number = |key: &str| v.get(key).and_then(Value::as_f64).map(|n| finite(n as f32));
+    // A number that does not fit an f32 would read as 0 (or as nothing) and sound wrong without a
+    // word, so it is refused, naming the event and the field.
+    let mut refused = None;
+    let mut number = |key: &str| {
+        let n = v.get(key)?.as_f64()?;
+        let narrowed = n as f32;
+        if !narrowed.is_finite() {
+            refused.get_or_insert_with(|| {
+                malformed(
+                    "vsndevts",
+                    format!("event {name}: {key} does not fit a number"),
+                )
+            });
+            return None;
+        }
+        Some(narrowed)
+    };
     let text = |key: &str| v.get(key).and_then(Value::as_str).map(str::to_owned);
     let jitter = number("pitch_rand_min").zip(number("pitch_rand_max"));
     // A volume that is not a number (a range string, say) would play at the file's level
@@ -160,7 +176,7 @@ fn event(name: &str, v: &Value) -> Result<SoundEvent> {
             format!("event {name}: its volume is not a number"),
         ));
     }
-    Ok(SoundEvent {
+    let event = SoundEvent {
         name: name.to_owned(),
         kind: text("type").unwrap_or_default(),
         files: files(v.get("vsnd_files"))?,
@@ -188,7 +204,11 @@ fn event(name: &str, v: &Value) -> Result<SoundEvent> {
                 })
             })
             .collect(),
-    })
+    };
+    match refused {
+        Some(err) => Err(err),
+        None => Ok(event),
+    }
 }
 
 /// The files of `vsnd_files`: one string, or a list of them.
@@ -265,7 +285,7 @@ pub fn read_sound_stacks(resource: &Resource) -> Result<Vec<SoundStack>> {
         };
         // Each variable is `{data_type, value}`.
         let limits = limits(|key| variables.get(key).and_then(|v| v.get("value")));
-        let defaults = stack_defaults(|key| variables.get(key).and_then(|v| v.get("value")));
+        let defaults = stack_defaults(name, |key| variables.get(key).and_then(|v| v.get("value")))?;
         out.push(SoundStack {
             name: name.to_owned(),
             limits,
@@ -275,23 +295,36 @@ pub fn read_sound_stacks(resource: &Resource) -> Result<Vec<SoundStack>> {
     Ok(out)
 }
 
-/// The defaults a stack states under their keys; a stack states its numbers as strings.
-fn stack_defaults<'a>(get: impl Fn(&str) -> Option<&'a Value>) -> SoundDefaults {
-    let float = |key: &str| {
-        get(key)
-            .and_then(|v| match v {
-                Value::String(text) => text.trim().parse::<f64>().ok(),
-                other => other.as_f64(),
-            })
-            .map(|n| finite(n as f32))
+/// The defaults a stack states under their keys; a stack states its numbers as strings. A number
+/// that does not fit an f32 refuses the stack, naming it and the field.
+fn stack_defaults<'a>(
+    stack: &str,
+    get: impl Fn(&str) -> Option<&'a Value>,
+) -> Result<SoundDefaults> {
+    let float = |key: &str| -> Result<Option<f32>> {
+        let Some(n) = get(key).and_then(|v| match v {
+            Value::String(text) => text.trim().parse::<f64>().ok(),
+            other => other.as_f64(),
+        }) else {
+            return Ok(None);
+        };
+        let narrowed = n as f32;
+        if narrowed.is_finite() {
+            Ok(Some(narrowed))
+        } else {
+            Err(malformed(
+                "vsndstck",
+                format!("type {stack}: {key} does not fit a number"),
+            ))
+        }
     };
-    SoundDefaults {
-        sound_level: float("soundlevel"),
-        distance_max: float("distance_max"),
-        volume_on_player_mult: float("volume_on_player_mult"),
-        use_fog_of_war: float("volume_use_FOW").map(|n| n != 0.0),
-        fog_of_war_radius: float("volume_FOW_radius"),
-    }
+    Ok(SoundDefaults {
+        sound_level: float("soundlevel")?,
+        distance_max: float("distance_max")?,
+        volume_on_player_mult: float("volume_on_player_mult")?,
+        use_fog_of_war: float("volume_use_FOW")?.map(|n| n != 0.0),
+        fog_of_war_radius: float("volume_FOW_radius")?,
+    })
 }
 
 impl SoundLimits {
@@ -359,7 +392,7 @@ mod default_tests {
             "volume_use_FOW".to_owned(),
             Value::String("0.000000".to_owned()),
         );
-        let defaults = stack_defaults(|key| stack.get(key));
+        let defaults = stack_defaults("t", |key| stack.get(key)).expect("defaults");
         assert_eq!(defaults.sound_level, Some(70.0));
         assert_eq!(defaults.volume_on_player_mult, Some(1.25));
         assert_eq!(defaults.use_fog_of_war, Some(false));
@@ -371,5 +404,35 @@ mod default_tests {
         let event = event("Test.Event", &Value::Object(object)).expect("an event");
         assert_eq!(event.use_fog_of_war, Some(true));
         assert_eq!(event.fog_of_war_radius, Some(300.0));
+    }
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+    use crate::kv3::Object;
+
+    #[test]
+    fn a_distance_max_too_large_for_a_number_refuses_the_event_naming_it() {
+        let mut object = Object::with_capacity(1);
+        object.push("distance_max".to_owned(), Value::Float(1e300));
+        let err = event("Far.Event", &Value::Object(object)).unwrap_err();
+        assert!(err.to_string().contains("Far.Event"), "{err}");
+        assert!(
+            err.to_string().contains("distance_max does not fit"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_default_too_large_for_a_number_refuses_the_stack_naming_it() {
+        let mut stack = Object::with_capacity(1);
+        stack.push("distance_max".to_owned(), Value::String("1e300".to_owned()));
+        let err = stack_defaults("dota_x", |key| stack.get(key)).unwrap_err();
+        assert!(err.to_string().contains("dota_x"), "{err}");
+        assert!(
+            err.to_string().contains("distance_max does not fit"),
+            "{err}"
+        );
     }
 }
