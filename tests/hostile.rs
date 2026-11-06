@@ -835,3 +835,34 @@ fn synthetic_flagbearer_orientation() -> System {
     ])
     .expect("synthetic KV3 definitions")
 }
+
+#[test]
+fn response_rules_reject_a_non_array_response_group_list() {
+    let data = K::Obj(vec![("m_ResponseGroups", s("not an array"))]);
+    let file = resource(&[(b"DATA", kv3_file(&data))]);
+    let resource = Resource::parse(&file).expect("synthetic resource");
+    let error = heatel::talker::read_response_rules(&resource).unwrap_err();
+    assert_eq!(error.to_string(), "vrr: m_ResponseGroups is not an array");
+}
+
+#[test]
+fn response_rules_read_a_line_respeak_delay() {
+    let data = K::Obj(vec![(
+        "m_ResponseGroups",
+        K::Arr(vec![K::Obj(vec![(
+            "m_responses",
+            K::Arr(vec![K::Obj(vec![
+                ("m_type", s("SPEAK")),
+                ("m_value", s("example")),
+                (
+                    "m_params",
+                    K::Obj(vec![("m_respeakdelay.start", K::Float(42.0))]),
+                ),
+            ])]),
+        )])]),
+    )]);
+    let file = resource(&[(b"DATA", kv3_file(&data))]);
+    let resource = Resource::parse(&file).expect("synthetic resource");
+    let rules = heatel::talker::read_response_rules(&resource).expect("response rules");
+    assert_eq!(rules.groups[0].responses[0].respeak_delay, Some(42.0));
+}

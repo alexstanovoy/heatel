@@ -114,7 +114,12 @@ pub fn read_response_rules(resource: &Resource) -> Result<ResponseRules> {
         return Err(malformed("vrr", "not an object"));
     }
     let list = |key: &str, max: usize| -> Result<&[Value]> {
-        let items = data.get(key).and_then(Value::as_array).unwrap_or_default();
+        let items = match data.get(key) {
+            None => &[][..],
+            Some(value) => value
+                .as_array()
+                .ok_or_else(|| malformed("vrr", format!("{key} is not an array")))?,
+        };
         if items.len() > max {
             return Err(malformed("vrr", format!("{} {key}, too many", items.len())));
         }
@@ -179,7 +184,7 @@ fn group(v: &Value) -> Result<ResponseGroup> {
 
 fn response(v: &Value) -> Response {
     let params = v.get("m_params");
-    let start = |key: &str| number(params.and_then(|p| p.get(key)?.get("start")));
+    let start = |key: &str| number(params.and_then(|p| p.get(key)));
     let kind = match text(v, "m_type").unwrap_or_default().as_str() {
         "SPEAK" => ResponseKind::Speak,
         "SCENE" => ResponseKind::Scene,
@@ -191,9 +196,9 @@ fn response(v: &Value) -> Response {
         kind,
         value: text(v, "m_value"),
         speak_once: params.and_then(|p| p.get("m_bSpeakOnce")?.as_bool()) == Some(true),
-        respeak_delay: start("m_respeakdelay"),
-        pre_delay: start("m_predelay"),
-        weapon_delay: start("m_weapondelay"),
+        respeak_delay: start("m_respeakdelay.start"),
+        pre_delay: start("m_predelay.start"),
+        weapon_delay: start("m_weapondelay.start"),
         followup: v.get("m_pConceptFollowup").map(|f| Followup {
             target: text(f, "m_target").unwrap_or_default(),
             concept: text(f, "m_concept").unwrap_or_default(),
