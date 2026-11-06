@@ -107,6 +107,9 @@ pub struct Tokens<'a> {
     at: usize,
     /// Where a `*/` was last searched for and none found: none follows any later `/*` either.
     no_comment_end: Option<usize>,
+    /// Where the last quoted string that never closed stopped being read: every quote before it
+    /// was escaped in that string, so it ends there unclosed as well.
+    no_quote_end: usize,
 }
 
 impl<'a> Iterator for Tokens<'a> {
@@ -118,12 +121,13 @@ impl<'a> Iterator for Tokens<'a> {
             let i = self.at;
             self.at += 1;
             match bytes[i] {
-                b'"' => {
-                    if let Some(end) = quoted_end(bytes, i + 1) {
+                b'"' if i >= self.no_quote_end => match quoted_end(bytes, i + 1) {
+                    Ok(end) => {
                         self.at = end + 1;
                         return Some(Token::Text(&self.text[i + 1..end]));
                     }
-                }
+                    Err(stop) => self.no_quote_end = stop,
+                },
                 b'{' => return Some(Token::Open),
                 b'}' => return Some(Token::Close),
                 b'/' if bytes.get(i + 1) == Some(&b'/') => {
@@ -151,22 +155,23 @@ pub fn tokens(text: &str) -> Tokens<'_> {
         text,
         at: 0,
         no_comment_end: None,
+        no_quote_end: 0,
     }
 }
 
 /// Where the quoted string whose text starts at `from` closes (a backslash escapes the next
-/// byte, a newline excepted).
-fn quoted_end(bytes: &[u8], from: usize) -> Option<usize> {
+/// byte, a newline excepted), or where it was found never to close.
+fn quoted_end(bytes: &[u8], from: usize) -> std::result::Result<usize, usize> {
     let mut i = from;
     while i < bytes.len() {
         match bytes[i] {
-            b'"' => return Some(i),
+            b'"' => return Ok(i),
             b'\\' if bytes.get(i + 1).is_some_and(|&b| b != b'\n') => i += 2,
-            b'\\' => return None,
+            b'\\' => return Err(i),
             _ => i += 1,
         }
     }
-    None
+    Err(bytes.len())
 }
 
 /// KeyValues text as a tree (a [`Kv::Block`] at the root). Keys and values are quoted strings;
@@ -300,6 +305,6 @@ fn localization_pair(text: &str, at: usize) -> Option<(&str, &str, usize)> {
     if bytes.get(i) != Some(&b'"') {
         return None;
     }
-    let end = quoted_end(bytes, i + 1)?;
+    let end = quoted_end(bytes, i + 1).ok()?;
     Some((&text[key_start..key_end], &text[i + 1..end], end + 1))
 }

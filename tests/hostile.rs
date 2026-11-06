@@ -656,3 +656,15 @@ fn tooltip_scripts_read_in_linear_time() {
     let huge = vec![b' '; 17 << 20];
     assert!(tooltips(&wanted, localization, &[&huge]).is_err());
 }
+
+/// A quote that never closes, followed by escaped quotes only, had each of those quotes searched
+/// to the end of the text again: quadratic in the file's size.
+#[test]
+fn scripts_with_an_unclosed_quote_read_in_linear_time() {
+    let mut script =
+        String::from("\"DOTAAbilities\" { \"item_blink\" { \"ItemCost\" \"2250\" } }\n\"");
+    script += &"\\\"".repeat(1 << 20);
+    let found = heatel::scripts::entries(script.as_bytes()).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name, "item_blink");
+}
