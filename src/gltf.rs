@@ -255,9 +255,10 @@ impl Builder {
 
     fn attributes(&mut self, v: &Vertices) -> Json {
         let position = self.floats(&v.positions, "VEC3");
-        let (min, max) = bounds(&v.positions);
-        self.accessors[position]["min"] = json!(min);
-        self.accessors[position]["max"] = json!(max);
+        if let Some((min, max)) = bounds(&v.positions) {
+            self.accessors[position]["min"] = json!(min);
+            self.accessors[position]["max"] = json!(max);
+        }
         let mut attributes = json!({ "POSITION": position });
         if let Some(normals) = &v.normals {
             attributes["NORMAL"] = json!(self.floats(normals, "VEC3"));
@@ -306,8 +307,9 @@ impl Builder {
         if let (false, Some(set)) = (targets.is_empty(), &mesh.morph) {
             gltf_mesh["extras"] = face_extras(mesh, &set.flex);
         }
-        let (min, max) = mesh_bounds(mesh);
-        gltf_mesh["extras"]["render_bounds"] = json!({ "min": min, "max": max });
+        if let Some((min, max)) = mesh_bounds(mesh) {
+            gltf_mesh["extras"]["render_bounds"] = json!({ "min": min, "max": max });
+        }
         self.meshes.push(gltf_mesh);
         let mut node = json!({ "name": name, "mesh": self.meshes.len() - 1 });
         if skinned {
@@ -324,9 +326,10 @@ impl Builder {
         let mut out = Vec::with_capacity(mesh.targets.len());
         for target in &mesh.targets {
             let position = self.floats_for(&target.positions, "VEC3", None);
-            let (min, max) = bounds(&target.positions);
-            self.accessors[position]["min"] = json!(min);
-            self.accessors[position]["max"] = json!(max);
+            if let Some((min, max)) = bounds(&target.positions) {
+                self.accessors[position]["min"] = json!(min);
+                self.accessors[position]["max"] = json!(max);
+            }
             let mut attributes = json!({ "POSITION": position });
             if normals {
                 attributes["NORMAL"] = json!(self.floats_for(&target.normals, "VEC3", None));
@@ -669,7 +672,7 @@ fn check_clip(clip: &crate::anim::Clip, bones: usize) -> Result<usize> {
     Ok(size)
 }
 
-fn bounds(points: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
+fn bounds(points: &[[f32; 3]]) -> Option<([f32; 3], [f32; 3])> {
     let mut min = [f32::INFINITY; 3];
     let mut max = [f32::NEG_INFINITY; 3];
     for p in points {
@@ -678,14 +681,11 @@ fn bounds(points: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
             max[i] = max[i].max(p[i]);
         }
     }
-    if points.is_empty() {
-        return ([0.0; 3], [0.0; 3]);
-    }
-    (min, max)
+    (!points.is_empty()).then_some((min, max))
 }
 
 /// Render bounds remain available to clients that release CPU vertex buffers after upload.
-fn mesh_bounds(mesh: &Mesh) -> ([f32; 3], [f32; 3]) {
+fn mesh_bounds(mesh: &Mesh) -> Option<([f32; 3], [f32; 3])> {
     let mut min = [f32::INFINITY; 3];
     let mut max = [f32::NEG_INFINITY; 3];
     let mut used = vec![false; mesh.vertices.len()];
@@ -696,16 +696,18 @@ fn mesh_bounds(mesh: &Mesh) -> ([f32; 3], [f32; 3]) {
         if !used {
             continue;
         }
-        let (low, high) = bounds(&vertices.positions);
+        let Some((low, high)) = bounds(&vertices.positions) else {
+            continue;
+        };
         for axis in 0..3 {
             min[axis] = min[axis].min(low[axis]);
             max[axis] = max[axis].max(high[axis]);
         }
     }
-    if mesh.primitives.is_empty() {
-        return ([0.0; 3], [0.0; 3]);
-    }
-    (min, max)
+    min.iter()
+        .chain(&max)
+        .all(|value| value.is_finite())
+        .then_some((min, max))
 }
 
 /// The inverse of rotation `r` then translation `t`, as a column-major 4×4 matrix.
