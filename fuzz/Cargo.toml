@@ -63,6 +63,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "soundmixer"
+path = "fuzz_targets/soundmixer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "vtex"
 path = "fuzz_targets/vtex.rs"
 test = false

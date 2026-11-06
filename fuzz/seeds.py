@@ -350,6 +350,7 @@ def texts(pak):
         write("scripts", name, script.encode())
     write("portraits", "excerpt", read("scripts/npc/portraits.txt")[: 200 << 10].encode())
     write("shop", "shops", read("scripts/shops.txt").encode())
+    write("soundmixer", "soundmixers", read("scripts/soundmixers.txt").encode())
     items = read("scripts/items/items_game.txt")
     start = items.find('\t"items"')
     write("items_game", "items", ("\"items_game\"\n{\n" + items[start : start + (200 << 10)]).encode())
