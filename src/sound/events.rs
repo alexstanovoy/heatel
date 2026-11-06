@@ -127,6 +127,16 @@ fn event(name: &str, v: &Value) -> Result<SoundEvent> {
     let number = |key: &str| v.get(key).and_then(Value::as_f64).map(|n| finite(n as f32));
     let text = |key: &str| v.get(key).and_then(Value::as_str).map(str::to_owned);
     let jitter = number("pitch_rand_min").zip(number("pitch_rand_max"));
+    // A volume that is not a number (a range string, say) would play at the file's level
+    // unnoticed, so it is refused: no event of Dota's install states one.
+    if v.get("volume")
+        .is_some_and(|volume| volume.as_f64().is_none())
+    {
+        return Err(malformed(
+            "vsndevts",
+            format!("event {name}: its volume is not a number"),
+        ));
+    }
     Ok(SoundEvent {
         name: name.to_owned(),
         kind: text("type").unwrap_or_default(),
@@ -257,5 +267,30 @@ impl SoundLimits {
             block_distance: self.block_distance.or(defaults.block_distance),
             stop_at_time: self.stop_at_time.or(defaults.stop_at_time),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kv3::Object;
+
+    fn event_with_volume(volume: Value) -> Result<SoundEvent> {
+        let mut object = Object::with_capacity(1);
+        object.push("volume".to_owned(), volume);
+        event("Test.Event", &Value::Object(object))
+    }
+
+    #[test]
+    fn a_numeric_volume_is_read() {
+        let event = event_with_volume(Value::Float(0.6)).expect("an event");
+        assert_eq!(event.volume, Some(0.6));
+    }
+
+    #[test]
+    fn a_volume_that_is_a_range_string_is_refused_rather_than_played_at_full() {
+        let err = event_with_volume(Value::String("0.8,1.0".to_owned())).unwrap_err();
+        assert!(err.to_string().contains("Test.Event"), "{err}");
+        assert!(err.to_string().contains("volume is not a number"), "{err}");
     }
 }
