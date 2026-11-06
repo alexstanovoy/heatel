@@ -34,7 +34,7 @@ texture2ddecoder = "0.1.2"
 thiserror = "2"
 
 [dev-dependencies]
-bevy_image = { version = "=0.19.1", default-features = false, features = ["ktx2", "zstd_rust"] }
+bevy_image = { version = "=0.20.0", default-features = false, features = ["ktx2", "zstd_rust"] }
 lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode"] }
 ktx2 = "0.5"
 meshopt = "0.7.0"
