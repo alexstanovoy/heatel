@@ -52,7 +52,8 @@ pub struct ResponseGroup {
     pub name: String,
     /// The name of its rule.
     pub rule: String,
-    /// The requirements, by criterion name, all of which the situation must meet.
+    /// The requirements, by criterion name, all of which the situation must meet. Empty when
+    /// the file states none: such a rule matches nothing (every criterion it meets scores).
     pub requirements: Vec<String>,
     /// The responses, one of which plays.
     pub responses: Vec<Response>,
@@ -147,6 +148,36 @@ fn strings(items: &[Value]) -> Vec<String> {
         .collect()
 }
 
+/// A group's list under `key`: none when the file leaves it out (KV3 leaves empty lists out),
+/// an error when it is anything but a list, so that a rule never loses requirements unseen.
+fn group_list<'a>(v: Option<&'a Value>, key: &str, max: usize) -> Result<&'a [Value]> {
+    let items = match v.and_then(|v| v.get(key)) {
+        None => &[][..],
+        Some(value) => value
+            .as_array()
+            .ok_or_else(|| malformed("vrr", format!("group's {key} is not an array")))?,
+    };
+    if items.len() > max {
+        return Err(malformed("vrr", "a group with more than any has"));
+    }
+    Ok(items)
+}
+
+/// Names that must each be one: a requirement that is not a name is an error, not dropped.
+fn names(items: &[Value], key: &str) -> Result<Vec<String>> {
+    items
+        .iter()
+        .map(|item| {
+            item.as_str().map(str::to_owned).ok_or_else(|| {
+                malformed(
+                    "vrr",
+                    format!("group's {key} holds something that is not a name"),
+                )
+            })
+        })
+        .collect()
+}
+
 fn text(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(Value::as_str).map(str::to_owned)
 }
@@ -167,17 +198,12 @@ fn criterion(v: &Value) -> Criterion {
 
 fn group(v: &Value) -> Result<ResponseGroup> {
     let rule = v.get("m_pEmbeddedRule");
-    let requirements = rule.and_then(|r| r.get("m_Requirements"));
-    let requirements = requirements.and_then(Value::as_array).unwrap_or_default();
-    let responses = v.get("m_responses").and_then(Value::as_array);
-    let responses = responses.unwrap_or_default();
-    if requirements.len() > MAX_LIST || responses.len() > MAX_RESPONSES {
-        return Err(malformed("vrr", "a group with more than any has"));
-    }
+    let requirements = group_list(rule, "m_Requirements", MAX_LIST)?;
+    let responses = group_list(Some(v), "m_responses", MAX_RESPONSES)?;
     Ok(ResponseGroup {
         name: text(v, "m_name").unwrap_or_default(),
         rule: rule.and_then(|r| text(r, "m_name")).unwrap_or_default(),
-        requirements: strings(requirements),
+        requirements: names(requirements, "m_Requirements")?,
         responses: responses.iter().map(response).collect(),
     })
 }

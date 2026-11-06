@@ -890,3 +890,64 @@ fn response_rules_read_nested_delay_ranges() {
     let rules = heatel::talker::read_response_rules(&resource).expect("response rules");
     assert_eq!(rules.groups[0].responses[0].respeak_delay, Some(42.0));
 }
+
+/// A response rules file of one group whose embedded rule is `rule` and whose responses are
+/// `responses`.
+fn response_rules_of(rule: K, responses: K) -> heatel::Result<heatel::talker::ResponseRules> {
+    let data = K::Obj(vec![(
+        "m_ResponseGroups",
+        K::Arr(vec![K::Obj(vec![
+            ("m_name", s("group")),
+            ("m_responses", responses),
+            ("m_pEmbeddedRule", rule),
+        ])]),
+    )]);
+    let file = resource(&[(b"DATA", kv3_file(&data))]);
+    heatel::talker::read_response_rules(&Resource::parse(&file).expect("synthetic resource"))
+}
+
+fn one_line() -> K {
+    K::Arr(vec![K::Obj(vec![
+        ("m_type", s("SPEAK")),
+        ("m_value", s("line")),
+    ])])
+}
+
+/// A rule whose requirements do not read would match every situation: it is an error, not a
+/// rule without requirements.
+#[test]
+fn response_rules_reject_requirements_that_are_not_a_list() {
+    let rule = K::Obj(vec![("m_name", s("rule")), ("m_Requirements", s("Move"))]);
+    let error = response_rules_of(rule, one_line()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "vrr: group's m_Requirements is not an array"
+    );
+}
+
+/// A requirement that is not a name is an error, not a requirement dropped.
+#[test]
+fn response_rules_reject_a_requirement_that_is_not_a_name() {
+    let rule = K::Obj(vec![
+        ("m_name", s("rule")),
+        ("m_Requirements", K::Arr(vec![s("Move"), K::Int(7)])),
+    ]);
+    let error = response_rules_of(rule, one_line()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "vrr: group's m_Requirements holds something that is not a name"
+    );
+}
+
+#[test]
+fn response_rules_reject_responses_that_are_not_a_list() {
+    let rule = K::Obj(vec![
+        ("m_name", s("rule")),
+        ("m_Requirements", K::Arr(vec![s("Move")])),
+    ]);
+    let error = response_rules_of(rule, s("line")).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "vrr: group's m_responses is not an array"
+    );
+}
