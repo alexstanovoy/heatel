@@ -1,5 +1,6 @@
 //! Writes a [`Model`] as binary glTF (`.glb`): one node per render mesh (`<model>.<mesh>`); with a skeleton, a root node named after the model
 //! holding the bones, the attachments they carry and one skin over all of them; textures as images next to the file.
+//! Each mesh's `extras.render_bounds` retains its `min` and `max` in glTF metres.
 //!
 //! A face mesh's flexes are its morph targets (position and normal deltas), named in the mesh's
 //! `extras.targetNames`; how their weights follow the flex controllers is in `extras.flex`:
@@ -305,6 +306,8 @@ impl Builder {
         if let (false, Some(set)) = (targets.is_empty(), &mesh.morph) {
             gltf_mesh["extras"] = face_extras(mesh, &set.flex);
         }
+        let (min, max) = mesh_bounds(mesh);
+        gltf_mesh["extras"]["render_bounds"] = json!({ "min": min, "max": max });
         self.meshes.push(gltf_mesh);
         let mut node = json!({ "name": name, "mesh": self.meshes.len() - 1 });
         if skinned {
@@ -676,6 +679,30 @@ fn bounds(points: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
         }
     }
     if points.is_empty() {
+        return ([0.0; 3], [0.0; 3]);
+    }
+    (min, max)
+}
+
+/// Render bounds remain available to clients that release CPU vertex buffers after upload.
+fn mesh_bounds(mesh: &Mesh) -> ([f32; 3], [f32; 3]) {
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    let mut used = vec![false; mesh.vertices.len()];
+    for primitive in &mesh.primitives {
+        used[primitive.vertices] = true;
+    }
+    for (vertices, used) in mesh.vertices.iter().zip(used) {
+        if !used {
+            continue;
+        }
+        let (low, high) = bounds(&vertices.positions);
+        for axis in 0..3 {
+            min[axis] = min[axis].min(low[axis]);
+            max[axis] = max[axis].max(high[axis]);
+        }
+    }
+    if mesh.primitives.is_empty() {
         return ([0.0; 3], [0.0; 3]);
     }
     (min, max)

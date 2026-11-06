@@ -263,6 +263,29 @@ fn triangle(indices: Vec<u32>, normals: usize) -> Mesh {
     }
 }
 
+#[test]
+fn exported_mesh_bounds_remain_available_without_retaining_vertex_buffers() {
+    let mut mesh = triangle(vec![0, 1, 2], 3);
+    mesh.vertices[0].positions = vec![[-2.0, -1.0, -3.0], [2.0, 1.0, 3.0], [0.0; 3]];
+    mesh.vertices.push(Vertices {
+        positions: vec![[1000.0; 3]; 3],
+        ..Vertices::default()
+    });
+    let model = Model {
+        bones: Vec::new(),
+        meshes: vec![mesh],
+        material_groups: Vec::new(),
+        attachments: Vec::new(),
+    };
+    let (glb, _) = write_glb(&model, &options(&[], &HashMap::new(), &str::to_owned)).expect("GLB");
+    let length = u32::from_le_bytes(glb[12..16].try_into().expect("JSON length")) as usize;
+    let json: serde_json::Value = serde_json::from_slice(&glb[20..20 + length]).expect("JSON");
+    assert_eq!(
+        json["meshes"][0]["extras"]["render_bounds"],
+        serde_json::json!({"min": [-2.0, -1.0, -3.0], "max": [2.0, 1.0, 3.0]})
+    );
+}
+
 /// The writer takes public types: a bone parented after itself indexed past the node list or
 /// made a cycle, and indices, lengths and numbers glTF cannot hold made a file a glTF
 /// loader refused.
