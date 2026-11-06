@@ -35,7 +35,7 @@ build() {
 max_len() {
     case "$1" in
     model | world) echo 1048576 ;;
-    resource | vtex | anim | sequence | presentation | items_game | entities | tooltips | portraits | shop) echo 262144 ;;
+    resource | vtex | ktx2 | anim | sequence | presentation | items_game | entities | tooltips | portraits | shop | scripts) echo 262144 ;;
     kv3 | material | vbib) echo 131072 ;;
     *) echo 65536 ;;
     esac

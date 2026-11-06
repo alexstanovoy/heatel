@@ -1,6 +1,7 @@
 # Coverage-guided fuzz targets for every reader of Valve's formats: VPK packages, resources,
 # KV3, NTRO, textures, sounds, models, meshes, animations, materials, worlds, entity lumps,
-# and the tooltip, shop and portrait scripts, with the glTF, KTX2 and PNG writers they feed.
+# KeyValues scripts and the tooltip, shop and portrait readers over them, with the glTF, KTX2
+# and PNG writers they feed and the KTX2 decoder of what they wrote.
 # A workspace of its own: the fuzzer's flags and libFuzzer stay out of the main build.
 # `fuzz.sh` builds and runs them on stable Rust.
 [package]
@@ -183,6 +184,20 @@ bench = false
 [[bin]]
 name = "items_game"
 path = "fuzz_targets/items_game.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ktx2"
+path = "fuzz_targets/ktx2.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scripts"
+path = "fuzz_targets/scripts.rs"
 test = false
 doc = false
 bench = false

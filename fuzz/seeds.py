@@ -345,6 +345,9 @@ def texts(pak):
     ]
     files = [("", loc[: 64 << 10].encode())] + [("", s.encode()) for s in scripts]
     write("tooltips", "abilities", bundle(files))
+    write("scripts", "localization", loc[: 64 << 10].encode())
+    for name, script in zip(["items", "abilities"], scripts):
+        write("scripts", name, script.encode())
     write("portraits", "excerpt", read("scripts/npc/portraits.txt")[: 200 << 10].encode())
     write("shop", "shops", read("scripts/shops.txt").encode())
     items = read("scripts/items/items_game.txt")
