@@ -55,11 +55,9 @@ let src = DirSource::new("/path/to/dota 2 beta/game/dota");
 let pak = Vpk::open(&src, "pak01_dir.vpk")?;
 let png = |vtex: &str| format!("{}.png", vtex.rsplit('/').next().unwrap_or(vtex));
 let options = ModelOptions {
-    meshes: None,
     skeleton: true,
-    anims: &[],
-    texture_uri: &png,
     generator: "my tool",
+    ..ModelOptions::new(&png)
 };
 let model = export_model(&src, &[&pak], "models/heroes/pudge/pudge.vmdl_c", &options)?;
 std::fs::write("pudge.glb", &model.glb).unwrap();

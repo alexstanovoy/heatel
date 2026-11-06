@@ -69,6 +69,16 @@ impl Clip {
 /// sequences, then the animations no sequence names). A name the model lacks, and an additive
 /// clip (deltas over a pose, which glTF has no way to say), is left out.
 pub fn read_clips(resource: &Resource, names: &[&str]) -> Result<Vec<Clip>> {
+    read_clips_in_place(resource, names, &[])
+}
+
+/// Reads clips with selected activities in place. Only the explicit movement trajectory
+/// is omitted; the authored bone pose, including root sway and vertical motion, is retained.
+pub fn read_clips_in_place(
+    resource: &Resource,
+    names: &[&str],
+    activities: &[&str],
+) -> Result<Vec<Clip>> {
     if names.is_empty() {
         return Ok(Vec::new());
     }
@@ -119,7 +129,12 @@ pub fn read_clips(resource: &Resource, names: &[&str]) -> Result<Vec<Clip>> {
             || flag(Some(desc), "m_bAnimGraphAdditive")
             || flag(sequence, "m_bLegacyDelta");
         if !additive {
-            let tracks = decode(desc, &bones, &mut segments, &mut budget)?;
+            let in_place = in_place_for(
+                activities,
+                sequence.unwrap_or(desc).get("m_activityArray"),
+                &mut budget,
+            )?;
+            let tracks = decode(desc, &bones, &mut segments, &mut budget, !in_place)?;
             clips.push(Clip {
                 name: name.to_owned(),
                 tracks,
@@ -127,6 +142,74 @@ pub fn read_clips(resource: &Resource, names: &[&str]) -> Result<Vec<Clip>> {
         }
     }
     Ok(clips)
+}
+
+fn in_place_for(activities: &[&str], entries: Option<&Value>, budget: &mut Budget) -> Result<bool> {
+    if activities.is_empty() {
+        return Ok(false);
+    }
+    let names = array(entries);
+    Budget::spend(&mut budget.work, names.len(), "activity entries")?;
+    if !names
+        .iter()
+        .filter_map(|entry| entry.get("m_name")?.as_str())
+        .any(|name| name.starts_with("ACT_") && activities.contains(&name))
+    {
+        return Ok(false);
+    }
+    // Unselected activities have no bearing on this export. Selected ones retain the
+    // bounded parser's validation, rather than treating an oversized list as authoritative.
+    super::sequence::read_activities(entries)?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod in_place_tests {
+    use super::*;
+
+    fn entries(name: &str) -> Value {
+        Value::Array(
+            (0..65)
+                .map(|_| {
+                    let mut object = crate::kv3::Object::with_capacity(1);
+                    object.push("m_name".into(), Value::String(name.into()));
+                    Value::Object(object)
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn unopted_activities_do_not_reject_a_clip_with_many_activity_entries() {
+        let mut budget = Budget {
+            bone_frames: MAX_BONE_FRAMES,
+            work: MAX_WORK,
+        };
+        assert!(
+            !in_place_for(
+                &["ACT_DOTA_RUN"],
+                Some(&entries("ACT_DOTA_IDLE")),
+                &mut budget
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn opted_activities_keep_the_activity_entry_bound() {
+        let mut budget = Budget {
+            bone_frames: MAX_BONE_FRAMES,
+            work: MAX_WORK,
+        };
+        assert!(
+            in_place_for(
+                &["ACT_DOTA_RUN"],
+                Some(&entries("ACT_DOTA_RUN")),
+                &mut budget
+            )
+            .is_err()
+        );
+    }
 }
 
 /// The KV3 block `CTRL.embedded_animation.<key>` addresses; none for an index of zero or less.
@@ -292,6 +375,7 @@ fn decode(
     bones: &[SourceBone],
     segments: &mut Segments,
     budget: &mut Budget,
+    include_trajectory: bool,
 ) -> Result<Vec<Track>> {
     let data = desc.get("m_pData");
     let frames = data
@@ -306,7 +390,11 @@ fn decode(
     )?;
     let fps = frame_rate(desc)?;
     let blocks = frame_blocks(data)?;
-    let movements = movements(desc)?;
+    let movements = if include_trajectory {
+        movements(desc)?
+    } else {
+        Vec::new()
+    };
     let mut pose: Vec<BonePose> = bones
         .iter()
         .map(|b| BonePose {

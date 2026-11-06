@@ -8,7 +8,16 @@ All notable changes to this crate are documented here. The format follows
 
 First release.
 
+### Changed
+
+- `ModelOptions` has a new required field in complete struct literals; use
+  `..ModelOptions::new(texture_uri)` to remain compatible with new options.
+
 ### Added
+
+- In-place animation export by activity through `anim::read_clips_in_place` and
+  `ModelOptions::in_place_activities`, retaining authored bone poses. Raw export keeps root
+  trajectories by default. `ModelOptions::new` supports struct update syntax for defaults.
 
 - `vpk`: VPK v1/v2 packages (directory and numbered archives, preload data, CRC checks).
 - `resource`: compiled Source 2 resources and their block table, external references, `DATA`

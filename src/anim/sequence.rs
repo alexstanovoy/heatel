@@ -204,7 +204,7 @@ fn frame_rate(desc: &Value) -> f32 {
 
 /// The activities of an `m_activityArray`: each `ACT_` entry, with the plain entries after it as
 /// its modifiers. Plain entries before any activity belong to none and are left out.
-fn read_activities(entries: Option<&Value>) -> Result<Vec<Activity>> {
+pub(super) fn read_activities(entries: Option<&Value>) -> Result<Vec<Activity>> {
     let entries = array(entries);
     if entries.len() > MAX_ACTIVITY_ENTRIES {
         return Err(malformed(

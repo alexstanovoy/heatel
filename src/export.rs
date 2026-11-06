@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use crate::anim::read_clips;
+use crate::anim::read_clips_in_place;
 use crate::error::{Error, Result};
 use crate::gltf::{GltfOptions, write_glb};
 use crate::material::{Material, Pack};
@@ -70,10 +70,28 @@ pub struct ModelOptions<'a> {
     pub skeleton: bool,
     /// The animations to write, by name; a name the model lacks is skipped.
     pub anims: &'a [&'a str],
+    /// Activities whose clips omit their movement trajectory while preserving bone poses.
+    /// Empty retains root motion, as the source model stores it.
+    pub in_place_activities: &'a [&'a str],
     /// The image file a texture (`.vtex` path) is written to, relative to the `.glb`.
     pub texture_uri: &'a dyn Fn(&str) -> String,
     /// What the file says wrote it (glTF's `asset.generator`).
     pub generator: &'a str,
+}
+
+impl<'a> ModelOptions<'a> {
+    /// Options for a static model with unchanged root motion. Set the skeleton, clips and
+    /// other choices explicitly; struct update syntax keeps callers independent of new options.
+    pub fn new(texture_uri: &'a dyn Fn(&str) -> String) -> Self {
+        Self {
+            meshes: None,
+            skeleton: false,
+            anims: &[],
+            in_place_activities: &[],
+            texture_uri,
+            generator: "heatel",
+        }
+    }
 }
 
 /// Fills in the morph targets of the kept meshes that have a morph set, out of its atlas. A
@@ -128,6 +146,7 @@ pub fn export_model_in_group(
         meshes,
         skeleton,
         anims,
+        in_place_activities,
         texture_uri,
         generator,
     } = *options;
@@ -139,7 +158,7 @@ pub fn export_model_in_group(
     }
     morph_targets(src, packages, &mut model, meshes)?;
     let clips = if skeleton {
-        read_clips(&resource, anims)?
+        read_clips_in_place(&resource, anims, in_place_activities)?
     } else {
         Vec::new()
     };

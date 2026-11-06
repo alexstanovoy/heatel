@@ -26,8 +26,9 @@ fuzz_target!(|data: &[u8]| {
         meshes,
         skeleton,
         anims,
-        texture_uri: &uri,
+        in_place_activities: &["ACT_DOTA_RUN"],
         generator: "fuzz",
+        ..ModelOptions::new(&uri)
     };
     for skeleton in [false, true] {
         let _ = export_model(&src, &[&vpk], MODEL, &options(None, skeleton, &anims));

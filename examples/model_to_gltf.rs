@@ -32,8 +32,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         meshes: None,
         skeleton: true,
         anims: &anims,
-        texture_uri: &|vtex| png_name(vtex),
+        in_place_activities: &[],
         generator: "heatel model_to_gltf",
+        ..ModelOptions::new(&png_name)
     };
     let exported = export_model(&src, &[&pak], model, &options)?;
     let out = Path::new(out);
