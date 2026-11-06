@@ -32,6 +32,20 @@ pub enum Emitter {
         /// How long (0 forever).
         duration: FloatInput,
     },
+    /// `C_OP_MaintainEmitter`: from `start_time` for `duration` (0 forever), keeps `count` times
+    /// `scale` particles alive, making all that are lacking at once, or at most `rate` a second.
+    Maintain {
+        /// How many to keep.
+        count: FloatInput,
+        /// What the count is scaled by.
+        scale: FloatInput,
+        /// When, after the system starts.
+        start_time: FloatInput,
+        /// How long (0 forever).
+        duration: FloatInput,
+        /// Particles a second while it makes up a lack, unless it does so at once.
+        rate: Option<FloatInput>,
+    },
     /// `C_OP_NoiseEmitter`: a rate a second from noise over the system's age.
     Noise(Box<NoiseEmitter>),
     /// A class this crate does not read.
@@ -58,6 +72,21 @@ impl Emitter {
                     rate: FloatInput::read(obj, "m_flEmitRate", 100.0)?,
                     start_time: FloatInput::read(obj, "m_flStartTime", 0.0)?,
                     duration: FloatInput::read(obj, "m_flEmissionDuration", 0.0)?,
+                }
+            }
+            // One that keeps the particles of a control point's snapshot is another thing.
+            "C_OP_MaintainEmitter"
+                if obj.int("m_nSnapshotControlPoint", -1)? == -1
+                    && obj.str("m_strSnapshotSubset")?.is_none_or(str::is_empty) =>
+            {
+                Self::Maintain {
+                    count: FloatInput::read(obj, "m_nParticlesToMaintain", 100.0)?,
+                    scale: FloatInput::read(obj, "m_flScale", 1.0)?,
+                    start_time: FloatInput::read(obj, "m_flStartTime", 0.0)?,
+                    duration: FloatInput::read(obj, "m_flEmissionDuration", 0.0)?,
+                    rate: (!obj.bool("m_bEmitInstantaneously", false)?)
+                        .then(|| FloatInput::read(obj, "m_flEmissionRate", 100.0))
+                        .transpose()?,
                 }
             }
             "C_OP_NoiseEmitter" => {

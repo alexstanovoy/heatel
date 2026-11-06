@@ -64,7 +64,8 @@ First release.
   (`Renderer::Projected`, their materials by `System::materials`), refraction
   (`Look::refract`) and deferred lights (`Renderer::DeferredLight`) included. Constraints read
   as typed functions (`System::constraints`: `Constraint`), with `C_OP_BasicMovement`'s
-  constraint passes; paths (`Path`, `SequentialPath`, `MaintainPath`), noise emitters and
+  constraint passes; paths (`Path`, `SequentialPath`, `MaintainPath`), maintain emitters
+  (`Emitter::Maintain`), noise emitters and
   forces (`NoiseEmitter`, `CreationNoise`, `CurlNoise`), boxes, epitrochoids, transform
   remaps, model functions (`OnModel`, `LockToBone`) and model renderers (`Renderer::Models`,
   their models by `System::models`) read, with the control point operators of a town portal

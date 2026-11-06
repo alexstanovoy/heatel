@@ -222,3 +222,26 @@ fn flagbearer_banner_operators_are_read_instead_of_silently_ignored() {
         }
     }
 }
+
+/// Dota's progress circle (a Lotus Pool being plucked): its ring keeps 180 particles alive scaled
+/// by control point 1's y, made up at the default 100 a second, as `C_OP_MaintainEmitter` does.
+#[test]
+#[ignore = "needs a local Dota 2 install"]
+fn a_maintain_emitter_reads_its_count_scale_and_rate() {
+    let (src, pak) = install();
+    let ring = system(
+        &src,
+        &pak,
+        "particles/econ/generic/generic_progress_meter/generic_progress_circle_b.vpcf",
+    );
+    let maintained = matches!(
+        &ring.emitters[0].class,
+        Emitter::Maintain {
+            count: FloatInput::Literal(180.0),
+            scale: FloatInput::ControlPointComponent { component: 1, .. },
+            rate: Some(FloatInput::Literal(100.0)),
+            ..
+        }
+    );
+    assert!(maintained, "{:?}", ring.emitters[0].class);
+}
