@@ -196,12 +196,12 @@ pub fn parse_kv_repeats(text: &str) -> Result<Kv> {
     parse(text, true, &mut Budget::new(usize::MAX))
 }
 
-/// What pushing an item of a key of `key` bytes into `block` makes: the key's copy as the item's
-/// and as the index's, the items' growth (a list doubles, from four), and the index's (a table of
-/// a power of two buckets past 8/7 of what it holds, doubling from three, an entry and a
-/// control byte each).
+/// What pushing an item of a key of `key` bytes into `block` makes: the key's copy as the index's
+/// (the item's own was charged as it was read), the items' growth (a list doubles, from four),
+/// and the index's (a table of a power of two buckets past 8/7 of what it holds, doubling from
+/// three, an entry and a control byte each).
 fn push_cost(block: &Block, key: usize) -> usize {
-    let mut bytes = 2 * (key + 16);
+    let mut bytes = key + 16;
     let items = block.items.capacity();
     if block.items.len() == items {
         bytes += (2 * items).max(4).saturating_sub(items) * size_of::<(String, Kv)>();
@@ -242,7 +242,12 @@ fn parse(text: &str, keep_repeats: bool, budget: &mut Budget) -> Result<Kv> {
             }
             Token::Close => close(&mut stack, budget)?,
             Token::Text(s) => match key.take() {
-                None => key = Some(s.to_owned()),
+                None => {
+                    // A key waits for its value as a copy: charged as it is made, whatever comes
+                    // after it (a key left at the end is dropped, as KeyValues readers drop one).
+                    budget.charge(s.len() + 16)?;
+                    key = Some(s.to_owned());
+                }
                 Some(k) => {
                     let top = &mut stack.last_mut().expect("the root stays").0;
                     if keep_repeats || top.position(&k).is_none() {

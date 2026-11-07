@@ -1115,3 +1115,14 @@ fn response_rules_typed_past_the_budget_are_refused() {
     let error = read.unwrap_err();
     assert!(error.to_string().contains("more than it may"), "{error}");
 }
+
+/// A key copied while it waits for its value is charged as it is copied: one of 8 MiB with no
+/// value after it (left at the end, as KeyValues readers leave one) is refused by a budget of
+/// a KiB, not copied unseen.
+#[test]
+fn a_dangling_keyvalues_key_is_charged_as_it_is_copied() {
+    let text = format!("\"{}\"", "k".repeat(8 << 20));
+    let mut budget = heatel::Budget::new(1 << 10);
+    let error = heatel::keyvalues::parse_kv_in(&text, &mut budget).unwrap_err();
+    assert!(error.to_string().contains("more than it may"), "{error}");
+}
