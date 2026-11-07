@@ -99,6 +99,14 @@ fn an_empty_used_buffer_does_not_expand_the_other_buffers_bounds() {
         tint: None,
     });
     let json = export(vec![mesh]);
+    assert!(
+        json["accessors"]
+            .as_array()
+            .expect("drawn geometry accessors")
+            .iter()
+            .all(|accessor| accessor["count"].as_u64().expect("accessor count") > 0),
+        "glTF cannot contain a zero-count accessor for an empty buffer"
+    );
     assert_eq!(
         json["meshes"][0]["extras"]["render_bounds"],
         serde_json::json!({"min": [10.0, 4.0, 6.0], "max": [12.0, 8.0, 10.0]})

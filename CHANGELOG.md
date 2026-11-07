@@ -10,6 +10,8 @@ First release.
 
 ### Changed
 
+- Converter revision 7 normalizes literal distance-shell limits and skips empty vertex
+  buffers and primitives instead of emitting zero-count accessors. Regenerate caches.
 - `System` retains `infinite_bounds`; complete struct literals must include that field.
 - `ModelOptions` has a new required field in complete struct literals; use
   `..ModelOptions::new(texture_uri)` to remain compatible with new options.

@@ -289,12 +289,22 @@ impl Builder {
     /// A node with the render mesh `mesh` (skinned with skin 0 when `skinned`); its index.
     fn mesh_node(&mut self, mesh: &Mesh, options: &GltfOptions, skinned: bool) -> Result<usize> {
         let name = format!("{}.{}", options.name, mesh.name);
-        let accessors: Vec<Json> = mesh.vertices.iter().map(|v| self.attributes(v)).collect();
+        let accessors: Vec<Option<Json>> = mesh
+            .vertices
+            .iter()
+            .map(|vertices| (!vertices.positions.is_empty()).then(|| self.attributes(vertices)))
+            .collect();
         let targets = self.targets(mesh);
         let mut primitives = Vec::new();
         for p in &mesh.primitives {
+            let Some(attributes) = &accessors[p.vertices] else {
+                continue;
+            };
+            if p.indices.is_empty() {
+                continue;
+            }
             let indices = self.indices(&p.indices);
-            let mut primitive = json!({ "attributes": accessors[p.vertices], "indices": indices });
+            let mut primitive = json!({ "attributes": attributes, "indices": indices });
             if let Some(material) = self.material(&p.material, p.tint, options)? {
                 primitive["material"] = json!(material);
             }

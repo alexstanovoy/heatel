@@ -36,7 +36,8 @@ pub enum Constraint {
 pub struct Distance {
     /// Inner radius of the shell.
     pub min_distance: FloatInput,
-    /// Outer radius, at least the inner radius.
+    /// Outer radius. Nonnegative literals are raised to the absolute inner radius;
+    /// computed inputs need the same normalization when evaluated. Negative disables it.
     pub max_distance: FloatInput,
     /// The frame the centre follows.
     pub transform: Transform,
@@ -121,18 +122,7 @@ pub struct WorldTrace {
 impl Constraint {
     pub(super) fn read(class: &str, obj: &Obj<'_>) -> Result<Self> {
         Ok(match class {
-            "C_OP_ConstrainDistance" => Self::Distance(Box::new(Distance {
-                min_distance: FloatInput::read(obj, "m_fMinDistance", 0.0)?,
-                max_distance: FloatInput::read(obj, "m_fMaxDistance", 100.0)?,
-                transform: Transform::read_member(
-                    obj,
-                    "m_nControlPointNumber",
-                    "m_nControlPointNumber",
-                    true,
-                )?,
-                center_offset: VectorInput::read(obj, "m_CenterOffset", [0.0; 3])?,
-                global_center: obj.bool("m_bGlobalCenter", false)?,
-            })),
+            "C_OP_ConstrainDistance" => Self::Distance(Box::new(distance(obj)?)),
             "C_OP_ConstrainDistanceToPath" => {
                 let min = obj.float("m_fMinDistance", 0.0)?;
                 Self::DistanceToPath(Box::new(DistanceToPath {
@@ -162,6 +152,29 @@ impl Constraint {
             other => Self::Unsupported(other.to_owned()),
         })
     }
+}
+
+fn distance(obj: &Obj<'_>) -> Result<Distance> {
+    let min_distance = FloatInput::read(obj, "m_fMinDistance", 0.0)?;
+    let mut max_distance = FloatInput::read(obj, "m_fMaxDistance", 100.0)?;
+    if let (FloatInput::Literal(inner), FloatInput::Literal(outer)) =
+        (&min_distance, &mut max_distance)
+        && *outer >= 0.0
+    {
+        *outer = outer.max(inner.abs());
+    }
+    Ok(Distance {
+        min_distance,
+        max_distance,
+        transform: Transform::read_member(
+            obj,
+            "m_nControlPointNumber",
+            "m_nControlPointNumber",
+            true,
+        )?,
+        center_offset: VectorInput::read(obj, "m_CenterOffset", [0.0; 3])?,
+        global_center: obj.bool("m_bGlobalCenter", false)?,
+    })
 }
 
 fn world_trace(obj: &Obj<'_>) -> Result<WorldTrace> {
