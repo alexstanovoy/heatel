@@ -30,47 +30,44 @@ const ENCODINGS_STORED: [[u8; 16]; 3] = [
 ];
 const TRAILER: u32 = 0xFFFF_FFFF;
 
-pub(crate) fn decode(bytes: &[u8]) -> Result<Document> {
+pub(crate) fn decode(bytes: &[u8], mut budget: Budget) -> Result<(Document, usize)> {
     let mut c = Cursor::new(bytes, "KV3");
     c.u32()?;
     let encoding: [u8; 16] = c.array()?;
     let format = c.array()?;
     let data = if encoding == ENCODING_BLOCK_COMPRESSED {
-        block_decompress(&mut c)?
+        block_decompress(&mut c, &mut budget)?
     } else if encoding == ENCODING_LZ4 {
         let len = c.u32()? as usize;
-        lz4(c.rest(), len)?
+        lz4(c.rest(), len, &mut budget)?
     } else if ENCODINGS_STORED.contains(&encoding) {
-        c.rest().to_vec()
+        budget.bytes_of(c.rest())?
     } else {
         return Err(malformed("KV3", "unknown encoding"));
     };
     let mut c = Cursor::new(&data, "KV3");
     let count = c.u32()? as usize;
-    let mut strings = Vec::with_capacity(count.min(c.remaining()));
+    budget.slots::<String>(count)?;
+    let mut strings = Vec::with_capacity(count);
     for _ in 0..count {
-        strings.push(String::from_utf8_lossy(c.cstr()?).into_owned());
+        strings.push(budget.text(c.cstr()?)?);
     }
-    let mut decoder = Decoder {
-        c,
-        strings,
-        budget: Budget::new("KV3"),
-    };
+    let mut decoder = Decoder { c, strings, budget };
     let ty = decoder.read_type()?;
     let root = decoder.value(ty, 0)?;
     if decoder.c.u32()? != TRAILER {
         return Err(malformed("KV3", "no trailer"));
     }
-    Ok(Document { format, root })
+    Ok((Document { format, root }, decoder.budget.spent()))
 }
 
 /// Valve's block compression: 16 flag bits per group; a set bit is a back reference of
 /// 12 bits offset and 4 bits length, a clear one a literal byte.
-fn block_decompress(c: &mut Cursor) -> Result<Vec<u8>> {
+fn block_decompress(c: &mut Cursor, budget: &mut Budget) -> Result<Vec<u8>> {
     let size = c.u32()?;
     // The top bit marks data stored uncompressed.
     if size & 0x8000_0000 != 0 {
-        return Ok(c.take((size & 0x7FFF_FFFF) as usize)?.to_vec());
+        return budget.bytes_of(c.take((size & 0x7FFF_FFFF) as usize)?);
     }
     // A 16-bit back reference makes 18 bytes at most, and every 16 of them take a 16-bit mask.
     if size as usize / 9 > c.remaining() {
@@ -79,7 +76,7 @@ fn block_decompress(c: &mut Cursor) -> Result<Vec<u8>> {
             format!("{} bytes cannot expand to {size}", c.remaining()),
         ));
     }
-    let mut out = buffer(size as usize)?;
+    let mut out = buffer(size as usize, budget)?;
     let (mut at, mut mask, mut bits) = (0usize, 0u16, 0);
     while at < out.len() {
         if bits == 0 {
@@ -146,13 +143,11 @@ impl Decoder<'_> {
             }
             node::BINARY_BLOB => {
                 let len = c.len32()?;
-                let bytes = c.take(len)?;
-                self.budget.bytes(len)?;
-                Value::Blob(bytes.to_vec())
+                Value::Blob(self.budget.bytes_of(c.take(len)?)?)
             }
             node::ARRAY => {
                 let len = c.len32()?;
-                let mut items = Vec::with_capacity(len.min(4096));
+                let mut items = self.list(len)?;
                 for _ in 0..len {
                     let ty = self.read_type()?;
                     items.push(self.value(ty, depth + 1)?);
@@ -162,7 +157,7 @@ impl Decoder<'_> {
             node::ARRAY_TYPED => {
                 let len = c.len32()?;
                 let element = self.read_type()?;
-                let mut items = Vec::with_capacity(len.min(4096));
+                let mut items = self.list(len)?;
                 for _ in 0..len {
                     items.push(self.value(element, depth + 1)?);
                 }
@@ -173,8 +168,16 @@ impl Decoder<'_> {
         })
     }
 
+    /// A list for `len` values, its first slots charged before they are reserved; past them it
+    /// grows as its values, each charged as a node, come.
+    fn list(&mut self, len: usize) -> Result<Vec<Value>> {
+        self.budget.slots::<Value>(len.min(4096))?;
+        Ok(Vec::with_capacity(len.min(4096)))
+    }
+
     fn object(&mut self, depth: usize) -> Result<Value> {
         let len = self.c.len32()?;
+        self.budget.slots::<(String, Value)>(len.min(4096))?;
         let mut object = Object::with_capacity(len.min(4096));
         for _ in 0..len {
             let id = self.c.i32()?;

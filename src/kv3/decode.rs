@@ -39,7 +39,7 @@ pub(crate) mod node {
     pub const UINT32_ONE: u8 = 27;
 }
 
-/// Largest decompressed buffer one document may claim; real ones are a few MB at most.
+/// Largest buffer zstd data of unknown decoded size may claim; real ones are a few MB at most.
 const MAX_BUFFER: usize = 256 << 20;
 /// LZ4 expands a byte at most 255 times.
 pub(crate) const LZ4_RATIO: usize = 255;
@@ -57,36 +57,45 @@ pub fn is_kv3(bytes: &[u8]) -> bool {
         || (magic & 0xFFFF_FF00 == MAGIC_VERSIONED && (1..=5).contains(&(magic & 0xFF)))
 }
 
-/// Decodes a binary KV3 document (a resource block, or a whole file).
+/// Decodes a binary KV3 document (a resource block, or a whole file) within the default
+/// budget of a decoded document.
 pub fn decode(bytes: &[u8]) -> Result<Document> {
+    decode_with(bytes, Budget::new("KV3")).map(|(document, _)| document)
+}
+
+/// Decodes a binary KV3 document taking at most `limit` bytes: every buffer, string table and
+/// value is charged before it is allocated, and what was taken is told with the document.
+pub fn decode_within(bytes: &[u8], limit: usize) -> Result<(Document, usize)> {
+    decode_with(bytes, Budget::with_limit("KV3", limit))
+}
+
+fn decode_with(bytes: &[u8], budget: Budget) -> Result<(Document, usize)> {
     if !is_kv3(bytes) {
         return Err(malformed("KV3", "no KV3 signature"));
     }
     if bytes[..4] == MAGIC_LEGACY.to_le_bytes() {
-        legacy::decode(bytes)
+        legacy::decode(bytes, budget)
     } else {
-        binary::decode(bytes)
+        binary::decode(bytes, budget)
     }
 }
 
-/// A zeroed buffer of `len` bytes, refused past [`MAX_BUFFER`].
-pub(crate) fn buffer(len: usize) -> Result<Vec<u8>> {
-    if len > MAX_BUFFER {
-        return Err(malformed("KV3", format!("a {len}-byte buffer")));
-    }
+/// A zeroed buffer of `len` bytes, charged to `budget` before it is allocated.
+pub(crate) fn buffer(len: usize, budget: &mut Budget) -> Result<Vec<u8>> {
+    budget.bytes(len)?;
     Ok(vec![0; len])
 }
 
 /// One LZ4 block that decompresses to exactly `len` bytes; a length the input cannot reach is
 /// refused before anything is allocated.
-pub(crate) fn lz4(input: &[u8], len: usize) -> Result<Vec<u8>> {
+pub(crate) fn lz4(input: &[u8], len: usize, budget: &mut Budget) -> Result<Vec<u8>> {
     if len / LZ4_RATIO > input.len() {
         return Err(malformed(
             "KV3 LZ4",
             format!("{} bytes cannot expand to {len}", input.len()),
         ));
     }
-    let mut out = buffer(len)?;
+    let mut out = buffer(len, budget)?;
     match lz4_flex::block::decompress_into(input, &mut out) {
         Ok(n) if n == out.len() => Ok(out),
         Ok(n) => Err(malformed(
@@ -99,14 +108,14 @@ pub(crate) fn lz4(input: &[u8], len: usize) -> Result<Vec<u8>> {
 
 /// Zstd frames that decompress to exactly `len` bytes; a length the input cannot reach is
 /// refused before anything is allocated.
-pub(crate) fn zstd(input: &[u8], len: usize) -> Result<Vec<u8>> {
+pub(crate) fn zstd(input: &[u8], len: usize, budget: &mut Budget) -> Result<Vec<u8>> {
     if len / ZSTD_RATIO > input.len() {
         return Err(malformed(
             "KV3 zstd",
             format!("{} bytes cannot expand to {len}", input.len()),
         ));
     }
-    let mut out = buffer(len)?;
+    let mut out = buffer(len, budget)?;
     let mut decoder = ruzstd::decoding::FrameDecoder::new();
     match decoder.decode_all(input, &mut out) {
         Ok(n) if n == out.len() => Ok(out),
@@ -121,7 +130,8 @@ pub(crate) fn zstd(input: &[u8], len: usize) -> Result<Vec<u8>> {
 /// Decompresses zstd frames of unknown decoded size, at most `max` bytes, and no more than the
 /// input can expand to: that much is allocated up front.
 pub(crate) fn zstd_to_vec(input: &[u8], max: usize) -> Result<Vec<u8>> {
-    let mut out = buffer(max.min(input.len().saturating_mul(ZSTD_RATIO)))?;
+    let mut budget = Budget::with_limit("zstd", MAX_BUFFER);
+    let mut out = buffer(max.min(input.len().saturating_mul(ZSTD_RATIO)), &mut budget)?;
     let mut decoder = ruzstd::decoding::FrameDecoder::new();
     let len = decoder
         .decode_all(input, &mut out)

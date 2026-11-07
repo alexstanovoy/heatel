@@ -951,3 +951,42 @@ fn response_rules_reject_responses_that_are_not_a_list() {
         "vrr: group's m_responses is not an array"
     );
 }
+
+/// A legacy KV3 compressed with LZ4: a table of `count` empty strings, then an empty object.
+/// A byte of the file for every 255 strings of the table, and a slot of the table for each.
+fn empty_strings_kv3(count: u32) -> Vec<u8> {
+    let mut data = count.to_le_bytes().to_vec();
+    data.resize(4 + count as usize, 0);
+    data.push(9);
+    data.extend(0u32.to_le_bytes());
+    data.extend(u32::MAX.to_le_bytes());
+    let mut out = b"VKV\x03".to_vec();
+    out.extend([
+        0x8A, 0x34, 0x47, 0x68, 0xA1, 0x63, 0x5C, 0x4F, 0xA1, 0x97, 0x53, 0x80, 0x6F, 0xD9, 0xB1,
+        0x19,
+    ]);
+    out.extend([0; 16]);
+    out.extend((data.len() as u32).to_le_bytes());
+    out.extend(lz4_flex::block::compress(&data));
+    out
+}
+
+/// A string table of more slots than the decoder's budget, cheap in the file, is refused
+/// before its slots are allocated.
+#[test]
+fn a_string_table_past_the_budget_is_refused_before_it_is_allocated() {
+    let file = empty_strings_kv3(16 << 20);
+    assert!(file.len() < 1 << 17, "{} bytes", file.len());
+    let error = kv3::decode(&file).unwrap_err();
+    assert!(error.to_string().contains("more than it may"), "{error}");
+}
+/// A document decoded within a budget tells what it took: its buffers, its table and its
+/// tree; within less than that, it is refused.
+#[test]
+fn a_document_decoded_within_a_budget_tells_what_it_took() {
+    let file = empty_strings_kv3(1 << 10);
+    let (_, spent) = kv3::decode_within(&file, 1 << 20).expect("within a MiB");
+    assert!(spent > (1 << 10) * std::mem::size_of::<String>(), "{spent}");
+    let error = kv3::decode_within(&file, spent - 1).unwrap_err();
+    assert!(error.to_string().contains("more than it may"), "{error}");
+}

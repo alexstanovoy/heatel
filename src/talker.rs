@@ -111,6 +111,27 @@ pub fn read_response_rules(resource: &Resource) -> Result<ResponseRules> {
     let data = resource
         .data()
         .ok_or_else(|| malformed("vrr", "no DATA block"))??;
+    rules_of(&data)
+}
+
+/// The rules of a `vrr_c` resource, decoded taking at most `limit` bytes, and the bytes the
+/// decoding took: every buffer, string and value charged before it was allocated. The rules
+/// copy texts and entries the decoding took, so they take no more than that.
+pub fn read_response_rules_within(
+    resource: &Resource,
+    limit: usize,
+) -> Result<(ResponseRules, usize)> {
+    let data = resource
+        .block(b"DATA")
+        .ok_or_else(|| malformed("vrr", "no DATA block"))?;
+    if !crate::kv3::is_kv3(data) {
+        return Err(malformed("vrr", "a DATA block that is not KV3"));
+    }
+    let (document, spent) = crate::kv3::decode_within(data, limit)?;
+    Ok((rules_of(&document.root)?, spent))
+}
+
+fn rules_of(data: &Value) -> Result<ResponseRules> {
     if data.as_object().is_none() {
         return Err(malformed("vrr", "not an object"));
     }

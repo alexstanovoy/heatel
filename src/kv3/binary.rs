@@ -39,22 +39,22 @@ struct Header {
     objects2: usize,
 }
 
-pub(crate) fn decode(bytes: &[u8]) -> Result<Document> {
+pub(crate) fn decode(bytes: &[u8], mut budget: Budget) -> Result<(Document, usize)> {
     let mut c = Cursor::new(bytes, "KV3");
     let version = c.u32()? & 0xFF;
     let h = Header::read(&mut c, version)?;
-    let (buffer1, early_blobs) = inflate_buffer1(&h, &mut c)?;
+    let (buffer1, early_blobs) = inflate_buffer1(&h, &mut c, &mut budget)?;
     let buffer2 = if version >= 5 {
-        inflate(&h, &mut c, h.buffer2)?
+        inflate(&h, &mut c, h.buffer2, &mut budget)?
     } else {
         Vec::new()
     };
-    let mut layout = Layout::new(&h, &buffer1, &buffer2)?;
+    let mut layout = Layout::new(&h, &buffer1, &buffer2, &mut budget)?;
     let mut blobs = Vec::new();
     if h.blobs > 0 {
         blobs = match early_blobs {
             Some(blobs) => blobs,
-            None => inflate_blobs(&h, &mut c, &mut layout)?,
+            None => inflate_blobs(&h, &mut c, &mut layout, &mut budget)?,
         };
         if c.u32()? != TRAILER {
             return Err(malformed("KV3", "no trailer after the blobs"));
@@ -64,14 +64,15 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Document> {
         version,
         layout,
         blobs: Cursor::new(&blobs, "KV3 blobs"),
-        budget: Budget::new("KV3"),
+        budget,
     };
     let ty = decoder.read_type()?;
     let root = decoder.value(ty, false, 0)?;
-    Ok(Document {
+    let document = Document {
         format: h.format,
         root,
-    })
+    };
+    Ok((document, decoder.budget.spent()))
 }
 
 impl Header {
@@ -178,35 +179,51 @@ impl Header {
 }
 
 /// Buffer 1, and the blobs when zstd before version 5 compressed them in the same run.
-fn inflate_buffer1(h: &Header, c: &mut Cursor) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
+fn inflate_buffer1(
+    h: &Header,
+    c: &mut Cursor,
+    budget: &mut Budget,
+) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
     if h.version < 5 && h.compression == Compression::Zstd && h.blobs > 0 {
         let (len, compressed) = h.buffer1;
-        let mut out = zstd(c.take(compressed)?, len.saturating_add(h.blobs_len))?;
+        let mut out = zstd(c.take(compressed)?, len.saturating_add(h.blobs_len), budget)?;
+        // The blobs move to a buffer of their own.
+        budget.bytes(out.len().saturating_sub(len))?;
         let blobs = out.split_off(len);
         return Ok((out, Some(blobs)));
     }
-    Ok((inflate(h, c, h.buffer1)?, None))
+    Ok((inflate(h, c, h.buffer1, budget)?, None))
 }
 
 /// One buffer of (uncompressed length, compressed length).
-fn inflate(h: &Header, c: &mut Cursor, (len, compressed): (usize, usize)) -> Result<Vec<u8>> {
+fn inflate(
+    h: &Header,
+    c: &mut Cursor,
+    (len, compressed): (usize, usize),
+    budget: &mut Budget,
+) -> Result<Vec<u8>> {
     match h.compression {
-        Compression::None => Ok(c.take(len)?.to_vec()),
-        Compression::Lz4 => lz4(c.take(compressed)?, len),
-        Compression::Zstd => zstd(c.take(compressed)?, len),
+        Compression::None => budget.bytes_of(c.take(len)?),
+        Compression::Lz4 => lz4(c.take(compressed)?, len, budget),
+        Compression::Zstd => zstd(c.take(compressed)?, len, budget),
     }
 }
 
 /// The blobs, which follow the buffers in the block.
-fn inflate_blobs(h: &Header, c: &mut Cursor, layout: &mut Layout) -> Result<Vec<u8>> {
+fn inflate_blobs(
+    h: &Header,
+    c: &mut Cursor,
+    layout: &mut Layout,
+    budget: &mut Budget,
+) -> Result<Vec<u8>> {
     match h.compression {
-        Compression::None => Ok(c.take(h.blobs_len)?.to_vec()),
+        Compression::None => budget.bytes_of(c.take(h.blobs_len)?),
         Compression::Zstd => {
             let compressed = h
                 .compressed_total
                 .checked_sub(h.buffer1.1 + h.buffer2.1)
                 .ok_or_else(|| malformed("KV3", "blob sizes exceed the total"))?;
-            zstd(c.take(compressed)?, h.blobs_len)
+            zstd(c.take(compressed)?, h.blobs_len, budget)
         }
         Compression::Lz4 => {
             if h.blobs_len / LZ4_RATIO > c.remaining() {
@@ -215,7 +232,7 @@ fn inflate_blobs(h: &Header, c: &mut Cursor, layout: &mut Layout) -> Result<Vec<
                     "more blob bytes than the frames hold",
                 ));
             }
-            let mut out = buffer(h.blobs_len)?;
+            let mut out = buffer(h.blobs_len, budget)?;
             lz4_chained(c, layout, &mut out)?;
             Ok(out)
         }
@@ -295,24 +312,26 @@ struct Layout<'a> {
     frame_sizes: Cursor<'a>,
 }
 
-fn strings_from(c: &mut Cursor, count: usize) -> Result<Vec<String>> {
-    let mut strings = Vec::with_capacity(count.min(c.remaining()));
+/// The string table: its slots charged before they are reserved, each text before it is made.
+fn strings_from(c: &mut Cursor, count: usize, budget: &mut Budget) -> Result<Vec<String>> {
+    budget.slots::<String>(count)?;
+    let mut strings = Vec::with_capacity(count);
     for _ in 0..count {
-        strings.push(String::from_utf8_lossy(c.cstr()?).into_owned());
+        strings.push(budget.text(c.cstr()?)?);
     }
     Ok(strings)
 }
 
 impl<'a> Layout<'a> {
-    fn new(h: &Header, buffer1: &'a [u8], buffer2: &'a [u8]) -> Result<Self> {
+    fn new(h: &Header, buffer1: &'a [u8], buffer2: &'a [u8], budget: &mut Budget) -> Result<Self> {
         if h.version >= 5 {
-            return Self::new_v5(h, buffer1, buffer2);
+            return Self::new_v5(h, buffer1, buffer2, budget);
         }
         let mut c = Cursor::new(buffer1, "KV3 buffer");
         let mut main = Lanes::split(&mut c, h.counts, h.version)?;
         let count = main.b4.len32()?;
         let strings_start = c.pos();
-        let strings = strings_from(&mut c, count)?;
+        let strings = strings_from(&mut c, count, budget)?;
         let types_len = if h.version == 1 {
             h.total_len.checked_sub(c.pos() + 4)
         } else {
@@ -333,11 +352,16 @@ impl<'a> Layout<'a> {
         Ok(layout)
     }
 
-    fn new_v5(h: &Header, buffer1: &'a [u8], buffer2: &'a [u8]) -> Result<Self> {
+    fn new_v5(
+        h: &Header,
+        buffer1: &'a [u8],
+        buffer2: &'a [u8],
+        budget: &mut Budget,
+    ) -> Result<Self> {
         let mut c1 = Cursor::new(buffer1, "KV3 buffer 1");
         let mut aux = Lanes::split(&mut c1, h.counts, h.version)?;
         let count = aux.b4.len32()?;
-        let strings = strings_from(&mut aux.b1, count)?;
+        let strings = strings_from(&mut aux.b1, count, budget)?;
         let mut c = Cursor::new(buffer2, "KV3 buffer 2");
         let object_lengths =
             Cursor::new(c.take(h.objects2.saturating_mul(4))?, "KV3 object lengths");
@@ -450,13 +474,19 @@ impl<'a> Decoder<'a> {
             let len = self.layout.blob_lengths.len32()?;
             self.blobs.take(len)?
         };
-        self.budget.bytes(bytes.len())?;
-        Ok(bytes.to_vec())
+        self.budget.bytes_of(bytes)
+    }
+
+    /// A list for `len` values, its first slots charged before they are reserved; past them it
+    /// grows as its values, each charged as a node, come.
+    fn list(&mut self, len: usize) -> Result<Vec<Value>> {
+        self.budget.slots::<Value>(len.min(4096))?;
+        Ok(Vec::with_capacity(len.min(4096)))
     }
 
     fn array(&mut self, depth: usize) -> Result<Value> {
         let len = self.layout.main.b4.len32()?;
-        let mut items = Vec::with_capacity(len.min(4096));
+        let mut items = self.list(len)?;
         for _ in 0..len {
             let ty = self.read_type()?;
             items.push(self.value(ty, false, depth + 1)?);
@@ -475,7 +505,7 @@ impl<'a> Decoder<'a> {
         }
         let element = self.read_type()?;
         let aux = ty == node::ARRAY_TYPE_AUXILIARY_BUFFER;
-        let mut items = Vec::with_capacity(len.min(4096));
+        let mut items = self.list(len)?;
         for _ in 0..len {
             items.push(self.value(element, aux, depth + 1)?);
         }
@@ -488,6 +518,7 @@ impl<'a> Decoder<'a> {
         } else {
             self.layout.main.b4.len32()?
         };
+        self.budget.slots::<(String, Value)>(len.min(4096))?;
         let mut object = Object::with_capacity(len.min(4096));
         for _ in 0..len {
             let ty = self.read_type()?;
