@@ -1060,3 +1060,58 @@ fn a_sounds_ctrl_block_is_decoded_within_the_callers_budget() {
     let error = lipsync.unwrap_err();
     assert!(error.to_string().contains("more than it may"), "{error}");
 }
+
+/// A stored legacy KV3 (as [`kv3_file`] writes it) compressed with LZ4.
+fn lz4_kv3(stored: Vec<u8>) -> Vec<u8> {
+    let body = &stored[36..];
+    let mut out = stored[..4].to_vec();
+    out.extend([
+        0x8A, 0x34, 0x47, 0x68, 0xA1, 0x63, 0x5C, 0x4F, 0xA1, 0x97, 0x53, 0x80, 0x6F, 0xD9, 0xB1,
+        0x19,
+    ]);
+    out.extend(&stored[20..36]);
+    out.extend((body.len() as u32).to_le_bytes());
+    out.extend(lz4_flex::block::compress(body));
+    out
+}
+
+/// A response that is not an object says nothing a rule can play: refused, not read as an
+/// empty response.
+#[test]
+fn response_rules_reject_a_response_that_is_not_an_object() {
+    let rule = K::Obj(vec![
+        ("m_name", s("rule")),
+        ("m_Requirements", K::Arr(vec![s("Move")])),
+    ]);
+    let error = response_rules_of(rule, K::Arr(vec![K::Int(0)])).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "vrr: group's m_responses holds something that is not a response"
+    );
+}
+
+/// The rules' own lists are charged as they are built: a small file of a million empty
+/// responses (each a few bytes of the document, a whole response of the rules) is refused by
+/// the budget it is read within.
+#[test]
+fn response_rules_typed_past_the_budget_are_refused() {
+    let group = || {
+        K::Obj(vec![
+            ("m_name", s("g")),
+            (
+                "m_responses",
+                K::Arr((0..4096).map(|_| K::Obj(vec![])).collect()),
+            ),
+        ])
+    };
+    let data = K::Obj(vec![(
+        "m_ResponseGroups",
+        K::Arr((0..256).map(|_| group()).collect()),
+    )]);
+    let file = resource(&[(b"DATA", lz4_kv3(kv3_file(&data)))]);
+    assert!(file.len() < 1 << 16, "{} bytes", file.len());
+    let resource = Resource::parse(&file).expect("synthetic resource");
+    let read = heatel::talker::read_response_rules(&resource, &mut heatel::Budget::new(128 << 20));
+    let error = read.unwrap_err();
+    assert!(error.to_string().contains("more than it may"), "{error}");
+}

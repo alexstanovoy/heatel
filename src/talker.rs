@@ -107,16 +107,17 @@ pub struct Followup {
     pub delay: f32,
 }
 
-/// The rules of a `vrr_c` resource, its KV3 `DATA` decoded within `budget`. The rules copy
-/// texts and entries the decoding charged, so they take no more than that.
+/// The rules of a `vrr_c` resource, its KV3 `DATA` decoded within `budget`, and the rules' own
+/// lists and texts charged to it before they are made: an entry of a few bytes in the document
+/// may be a whole response in the rules.
 pub fn read_response_rules(resource: &Resource, budget: &mut Budget) -> Result<ResponseRules> {
     let document = resource
         .kv3_in(b"DATA", budget)
         .ok_or_else(|| malformed("vrr", "no KV3 DATA block"))??;
-    rules_of(&document.root)
+    rules_of(&document.root, budget)
 }
 
-fn rules_of(data: &Value) -> Result<ResponseRules> {
+fn rules_of(data: &Value, budget: &mut Budget) -> Result<ResponseRules> {
     if data.as_object().is_none() {
         return Err(malformed("vrr", "not an object"));
     }
@@ -132,26 +133,43 @@ fn rules_of(data: &Value) -> Result<ResponseRules> {
         }
         Ok(items)
     };
+    let criteria = list("m_Requirements", MAX_CRITERIA)?;
+    budget.slots::<Criterion>(criteria.len())?;
+    let groups = list("m_ResponseGroups", MAX_GROUPS)?;
+    budget.slots::<ResponseGroup>(groups.len())?;
     Ok(ResponseRules {
-        includes: strings(list("m_Includes", MAX_LIST)?),
-        criteria: list("m_Requirements", MAX_CRITERIA)?
+        includes: strings(list("m_Includes", MAX_LIST)?, budget)?,
+        criteria: criteria
             .iter()
-            .map(criterion)
-            .collect(),
-        sound_event_scripts: strings(list("m_SoundEventScripts", MAX_LIST)?),
-        groups: list("m_ResponseGroups", MAX_GROUPS)?
+            .map(|c| criterion(c, budget))
+            .collect::<Result<_>>()?,
+        sound_event_scripts: strings(list("m_SoundEventScripts", MAX_LIST)?, budget)?,
+        groups: groups
             .iter()
-            .map(group)
+            .map(|g| group(g, budget))
             .collect::<Result<_>>()?,
     })
 }
 
-fn strings(items: &[Value]) -> Vec<String> {
+fn strings(items: &[Value], budget: &mut Budget) -> Result<Vec<String>> {
+    budget.slots::<String>(items.len())?;
     items
         .iter()
         .filter_map(Value::as_str)
-        .map(str::to_owned)
+        .map(|text| budget.copy(text))
         .collect()
+}
+
+/// `v` itself when it is an object: an entry of `list` that is not one is not `entry` (a
+/// criterion, a group, a response), and refused rather than read as an empty one.
+fn object<'a>(v: &'a Value, list: &str, entry: &str) -> Result<&'a Value> {
+    match v.as_object() {
+        Some(_) => Ok(v),
+        None => Err(malformed(
+            "vrr",
+            format!("{list} holds something that is not {entry}"),
+        )),
+    }
 }
 
 /// A group's list under `key`: none when the file leaves it out (KV3 leaves empty lists out),
@@ -170,75 +188,96 @@ fn group_list<'a>(v: Option<&'a Value>, key: &str, max: usize) -> Result<&'a [Va
 }
 
 /// Names that must each be one: a requirement that is not a name is an error, not dropped.
-fn names(items: &[Value], key: &str) -> Result<Vec<String>> {
+fn names(items: &[Value], key: &str, budget: &mut Budget) -> Result<Vec<String>> {
+    budget.slots::<String>(items.len())?;
     items
         .iter()
-        .map(|item| {
-            item.as_str().map(str::to_owned).ok_or_else(|| {
-                malformed(
-                    "vrr",
-                    format!("group's {key} holds something that is not a name"),
-                )
-            })
+        .map(|item| match item.as_str() {
+            Some(name) => budget.copy(name),
+            None => Err(malformed(
+                "vrr",
+                format!("group's {key} holds something that is not a name"),
+            )),
         })
         .collect()
 }
 
-fn text(v: &Value, key: &str) -> Option<String> {
-    v.get(key).and_then(Value::as_str).map(str::to_owned)
+fn text(v: &Value, key: &str, budget: &mut Budget) -> Result<Option<String>> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .map(|text| budget.copy(text))
+        .transpose()
 }
 
 fn number(v: Option<&Value>) -> Option<f32> {
     v?.as_f64().map(|n| finite(n as f32))
 }
 
-fn criterion(v: &Value) -> Criterion {
-    Criterion {
-        name: text(v, "m_name").unwrap_or_default(),
-        match_key: text(v, "m_matchKey"),
-        match_expr: text(v, "m_matchExpr"),
+fn criterion(v: &Value, budget: &mut Budget) -> Result<Criterion> {
+    let v = object(v, "m_Requirements", "a criterion")?;
+    Ok(Criterion {
+        name: text(v, "m_name", budget)?.unwrap_or_default(),
+        match_key: text(v, "m_matchKey", budget)?,
+        match_expr: text(v, "m_matchExpr", budget)?,
         weight: number(v.get("m_flWeight")),
         required: v.get("m_bRequired").and_then(Value::as_bool) == Some(true),
-    }
-}
-
-fn group(v: &Value) -> Result<ResponseGroup> {
-    let rule = v.get("m_pEmbeddedRule");
-    let requirements = group_list(rule, "m_Requirements", MAX_LIST)?;
-    let responses = group_list(Some(v), "m_responses", MAX_RESPONSES)?;
-    Ok(ResponseGroup {
-        name: text(v, "m_name").unwrap_or_default(),
-        rule: rule.and_then(|r| text(r, "m_name")).unwrap_or_default(),
-        requirements: names(requirements, "m_Requirements")?,
-        responses: responses.iter().map(response).collect(),
     })
 }
 
-fn response(v: &Value) -> Response {
+fn group(v: &Value, budget: &mut Budget) -> Result<ResponseGroup> {
+    let v = object(v, "m_ResponseGroups", "a response group")?;
+    let rule = v.get("m_pEmbeddedRule");
+    let requirements = group_list(rule, "m_Requirements", MAX_LIST)?;
+    let responses = group_list(Some(v), "m_responses", MAX_RESPONSES)?;
+    let name = text(v, "m_name", budget)?.unwrap_or_default();
+    let rule = match rule {
+        Some(rule) => text(rule, "m_name", budget)?.unwrap_or_default(),
+        None => String::new(),
+    };
+    let requirements = names(requirements, "m_Requirements", budget)?;
+    budget.slots::<Response>(responses.len())?;
+    Ok(ResponseGroup {
+        name,
+        rule,
+        requirements,
+        responses: responses
+            .iter()
+            .map(|r| response(r, budget))
+            .collect::<Result<_>>()?,
+    })
+}
+
+fn response(v: &Value, budget: &mut Budget) -> Result<Response> {
+    let v = object(v, "group's m_responses", "a response")?;
     let params = v.get("m_params");
     let start = |key: &str| {
         number(params.and_then(|p| p.get(&format!("{key}.start"))))
             .or_else(|| number(params.and_then(|p| p.get(key)?.get("start"))))
     };
-    let kind = match text(v, "m_type").unwrap_or_default().as_str() {
+    // The kinds Source names are no copy; another kind is kept by its name.
+    let kind = match v.get("m_type").and_then(Value::as_str).unwrap_or_default() {
         "SPEAK" => ResponseKind::Speak,
         "SCENE" => ResponseKind::Scene,
         "PRINT" => ResponseKind::Print,
         "RESPONSE" => ResponseKind::Response,
-        other => ResponseKind::Other(other.to_owned()),
+        other => ResponseKind::Other(budget.copy(other)?),
     };
-    Response {
+    let followup = match v.get("m_pConceptFollowup") {
+        Some(f) => Some(Followup {
+            target: text(f, "m_target", budget)?.unwrap_or_default(),
+            concept: text(f, "m_concept", budget)?.unwrap_or_default(),
+            contexts: text(f, "m_contexts", budget)?.unwrap_or_default(),
+            delay: number(v.get("m_flFollowupDelay")).unwrap_or(0.0),
+        }),
+        None => None,
+    };
+    Ok(Response {
         kind,
-        value: text(v, "m_value"),
+        value: text(v, "m_value", budget)?,
         speak_once: params.and_then(|p| p.get("m_bSpeakOnce")?.as_bool()) == Some(true),
         respeak_delay: start("m_respeakdelay"),
         pre_delay: start("m_predelay"),
         weapon_delay: start("m_weapondelay"),
-        followup: v.get("m_pConceptFollowup").map(|f| Followup {
-            target: text(f, "m_target").unwrap_or_default(),
-            concept: text(f, "m_concept").unwrap_or_default(),
-            contexts: text(f, "m_contexts").unwrap_or_default(),
-            delay: number(v.get("m_flFollowupDelay")).unwrap_or(0.0),
-        }),
-    }
+        followup,
+    })
 }
