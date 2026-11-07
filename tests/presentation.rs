@@ -47,8 +47,8 @@ fn every_file_reads() {
         counts[kind] += 1;
         let bytes = pak.read(&src, entry).unwrap();
         let result = Resource::parse(&bytes).and_then(|r| match kind {
-            0 => read_sound_events(&r).map(drop),
-            1 => read_response_rules(&r).map(drop),
+            0 => read_sound_events(&r, &mut heatel::Budget::default()).map(drop),
+            1 => read_response_rules(&r, &mut heatel::Budget::default()).map(drop),
             _ => control_point_configurations(&r).map(drop),
         });
         if let Err(err) = result {
@@ -72,7 +72,11 @@ fn shadow_fiend_sound_events() {
         &pak,
         "soundevents/game_sounds_heroes/game_sounds_nevermore.vsndevts_c",
     );
-    let events = read_sound_events(&Resource::parse(&bytes).unwrap()).unwrap();
+    let events = read_sound_events(
+        &Resource::parse(&bytes).unwrap(),
+        &mut heatel::Budget::default(),
+    )
+    .unwrap();
     let event = |name: &str| {
         events
             .iter()
@@ -119,6 +123,7 @@ fn sound_event_types_limits_and_loops() {
             "soundstacks/soundstacks_dota_core.vsndstck_c",
         ))
         .unwrap(),
+        &mut heatel::Budget::default(),
     )
     .unwrap();
     let stack = stacks.iter().find(|s| s.name == "dota_src1_3d").unwrap();
@@ -128,14 +133,22 @@ fn sound_event_types_limits_and_loops() {
     assert_eq!(stack.limits.limiter_match_entity, Some(true));
     assert_eq!(stack.limits.limiter_stop_oldest, Some(true));
     let bytes = read(&src, &pak, "soundevents/game_sounds_creeps.vsndevts_c");
-    let events = read_sound_events(&Resource::parse(&bytes).unwrap()).unwrap();
+    let events = read_sound_events(
+        &Resource::parse(&bytes).unwrap(),
+        &mut heatel::Budget::default(),
+    )
+    .unwrap();
     let engine = events
         .iter()
         .find(|e| e.name == "Creep_Good_Engine.Move")
         .unwrap();
     assert_eq!(engine.limits.limiter_max, Some(1.0));
     assert_eq!(engine.limits.limiter_on, Some(true));
-    let looping = |path: &str| Sound::parse(&read(&src, &pak, path)).unwrap().looping();
+    let looping = |path: &str| {
+        Sound::parse(&read(&src, &pak, path), &mut heatel::Budget::default())
+            .unwrap()
+            .looping()
+    };
     assert!(looping("sounds/weapons/hero/pudge/rot.vsnd_c"));
     assert!(!looping("sounds/weapons/creep/shared/melee_hit01.vsnd_c"));
 }
@@ -171,7 +184,7 @@ fn shadow_fiend_response_rules() {
             .and_then(heatel::kv3::Value::as_f64),
         Some(300.0)
     );
-    let rules = read_response_rules(&resource).unwrap();
+    let rules = read_response_rules(&resource, &mut heatel::Budget::default()).unwrap();
     assert_eq!(rules.groups.len(), 135);
     let bounty = rules
         .groups

@@ -90,7 +90,7 @@ pub(crate) fn read(
 ) -> Result<Value> {
     // One budget for the manifest and the tree: lists and strings may overlap, so a small file
     // can describe far more than it holds.
-    let mut budget = Budget::new("NTRO");
+    let mut budget = Budget::named("NTRO");
     let structs = read_structs(file, ntro_at, &mut budget)?;
     let enums = read_enums(file, ntro_at, &mut budget)?;
     let root = structs

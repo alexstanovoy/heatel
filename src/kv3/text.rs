@@ -5,6 +5,7 @@
 //! Every input is bounded: its size, its nesting and the number of values it holds.
 
 use super::{Document, Object, Value};
+use crate::budget::Budget;
 use crate::error::{Result, malformed};
 
 /// Most bytes a text document holds.
@@ -20,6 +21,12 @@ const MAX_TOKEN: usize = 1 << 12;
 /// front of a string (`resource:"x"`) is dropped, as the binary reader drops it. Anything the
 /// grammar above does not hold is refused, with where it was met.
 pub fn parse_text(bytes: &[u8]) -> Result<Document> {
+    parse_text_in(bytes, &mut Budget::named("kv3 text"))
+}
+
+/// [`parse_text`] within `budget`: each value is charged as a slot of its list (twice, for the
+/// list's growth), each string and word as it is copied.
+pub fn parse_text_in(bytes: &[u8], budget: &mut Budget) -> Result<Document> {
     if bytes.len() > MAX_BYTES {
         return Err(malformed(
             "kv3 text",
@@ -31,6 +38,7 @@ pub fn parse_text(bytes: &[u8]) -> Result<Document> {
         text: text.as_bytes(),
         at: 0,
         values: 0,
+        budget,
     };
     reader.skip_space()?;
     let root = reader.value(0)?;
@@ -44,13 +52,14 @@ pub fn parse_text(bytes: &[u8]) -> Result<Document> {
     })
 }
 
-struct Reader<'a> {
+struct Reader<'a, 'b> {
     text: &'a [u8],
     at: usize,
     values: usize,
+    budget: &'b mut Budget,
 }
 
-impl Reader<'_> {
+impl Reader<'_, '_> {
     fn fault(&self, what: &str) -> crate::error::Error {
         let line = 1 + self.text[..self.at.min(self.text.len())]
             .iter()
@@ -102,7 +111,7 @@ impl Reader<'_> {
         if self.values > MAX_VALUES {
             return Err(self.fault("more values than any script has"));
         }
-        Ok(())
+        self.budget.slots::<(String, Value)>(2)
     }
 
     fn value(&mut self, depth: usize) -> Result<Value> {
@@ -166,7 +175,14 @@ impl Reader<'_> {
 
     fn string(&mut self) -> Result<String> {
         self.at += 1;
-        let mut out = Vec::new();
+        // The bytes up to the closing quote, its most: escapes only shorten it.
+        let end = self.text[self.at..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .unwrap_or(self.text.len() - self.at)
+            .min(MAX_TOKEN + 2);
+        self.budget.string_of(end)?;
+        let mut out = Vec::with_capacity(end);
         loop {
             match self.peek() {
                 None | Some(b'\n') => return Err(self.fault("a string that never ends")),
@@ -210,7 +226,7 @@ impl Reader<'_> {
         if self.at == start {
             return Err(self.fault("a word was expected"));
         }
-        Ok(String::from_utf8_lossy(&self.text[start..self.at]).into_owned())
+        self.budget.text(&self.text[start..self.at])
     }
 
     /// `true`, `false`, `null`, a number, or a flag in front of a string.

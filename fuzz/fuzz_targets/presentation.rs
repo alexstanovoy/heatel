@@ -12,7 +12,7 @@ fuzz_target!(|data: &[u8]| {
     let Ok(resource) = Resource::parse(data) else {
         return;
     };
-    let _ = read_sound_events(&resource);
-    let _ = read_response_rules(&resource);
+    let _ = read_sound_events(&resource, &mut heatel::Budget::default());
+    let _ = read_response_rules(&resource, &mut heatel::Budget::default());
     let _ = control_point_configurations(&resource);
 });

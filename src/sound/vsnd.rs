@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use super::{mp3, wav};
+use crate::budget::Budget;
 use crate::bytes::Cursor;
 use crate::error::{Result, malformed};
 use crate::kv3::Value;
@@ -36,11 +37,12 @@ pub struct Sound<'a> {
 impl<'a> Sound<'a> {
     /// Reads the sound of a `vsnd_c`: older files describe it in a small binary `DATA` block,
     /// newer ones in a KV3 `CTRL` block; the audio follows the resource either way. Only PCM and
-    /// MP3 sounds are supported; others are errors.
-    pub fn parse(bytes: &'a [u8]) -> Result<Self> {
+    /// MP3 sounds are supported; others are errors. The `CTRL` block is decoded within
+    /// `budget`.
+    pub fn parse(bytes: &'a [u8], budget: &mut Budget) -> Result<Self> {
         let resource = Resource::parse(bytes)?;
         let audio = resource.trailing();
-        let info = match resource.kv3(b"CTRL") {
+        let info = match resource.kv3_in(b"CTRL", budget) {
             Some(ctrl) => Info::from_ctrl(&ctrl?.root)?,
             None => Info::from_data(
                 resource

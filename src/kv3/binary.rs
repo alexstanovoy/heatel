@@ -39,22 +39,22 @@ struct Header {
     objects2: usize,
 }
 
-pub(crate) fn decode(bytes: &[u8], mut budget: Budget) -> Result<(Document, usize)> {
+pub(crate) fn decode(bytes: &[u8], budget: &mut Budget) -> Result<Document> {
     let mut c = Cursor::new(bytes, "KV3");
     let version = c.u32()? & 0xFF;
     let h = Header::read(&mut c, version)?;
-    let (buffer1, early_blobs) = inflate_buffer1(&h, &mut c, &mut budget)?;
+    let (buffer1, early_blobs) = inflate_buffer1(&h, &mut c, budget)?;
     let buffer2 = if version >= 5 {
-        inflate(&h, &mut c, h.buffer2, &mut budget)?
+        inflate(&h, &mut c, h.buffer2, budget)?
     } else {
         Vec::new()
     };
-    let mut layout = Layout::new(&h, &buffer1, &buffer2, &mut budget)?;
+    let mut layout = Layout::new(&h, &buffer1, &buffer2, budget)?;
     let mut blobs = Vec::new();
     if h.blobs > 0 {
         blobs = match early_blobs {
             Some(blobs) => blobs,
-            None => inflate_blobs(&h, &mut c, &mut layout, &mut budget)?,
+            None => inflate_blobs(&h, &mut c, &mut layout, budget)?,
         };
         if c.u32()? != TRAILER {
             return Err(malformed("KV3", "no trailer after the blobs"));
@@ -68,11 +68,10 @@ pub(crate) fn decode(bytes: &[u8], mut budget: Budget) -> Result<(Document, usiz
     };
     let ty = decoder.read_type()?;
     let root = decoder.value(ty, false, 0)?;
-    let document = Document {
+    Ok(Document {
         format: h.format,
         root,
-    };
-    Ok((document, decoder.budget.spent()))
+    })
 }
 
 impl Header {
@@ -394,14 +393,14 @@ impl<'a> Layout<'a> {
     }
 }
 
-struct Decoder<'a> {
+struct Decoder<'a, 'b> {
     version: u32,
     layout: Layout<'a>,
     blobs: Cursor<'a>,
-    budget: Budget,
+    budget: &'b mut Budget,
 }
 
-impl<'a> Decoder<'a> {
+impl<'a> Decoder<'a, '_> {
     /// A type byte, skipping the flag byte (and a reserved one) that may follow it.
     fn read_type(&mut self) -> Result<u8> {
         let types = &mut self.layout.types;
@@ -454,7 +453,7 @@ impl<'a> Decoder<'a> {
             node::DOUBLE => Value::Float(f64::from_bits(self.lanes(aux).b8.u64()?)),
             node::STRING => {
                 let id = self.layout.main.b4.i32()?;
-                Value::String(string(&self.layout.strings, id, &mut self.budget)?)
+                Value::String(string(&self.layout.strings, id, self.budget)?)
             }
             node::BINARY_BLOB => Value::Blob(self.blob()?),
             node::ARRAY => self.array(depth)?,
@@ -523,7 +522,7 @@ impl<'a> Decoder<'a> {
         for _ in 0..len {
             let ty = self.read_type()?;
             let id = self.layout.main.b4.i32()?;
-            let key = string(&self.layout.strings, id, &mut self.budget)?;
+            let key = string(&self.layout.strings, id, self.budget)?;
             let value = self.value(ty, false, depth + 1)?;
             object.push(key, value);
         }

@@ -2,6 +2,7 @@
 //! requirements a situation must meet (`Spawn`, `Isnevermore`) and the responses it picks
 //! among (`SPEAK nevermore_nev_spawn_03`); the criteria say what each requirement matches.
 
+use crate::budget::Budget;
 use crate::error::{Result, malformed};
 use crate::kv3::Value;
 use crate::model::finite;
@@ -106,29 +107,13 @@ pub struct Followup {
     pub delay: f32,
 }
 
-/// The rules of a `vrr_c` resource.
-pub fn read_response_rules(resource: &Resource) -> Result<ResponseRules> {
-    let data = resource
-        .data()
-        .ok_or_else(|| malformed("vrr", "no DATA block"))??;
-    rules_of(&data)
-}
-
-/// The rules of a `vrr_c` resource, decoded taking at most `limit` bytes, and the bytes the
-/// decoding took: every buffer, string and value charged before it was allocated. The rules
-/// copy texts and entries the decoding took, so they take no more than that.
-pub fn read_response_rules_within(
-    resource: &Resource,
-    limit: usize,
-) -> Result<(ResponseRules, usize)> {
-    let data = resource
-        .block(b"DATA")
-        .ok_or_else(|| malformed("vrr", "no DATA block"))?;
-    if !crate::kv3::is_kv3(data) {
-        return Err(malformed("vrr", "a DATA block that is not KV3"));
-    }
-    let (document, spent) = crate::kv3::decode_within(data, limit)?;
-    Ok((rules_of(&document.root)?, spent))
+/// The rules of a `vrr_c` resource, its KV3 `DATA` decoded within `budget`. The rules copy
+/// texts and entries the decoding charged, so they take no more than that.
+pub fn read_response_rules(resource: &Resource, budget: &mut Budget) -> Result<ResponseRules> {
+    let document = resource
+        .kv3_in(b"DATA", budget)
+        .ok_or_else(|| malformed("vrr", "no KV3 DATA block"))??;
+    rules_of(&document.root)
 }
 
 fn rules_of(data: &Value) -> Result<ResponseRules> {

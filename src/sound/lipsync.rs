@@ -3,6 +3,7 @@
 //! and, in newer files, a morph animation (facial flex controller curves, named by the hash of
 //! the controller's name). The client moves a speaking face by them (see its `face` module).
 
+use crate::budget::Budget;
 use crate::bytes::Cursor;
 use crate::error::{Result, malformed};
 use crate::kv3::Value;
@@ -63,17 +64,29 @@ impl Lipsync {
     ///
     /// A resource that does not read, a phoneme or key without its numbers, numbers that are
     /// not finite or out of time order, morph keys of the wrong width, and more than 8192
-    /// phonemes, 16384 keys or 256 channels.
-    pub fn parse(bytes: &[u8]) -> Result<Self> {
+    /// phonemes, 16384 keys or 256 channels; and what passes `budget`. The `CTRL` block is
+    /// decoded within it; the lip sync's lists copy numbers of the decoded values, each smaller
+    /// than the value it charged, so what decoding took is charged again before they are built.
+    /// The older layout's tables are charged by the bytes of the block they are read from.
+    pub fn parse(bytes: &[u8], budget: &mut Budget) -> Result<Self> {
         let resource = Resource::parse(bytes)?;
-        match resource.kv3(b"CTRL") {
-            Some(ctrl) => match ctrl?.root.get("m_vSound") {
-                Some(sound) => Self::from_ctrl(sound),
+        let before = budget.spent();
+        match resource.kv3_in(b"CTRL", budget) {
+            Some(ctrl) => {
+                let ctrl = ctrl?;
+                budget.charge(budget.spent() - before)?;
+                match ctrl.root.get("m_vSound") {
+                    Some(sound) => Self::from_ctrl(sound),
+                    None => Ok(Self::default()),
+                }
+            }
+            None => match resource.block(b"DATA") {
+                Some(data) => {
+                    budget.charge(data.len())?;
+                    Self::from_data(data)
+                }
                 None => Ok(Self::default()),
             },
-            None => resource
-                .block(b"DATA")
-                .map_or_else(|| Ok(Self::default()), Self::from_data),
         }
     }
 

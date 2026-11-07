@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let src = DirSource::new(game);
     let pak = Vpk::open(&src, "pak01_dir.vpk")?;
     let bytes = pak.read_file(&src, vsnd)?;
-    let sound = Sound::parse(&bytes)?;
+    let sound = Sound::parse(&bytes, &mut heatel::Budget::default())?;
     let out = format!("{stem}.{}", sound.extension());
     std::fs::write(&out, sound.file())?;
     eprintln!(

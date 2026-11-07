@@ -9,16 +9,45 @@ const MAX_DEPTH: usize = 256;
 /// What a heap string takes besides its bytes: the allocator's header and rounding.
 const STRING_OVERHEAD: usize = 16;
 
-/// Bounds the tree a decoder builds, so no input (a string referenced a million times, a typed
-/// array of zero-width constants, a pointer cycle) grows it without limit.
-pub(crate) struct Budget {
+/// Bounds what reading takes, so no input (a string referenced a million times, a typed array
+/// of zero-width constants, a pointer cycle) grows it without limit: each allocation is charged
+/// before it is made, and nothing charged is given back. A caller reading several files holds
+/// them to one budget by passing the same one to each reader.
+pub struct Budget {
     what: &'static str,
     limit: usize,
     left: usize,
 }
 
+impl Default for Budget {
+    /// The budget of one decoded document.
+    fn default() -> Self {
+        Self::named("reading")
+    }
+}
+
 impl Budget {
-    pub(crate) fn new(what: &'static str) -> Self {
+    /// A budget of `limit` bytes.
+    pub fn new(limit: usize) -> Self {
+        Self::with_limit("reading", limit)
+    }
+
+    /// The bytes not charged yet.
+    pub fn left(&self) -> usize {
+        self.left
+    }
+
+    /// Charges `bytes` a caller is about to allocate.
+    ///
+    /// # Errors
+    ///
+    /// When fewer are left.
+    pub fn charge(&mut self, bytes: usize) -> Result<()> {
+        self.bytes(bytes)
+    }
+
+    /// The budget of one decoded document, its errors naming `what`.
+    pub(crate) fn named(what: &'static str) -> Self {
         Self::with_limit(what, MAX_TREE_BYTES)
     }
 
@@ -32,7 +61,7 @@ impl Budget {
     }
 
     /// The bytes charged so far.
-    pub(crate) fn spent(&self) -> usize {
+    pub fn spent(&self) -> usize {
         self.limit - self.left
     }
 
@@ -63,6 +92,11 @@ impl Budget {
             .checked_sub(len)
             .ok_or_else(|| malformed(self.what, format!("takes {len} bytes more than it may")))?;
         Ok(())
+    }
+
+    /// Charges a string of `len` bytes about to be made, with what its allocation takes besides.
+    pub(crate) fn string_of(&mut self, len: usize) -> Result<()> {
+        self.bytes(len.saturating_add(STRING_OVERHEAD))
     }
 
     /// A copy of `text`, charged with what its allocation takes besides.

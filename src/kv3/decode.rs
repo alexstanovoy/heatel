@@ -50,8 +50,25 @@ const ZSTD_RATIO: usize = (128 << 10) / 4;
 const ZSTD_MAGIC: u32 = 0xFD2F_B528;
 const ZSTD_SKIPPABLE: u32 = 0x184D_2A50;
 /// What a zstd decoder stages past its window: it decodes a mebibyte at a time, and a block of
-/// 128 KiB at most past that, before the output takes it.
+/// 128 KiB at most past that, before the output takes it (ruzstd 0.9.1
+/// `FrameDecoder::decode_all`, `BlockDecodingStrategy::UptoBytes(1024 * 1024)`).
 const ZSTD_STAGING: usize = (1 << 20) + (128 << 10);
+/// The ring buffer's slack: it grows to `next_power_of_two(required - SLACK) + SLACK + 1`
+/// (ruzstd 0.9.1 `decoding/ringbuffer.rs`, `reserve_amortized`, `SLACK = 2 * MAX_BLOCK_SIZE`).
+const ZSTD_SLACK: usize = 2 * (128 << 10);
+/// The decoder's tables and block buffers besides its ring buffer (Huffman and FSE tables,
+/// literals and sequences of one block): a fraction of this.
+const ZSTD_SCRATCH: usize = 1 << 20;
+
+/// The most a zstd decoder of `window` allocates at once: its ring buffer holds the window
+/// and the staging, `need` bytes; each growth rounds the capacity up to below twice `need`
+/// plus the slack, and allocates the new buffer before it frees the old one, so two such
+/// buffers are live at once; and its scratch.
+fn zstd_worst(window: usize) -> usize {
+    let need = window.saturating_add(ZSTD_STAGING);
+    let capacity = need.saturating_mul(2).saturating_add(ZSTD_SLACK + 1);
+    capacity.saturating_mul(2).saturating_add(ZSTD_SCRATCH)
+}
 
 /// Whether `bytes` start with a binary KV3 signature this crate reads.
 pub fn is_kv3(bytes: &[u8]) -> bool {
@@ -66,16 +83,12 @@ pub fn is_kv3(bytes: &[u8]) -> bool {
 /// Decodes a binary KV3 document (a resource block, or a whole file) within the default
 /// budget of a decoded document.
 pub fn decode(bytes: &[u8]) -> Result<Document> {
-    decode_with(bytes, Budget::new("KV3")).map(|(document, _)| document)
+    decode_in(bytes, &mut Budget::named("KV3"))
 }
 
-/// Decodes a binary KV3 document taking at most `limit` bytes: every buffer, string table and
-/// value is charged before it is allocated, and what was taken is told with the document.
-pub fn decode_within(bytes: &[u8], limit: usize) -> Result<(Document, usize)> {
-    decode_with(bytes, Budget::with_limit("KV3", limit))
-}
-
-fn decode_with(bytes: &[u8], budget: Budget) -> Result<(Document, usize)> {
+/// Decodes a binary KV3 document within `budget`: every buffer, string table and value is
+/// charged to it before it is allocated.
+pub fn decode_in(bytes: &[u8], budget: &mut Budget) -> Result<Document> {
     if !is_kv3(bytes) {
         return Err(malformed("KV3", "no KV3 signature"));
     }
@@ -136,8 +149,8 @@ pub(crate) fn zstd(input: &[u8], len: usize, budget: &mut Budget) -> Result<Vec<
 /// input can expand to: that much is allocated up front.
 pub(crate) fn zstd_to_vec(input: &[u8], max: usize) -> Result<Vec<u8>> {
     let len = max.min(input.len().saturating_mul(ZSTD_RATIO));
-    // The buffer, a window as large and the decoder's staging.
-    let mut budget = Budget::with_limit("zstd", MAX_BUFFER * 2 + ZSTD_STAGING);
+    // The buffer and a decoder of a window as large.
+    let mut budget = Budget::with_limit("zstd", MAX_BUFFER + zstd_worst(MAX_BUFFER));
     let mut out = buffer(len, &mut budget)?;
     let len =
         zstd_into(input, &mut out, &mut budget)?.map_err(|e| malformed("zstd", e.to_string()))?;
@@ -146,16 +159,16 @@ pub(crate) fn zstd_to_vec(input: &[u8], max: usize) -> Result<Vec<u8>> {
 }
 
 /// Decodes zstd frames into `out`. The decoder keeps a frame's window and stages past it
-/// ([`ZSTD_STAGING`]): the widest window the frames declare is charged to `budget` with the
-/// staging before the decoder is made, and is the most it may keep.
+/// ([`ZSTD_STAGING`]): the most it allocates for the widest window the frames declare
+/// ([`zstd_worst`]) is charged to `budget` before the decoder is made, and that window is the
+/// most it may keep.
 fn zstd_into(
     input: &[u8],
     out: &mut [u8],
     budget: &mut Budget,
 ) -> Result<std::result::Result<usize, ruzstd::decoding::errors::FrameDecoderError>> {
     let window = zstd_window(input)?;
-    let kept = usize::try_from(window).unwrap_or(usize::MAX);
-    budget.bytes(kept.saturating_add(ZSTD_STAGING))?;
+    budget.bytes(zstd_worst(usize::try_from(window).unwrap_or(usize::MAX)))?;
     let mut decoder = ruzstd::decoding::FrameDecoder::new();
     decoder.set_max_window_size(window);
     Ok(decoder.decode_all(input, out))

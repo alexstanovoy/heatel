@@ -841,7 +841,8 @@ fn response_rules_reject_a_non_array_response_group_list() {
     let data = K::Obj(vec![("m_ResponseGroups", s("not an array"))]);
     let file = resource(&[(b"DATA", kv3_file(&data))]);
     let resource = Resource::parse(&file).expect("synthetic resource");
-    let error = heatel::talker::read_response_rules(&resource).unwrap_err();
+    let error =
+        heatel::talker::read_response_rules(&resource, &mut heatel::Budget::default()).unwrap_err();
     assert_eq!(error.to_string(), "vrr: m_ResponseGroups is not an array");
 }
 
@@ -863,7 +864,8 @@ fn response_rules_read_a_line_respeak_delay() {
     )]);
     let file = resource(&[(b"DATA", kv3_file(&data))]);
     let resource = Resource::parse(&file).expect("synthetic resource");
-    let rules = heatel::talker::read_response_rules(&resource).expect("response rules");
+    let rules = heatel::talker::read_response_rules(&resource, &mut heatel::Budget::default())
+        .expect("response rules");
     assert_eq!(rules.groups[0].responses[0].respeak_delay, Some(42.0));
 }
 
@@ -887,7 +889,8 @@ fn response_rules_read_nested_delay_ranges() {
     )]);
     let file = resource(&[(b"DATA", kv3_file(&data))]);
     let resource = Resource::parse(&file).expect("synthetic resource");
-    let rules = heatel::talker::read_response_rules(&resource).expect("response rules");
+    let rules = heatel::talker::read_response_rules(&resource, &mut heatel::Budget::default())
+        .expect("response rules");
     assert_eq!(rules.groups[0].responses[0].respeak_delay, Some(42.0));
 }
 
@@ -903,7 +906,10 @@ fn response_rules_of(rule: K, responses: K) -> heatel::Result<heatel::talker::Re
         ])]),
     )]);
     let file = resource(&[(b"DATA", kv3_file(&data))]);
-    heatel::talker::read_response_rules(&Resource::parse(&file).expect("synthetic resource"))
+    heatel::talker::read_response_rules(
+        &Resource::parse(&file).expect("synthetic resource"),
+        &mut heatel::Budget::default(),
+    )
 }
 
 fn one_line() -> K {
@@ -985,19 +991,21 @@ fn a_string_table_past_the_budget_is_refused_before_it_is_allocated() {
 #[test]
 fn a_document_decoded_within_a_budget_tells_what_it_took() {
     let file = empty_strings_kv3(1 << 10);
-    let (_, spent) = kv3::decode_within(&file, 1 << 20).expect("within a MiB");
+    let mut budget = heatel::Budget::new(1 << 20);
+    kv3::decode_in(&file, &mut budget).expect("within a MiB");
+    let spent = budget.spent();
     assert!(spent > (1 << 10) * std::mem::size_of::<String>(), "{spent}");
-    let error = kv3::decode_within(&file, spent - 1).unwrap_err();
+    let error = kv3::decode_in(&file, &mut heatel::Budget::new(spent - 1)).unwrap_err();
     assert!(error.to_string().contains("more than it may"), "{error}");
 }
 
 /// A version 2 KV3 compressed with zstd whose buffer is one byte: one frame of no stated
-/// content size and a 128 MiB window, of `blocks` RLE blocks of 128 KiB zeros each. Some
-/// hundred bytes of the file for every 32 MiB the frame makes.
-fn wide_window_kv3(blocks: u32) -> Vec<u8> {
+/// content size and a window of `2^window_log` bytes, of `blocks` RLE blocks of 128 KiB zeros
+/// each. Some hundred bytes of the file for every 32 MiB the frame makes.
+fn wide_window_kv3(window_log: u8, blocks: u32) -> Vec<u8> {
     let mut frame = 0xFD2F_B528u32.to_le_bytes().to_vec();
-    // No single segment, no content size, no checksum; a window of 2^27 bytes.
-    frame.extend([0x00, (27 - 10) << 3]);
+    // No single segment, no content size, no checksum.
+    frame.extend([0x00, (window_log - 10) << 3]);
     for n in 0..blocks {
         let last = u32::from(n + 1 == blocks);
         let header = (128 << 10) << 3 | 1 << 1 | last;
@@ -1023,8 +1031,32 @@ fn wide_window_kv3(blocks: u32) -> Vec<u8> {
 /// budget before the decoder is made, and a frame wider than the buffer needs is refused.
 #[test]
 fn a_zstd_window_past_the_budget_is_refused_before_the_decoder_keeps_it() {
-    let file = wide_window_kv3(256);
+    let file = wide_window_kv3(27, 256);
     assert!(file.len() < 2048, "{} bytes", file.len());
-    let error = kv3::decode_within(&file, 1).unwrap_err();
+    let error = kv3::decode_in(&file, &mut heatel::Budget::new(1)).unwrap_err();
+    assert!(error.to_string().contains("more than it may"), "{error}");
+}
+
+/// A zstd decoder's ring buffer grows past its window, and holds its old buffer while it makes
+/// the new one: what a 16 MiB window makes it allocate is more than 18 MiB, refused before it
+/// is made.
+#[test]
+fn a_zstd_decoder_is_charged_with_its_buffers_growth() {
+    let file = wide_window_kv3(24, 256);
+    let error = kv3::decode_in(&file, &mut heatel::Budget::new(18 << 20)).unwrap_err();
+    assert!(error.to_string().contains("more than it may"), "{error}");
+}
+
+/// A sound's `CTRL` block, a small table of millions of strings, is decoded within the budget
+/// the caller gives, for its sound and for its lip sync.
+#[test]
+fn a_sounds_ctrl_block_is_decoded_within_the_callers_budget() {
+    let file = resource(&[(b"CTRL", empty_strings_kv3(1 << 20))]);
+    let Err(error) = heatel::Sound::parse(&file, &mut heatel::Budget::new(16 << 20)) else {
+        panic!("a sound read past its budget");
+    };
+    assert!(error.to_string().contains("more than it may"), "{error}");
+    let lipsync = heatel::sound::Lipsync::parse(&file, &mut heatel::Budget::new(16 << 20));
+    let error = lipsync.unwrap_err();
     assert!(error.to_string().contains("more than it may"), "{error}");
 }

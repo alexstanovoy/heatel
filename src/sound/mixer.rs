@@ -2,8 +2,9 @@
 //! by its file's path, the levels each mix gives them, and the layers that change those levels
 //! while another group sounds (the announcer ducking the world).
 
+use crate::budget::Budget;
 use crate::error::{Result, malformed};
-use crate::kv3::{Object, Value, parse_text};
+use crate::kv3::{Object, Value, parse_text_in};
 
 /// Most mix groups, mixes, levels in one and layers a file holds.
 const MAX_GROUPS: usize = 256;
@@ -110,10 +111,13 @@ impl SoundMixer {
     }
 }
 
-/// Reads `scripts/soundmixers.txt`. Counts are bounded, and a number that is not finite refuses
-/// the file.
-pub fn read_sound_mixer(bytes: &[u8]) -> Result<SoundMixer> {
-    let document = parse_text(bytes)?;
+/// Reads `scripts/soundmixers.txt` within `budget`. Counts are bounded, and a number that is not
+/// finite refuses the file. The mixer copies texts of the parsed document, each once at most, so
+/// what the parse took is charged again before it is built.
+pub fn read_sound_mixer(bytes: &[u8], budget: &mut Budget) -> Result<SoundMixer> {
+    let before = budget.spent();
+    let document = parse_text_in(bytes, budget)?;
+    budget.charge(budget.spent() - before)?;
     let root = document
         .root
         .as_object()
@@ -294,7 +298,8 @@ mod tests {
 
     #[test]
     fn a_sound_belongs_to_the_first_group_of_the_file_that_matches() {
-        let mixer = read_sound_mixer(FILE.as_bytes()).expect("a mixer");
+        let mixer = read_sound_mixer(FILE.as_bytes(), &mut crate::budget::Budget::default())
+            .expect("a mixer");
         let of = |path: &str, level| mixer.group_of(path, "", level).map(|g| g.name.as_str());
         assert_eq!(of("sounds/weapons/hero/x.vsnd", 75.0), Some("weapons"));
         assert_eq!(of("sounds/weapons/attack/x.vsnd", 75.0), Some("weapons"));
@@ -319,7 +324,8 @@ mod tests {
 
     #[test]
     fn mixes_and_layers_read_with_their_triggers() {
-        let mixer = read_sound_mixer(FILE.as_bytes()).expect("a mixer");
+        let mixer = read_sound_mixer(FILE.as_bytes(), &mut crate::budget::Budget::default())
+            .expect("a mixer");
         assert_eq!(mixer.mixes[0].name, "Default_Mix");
         assert_eq!(mixer.mixes[0].levels[0].volume, 0.4);
         let layer = &mixer.layers[0];
@@ -331,14 +337,16 @@ mod tests {
     #[test]
     fn a_volume_that_is_not_a_number_refuses_the_file() {
         let bad = FILE.replace("vol = 0.4", "vol = \"loud\"");
-        let err = read_sound_mixer(bad.as_bytes()).unwrap_err();
+        let err =
+            read_sound_mixer(bad.as_bytes(), &mut crate::budget::Budget::default()).unwrap_err();
         assert!(err.to_string().contains("vol is not a number"), "{err}");
     }
 
     #[test]
     fn a_volume_too_large_for_a_number_refuses_the_file_naming_the_field() {
         let bad = FILE.replace("vol = 0.4", "vol = 1e300");
-        let err = read_sound_mixer(bad.as_bytes()).unwrap_err();
+        let err =
+            read_sound_mixer(bad.as_bytes(), &mut crate::budget::Budget::default()).unwrap_err();
         assert!(
             err.to_string().contains("vol does not fit a number"),
             "{err}"
@@ -351,7 +359,8 @@ mod tests {
             "{{ MixGroups = [ {} ] }}",
             "{ name = \"g\" } ".repeat(MAX_GROUPS + 1)
         );
-        let err = read_sound_mixer(many.as_bytes()).unwrap_err();
+        let err =
+            read_sound_mixer(many.as_bytes(), &mut crate::budget::Budget::default()).unwrap_err();
         assert!(err.to_string().contains("more MixGroups"), "{err}");
     }
 }

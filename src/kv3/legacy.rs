@@ -30,16 +30,16 @@ const ENCODINGS_STORED: [[u8; 16]; 3] = [
 ];
 const TRAILER: u32 = 0xFFFF_FFFF;
 
-pub(crate) fn decode(bytes: &[u8], mut budget: Budget) -> Result<(Document, usize)> {
+pub(crate) fn decode(bytes: &[u8], budget: &mut Budget) -> Result<Document> {
     let mut c = Cursor::new(bytes, "KV3");
     c.u32()?;
     let encoding: [u8; 16] = c.array()?;
     let format = c.array()?;
     let data = if encoding == ENCODING_BLOCK_COMPRESSED {
-        block_decompress(&mut c, &mut budget)?
+        block_decompress(&mut c, budget)?
     } else if encoding == ENCODING_LZ4 {
         let len = c.u32()? as usize;
-        lz4(c.rest(), len, &mut budget)?
+        lz4(c.rest(), len, budget)?
     } else if ENCODINGS_STORED.contains(&encoding) {
         budget.bytes_of(c.rest())?
     } else {
@@ -58,7 +58,7 @@ pub(crate) fn decode(bytes: &[u8], mut budget: Budget) -> Result<(Document, usiz
     if decoder.c.u32()? != TRAILER {
         return Err(malformed("KV3", "no trailer"));
     }
-    Ok((Document { format, root }, decoder.budget.spent()))
+    Ok(Document { format, root })
 }
 
 /// Valve's block compression: 16 flag bits per group; a set bit is a back reference of
@@ -105,13 +105,13 @@ fn block_decompress(c: &mut Cursor, budget: &mut Budget) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-struct Decoder<'a> {
+struct Decoder<'a, 'b> {
     c: Cursor<'a>,
     strings: Vec<String>,
-    budget: Budget,
+    budget: &'b mut Budget,
 }
 
-impl Decoder<'_> {
+impl Decoder<'_, '_> {
     fn read_type(&mut self) -> Result<u8> {
         let byte = self.c.u8()?;
         if byte & 0x80 != 0 && self.c.u8()? & 0x80 != 0 {
@@ -139,7 +139,7 @@ impl Decoder<'_> {
             node::DOUBLE_ONE => Value::Float(1.0),
             node::STRING => {
                 let id = c.i32()?;
-                Value::String(string(&self.strings, id, &mut self.budget)?)
+                Value::String(string(&self.strings, id, self.budget)?)
             }
             node::BINARY_BLOB => {
                 let len = c.len32()?;
@@ -181,7 +181,7 @@ impl Decoder<'_> {
         let mut object = Object::with_capacity(len.min(4096));
         for _ in 0..len {
             let id = self.c.i32()?;
-            let key = string(&self.strings, id, &mut self.budget)?;
+            let key = string(&self.strings, id, self.budget)?;
             let ty = self.read_type()?;
             let value = self.value(ty, depth + 1)?;
             object.push(key, value);

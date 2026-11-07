@@ -10,7 +10,7 @@ mod wav;
 
 pub use events::{
     SoundDefaults, SoundEvent, SoundLayer, SoundLimits, SoundStack, read_sound_events,
-    read_sound_events_within, read_sound_stacks,
+    read_sound_stacks,
 };
 pub use lipsync::{Lipsync, MorphCurves, Phoneme, token};
 pub use mixer::{GroupLevel, LayerTrigger, Mix, MixGroup, MixLayer, SoundMixer, read_sound_mixer};

@@ -54,7 +54,7 @@ fn pcm_comes_out_behind_a_canonical_wav_header() {
         vsnd(1, packed_v1(1, 16, 2, 44100), 4, 4.0 / 44100.0, &samples),
         vsnd(4, packed_v4(44100, 0, 2), 4, 4.0 / 44100.0, &samples),
     ] {
-        let sound = Sound::parse(&file).unwrap();
+        let sound = Sound::parse(&file, &mut heatel::Budget::default()).unwrap();
         assert_eq!(sound.format(), SoundFormat::Wav);
         assert_eq!(
             (
@@ -90,7 +90,7 @@ fn an_mp3_is_kept_as_it_is_and_tells_its_rate_and_channels_from_its_frames() {
         vsnd(1, packed_v1(2, 0, 0, 0), 1152, 0.026, &stream),
         vsnd(4, packed_v4(0, 2, 0), 1152, 0.026, &stream),
     ] {
-        let sound = Sound::parse(&file).unwrap();
+        let sound = Sound::parse(&file, &mut heatel::Budget::default()).unwrap();
         assert_eq!(
             (sound.format(), sound.extension()),
             (SoundFormat::Mp3, "mp3")
@@ -103,9 +103,12 @@ fn an_mp3_is_kept_as_it_is_and_tells_its_rate_and_channels_from_its_frames() {
 #[test]
 fn damaged_sounds_are_errors_not_panics() {
     let good = vsnd(1, packed_v1(1, 8, 1, 22050), 8, 8.0 / 22050.0, &[7; 8]);
-    assert!(Sound::parse(&good).is_ok());
+    assert!(Sound::parse(&good, &mut heatel::Budget::default()).is_ok());
     for len in 0..good.len() {
-        assert!(Sound::parse(&good[..len]).is_err(), "cut at {len}");
+        assert!(
+            Sound::parse(&good[..len], &mut heatel::Budget::default()).is_err(),
+            "cut at {len}"
+        );
     }
     for (what, bad) in [
         ("adpcm", vsnd(4, packed_v4(44100, 3, 1), 8, 0.1, &[0; 8])),
@@ -131,7 +134,10 @@ fn damaged_sounds_are_errors_not_panics() {
             vsnd(4, packed_v4(0, 2, 0), 8, 0.1, &[0; 64]),
         ),
     ] {
-        assert!(Sound::parse(&bad).is_err(), "{what}");
+        assert!(
+            Sound::parse(&bad, &mut heatel::Budget::default()).is_err(),
+            "{what}"
+        );
     }
     let mp3 = vsnd(4, packed_v4(0, 2, 0), 1152, 0.026, &MP3_FRAME);
     for at in 0..mp3.len().min(good.len()) {
@@ -140,7 +146,7 @@ fn damaged_sounds_are_errors_not_panics() {
             if let Some(byte) = flipped.get_mut(at) {
                 *byte ^= 0xFF;
             }
-            if let Ok(sound) = Sound::parse(&flipped) {
+            if let Ok(sound) = Sound::parse(&flipped, &mut heatel::Budget::default()) {
                 let _ = sound.file();
             }
         }

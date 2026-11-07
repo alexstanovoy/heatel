@@ -1,6 +1,8 @@
 //! Sound event files (`vsndevts_c`): each event a game names (`Hero_Nevermore.Attack`) with the
 //! sound files it picks among and how it plays them.
 
+use std::sync::Arc;
+
 use crate::budget::Budget;
 use crate::error::{Result, malformed};
 use crate::kv3::Value;
@@ -79,7 +81,7 @@ pub struct SoundLimits {
     /// Whether the oldest instance is the one stopped (else the new one is not played).
     pub limiter_stop_oldest: Option<bool>,
     /// The event name a limiter counts, if it names another's.
-    pub limiter_event_name: Option<String>,
+    pub limiter_event_name: Option<Arc<str>>,
     /// Whether repeats are blocked at all.
     pub block_multiple_instances: Option<bool>,
     /// Seconds a sounding instance blocks its repeats for.
@@ -126,32 +128,14 @@ pub struct SoundLayer {
     pub on: bool,
 }
 
-/// The events of a `vsndevts_c` resource, in file order. A member that is not an event is left
-/// out.
-pub fn read_sound_events(resource: &Resource) -> Result<Vec<SoundEvent>> {
-    let data = resource
-        .data()
-        .ok_or_else(|| malformed("vsndevts", "no DATA block"))??;
-    events_of(&data, &mut Budget::new("vsndevts"))
-}
-
-/// The events of a `vsndevts_c` resource, decoded and read taking at most `limit` bytes, and
-/// the bytes they took: the decoding's every buffer, string and value, and the events' own
-/// texts and lists, each charged before it was allocated.
-pub fn read_sound_events_within(
-    resource: &Resource,
-    limit: usize,
-) -> Result<(Vec<SoundEvent>, usize)> {
-    let data = resource
-        .block(b"DATA")
-        .ok_or_else(|| malformed("vsndevts", "no DATA block"))?;
-    if !crate::kv3::is_kv3(data) {
-        return Err(malformed("vsndevts", "a DATA block that is not KV3"));
-    }
-    let (document, decoded) = crate::kv3::decode_within(data, limit)?;
-    let mut budget = Budget::with_limit("vsndevts", limit - decoded);
-    let events = events_of(&document.root, &mut budget)?;
-    Ok((events, decoded + budget.spent()))
+/// The events of a `vsndevts_c` resource, in file order; a member that is not an event is left
+/// out. Its KV3 `DATA` is decoded within `budget`, and the events' own texts and lists are
+/// charged to it before they are copied.
+pub fn read_sound_events(resource: &Resource, budget: &mut Budget) -> Result<Vec<SoundEvent>> {
+    let document = resource
+        .kv3_in(b"DATA", budget)
+        .ok_or_else(|| malformed("vsndevts", "no KV3 DATA block"))??;
+    events_of(&document.root, budget)
 }
 
 fn events_of(data: &Value, budget: &mut Budget) -> Result<Vec<SoundEvent>> {
@@ -184,7 +168,7 @@ fn texts(v: &Value, budget: &mut Budget) -> Result<EventTexts> {
         mix_group: text("mixgroup")?,
         layers: [text(LAYERS[0].0)?, text(LAYERS[1].0)?],
         limiter_event_name: limiter_event_name(|key| v.get(key))
-            .map(|name| budget.copy(name))
+            .map(|name| shared(name, budget))
             .transpose()?,
     })
 }
@@ -193,7 +177,14 @@ struct EventTexts {
     kind: Option<String>,
     mix_group: Option<String>,
     layers: [Option<String>; 2],
-    limiter_event_name: Option<String>,
+    limiter_event_name: Option<Arc<str>>,
+}
+
+/// A text kept once and shared by whatever names it (an event resolved by its stack shares the
+/// stack's), charged before it is copied.
+fn shared(text: &str, budget: &mut Budget) -> Result<Arc<str>> {
+    budget.charge(text.len() + 2 * size_of::<usize>())?;
+    Ok(Arc::from(text))
 }
 
 fn event(name: &str, v: &Value, budget: &mut Budget) -> Result<SoundEvent> {
@@ -326,19 +317,22 @@ fn limits<'a>(get: impl Fn(&str) -> Option<&'a Value>) -> SoundLimits {
 }
 
 /// The event types of a `vsndstck_c` resource, in file order, with the defaults their public
-/// variables (`operator_variables` of the operator named `public`) give. A member without
-/// them is left out.
-pub fn read_sound_stacks(resource: &Resource) -> Result<Vec<SoundStack>> {
-    let data = resource
-        .data()
-        .ok_or_else(|| malformed("vsndstck", "no DATA block"))??;
-    let root = data
+/// variables (`operator_variables` of the operator named `public`) give; a member without
+/// them is left out. Its KV3 `DATA` is decoded within `budget`, and the types' own texts are
+/// charged to it before they are copied.
+pub fn read_sound_stacks(resource: &Resource, budget: &mut Budget) -> Result<Vec<SoundStack>> {
+    let document = resource
+        .kv3_in(b"DATA", budget)
+        .ok_or_else(|| malformed("vsndstck", "no KV3 DATA block"))??;
+    let root = document
+        .root
         .as_object()
         .ok_or_else(|| malformed("vsndstck", "not an object"))?;
     if root.len() > MAX_EVENTS {
         return Err(malformed("vsndstck", "more types than any file has"));
     }
-    let mut out = Vec::new();
+    budget.slots::<SoundStack>(root.len())?;
+    let mut out = Vec::with_capacity(root.len());
     for (name, stack) in root.iter() {
         let public = stack
             .get("operators")
@@ -354,10 +348,12 @@ pub fn read_sound_stacks(resource: &Resource) -> Result<Vec<SoundStack>> {
         // Each variable is `{data_type, value}`.
         let value = |key: &str| variables.get(key).and_then(|v| v.get("value"));
         let mut limits = limits(value);
-        limits.limiter_event_name = limiter_event_name(value).map(str::to_owned);
+        limits.limiter_event_name = limiter_event_name(value)
+            .map(|name| shared(name, budget))
+            .transpose()?;
         let defaults = stack_defaults(name, |key| variables.get(key).and_then(|v| v.get("value")))?;
         out.push(SoundStack {
-            name: name.to_owned(),
+            name: budget.copy(name)?,
             limits,
             defaults,
         });
@@ -428,11 +424,7 @@ mod tests {
     fn event_with_volume(volume: Value) -> Result<SoundEvent> {
         let mut object = Object::with_capacity(1);
         object.push("volume".to_owned(), volume);
-        event(
-            "Test.Event",
-            &Value::Object(object),
-            &mut Budget::new("test"),
-        )
+        event("Test.Event", &Value::Object(object), &mut Budget::default())
     }
 
     #[test]
@@ -475,12 +467,8 @@ mod default_tests {
         let mut object = Object::with_capacity(2);
         object.push("volume_use_FOW".to_owned(), Value::Float(1.0));
         object.push("volume_FOW_radius".to_owned(), Value::Float(300.0));
-        let event = event(
-            "Test.Event",
-            &Value::Object(object),
-            &mut Budget::new("test"),
-        )
-        .expect("an event");
+        let event =
+            event("Test.Event", &Value::Object(object), &mut Budget::default()).expect("an event");
         assert_eq!(event.use_fog_of_war, Some(true));
         assert_eq!(event.fog_of_war_radius, Some(300.0));
     }
@@ -495,12 +483,7 @@ mod overflow_tests {
     fn a_distance_max_too_large_for_a_number_refuses_the_event_naming_it() {
         let mut object = Object::with_capacity(1);
         object.push("distance_max".to_owned(), Value::Float(1e300));
-        let err = event(
-            "Far.Event",
-            &Value::Object(object),
-            &mut Budget::new("test"),
-        )
-        .unwrap_err();
+        let err = event("Far.Event", &Value::Object(object), &mut Budget::default()).unwrap_err();
         assert!(err.to_string().contains("Far.Event"), "{err}");
         assert!(
             err.to_string().contains("distance_max does not fit"),

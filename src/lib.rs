@@ -47,6 +47,7 @@ pub mod vertices;
 pub mod vpk;
 pub mod world;
 
+pub use budget::Budget;
 pub use error::{Error, Result};
 
 /// Bumped whenever an export's output changes for the same input (a converter's fix, a changed

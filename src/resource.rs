@@ -132,6 +132,12 @@ impl<'a> Resource<'a> {
         kv3::is_kv3(bytes).then(|| kv3::decode(bytes))
     }
 
+    /// [`Resource::kv3`], decoded within `budget`.
+    pub fn kv3_in(&self, kind: &[u8; 4], budget: &mut Budget) -> Option<Result<kv3::Document>> {
+        let bytes = self.block(kind)?;
+        kv3::is_kv3(bytes).then(|| kv3::decode_in(bytes, budget))
+    }
+
     /// The `DATA` block as a tree: KV3, or the struct an `NTRO` block describes in older
     /// resources. `None` when `DATA` is plain binary (textures, sounds) or absent.
     pub fn data(&self) -> Option<Result<Value>> {
@@ -159,7 +165,7 @@ impl<'a> Resource<'a> {
         };
         // Offsets count from their own field and may point anywhere in the file, so names may
         // overlap: their copies are charged, or a small file would name gigabytes.
-        let mut budget = Budget::new("RERL");
+        let mut budget = Budget::named("RERL");
         let mut c = Cursor::new(self.bytes, "RERL");
         c.take(block.offset as usize)?;
         let list_at = c.offset32()?;
