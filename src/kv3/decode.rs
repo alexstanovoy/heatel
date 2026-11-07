@@ -46,6 +46,12 @@ pub(crate) const LZ4_RATIO: usize = 255;
 /// A zstd block regenerates 128 KiB at most and takes 4 bytes at least (its header and one byte
 /// repeated).
 const ZSTD_RATIO: usize = (128 << 10) / 4;
+/// A zstd frame's magic number, and that of a skippable frame (its low four bits any).
+const ZSTD_MAGIC: u32 = 0xFD2F_B528;
+const ZSTD_SKIPPABLE: u32 = 0x184D_2A50;
+/// What a zstd decoder stages past its window: it decodes a mebibyte at a time, and a block of
+/// 128 KiB at most past that, before the output takes it.
+const ZSTD_STAGING: usize = (1 << 20) + (128 << 10);
 
 /// Whether `bytes` start with a binary KV3 signature this crate reads.
 pub fn is_kv3(bytes: &[u8]) -> bool {
@@ -116,8 +122,7 @@ pub(crate) fn zstd(input: &[u8], len: usize, budget: &mut Budget) -> Result<Vec<
         ));
     }
     let mut out = buffer(len, budget)?;
-    let mut decoder = ruzstd::decoding::FrameDecoder::new();
-    match decoder.decode_all(input, &mut out) {
+    match zstd_into(input, &mut out, budget)? {
         Ok(n) if n == out.len() => Ok(out),
         Ok(n) => Err(malformed(
             "KV3 zstd",
@@ -130,14 +135,97 @@ pub(crate) fn zstd(input: &[u8], len: usize, budget: &mut Budget) -> Result<Vec<
 /// Decompresses zstd frames of unknown decoded size, at most `max` bytes, and no more than the
 /// input can expand to: that much is allocated up front.
 pub(crate) fn zstd_to_vec(input: &[u8], max: usize) -> Result<Vec<u8>> {
-    let mut budget = Budget::with_limit("zstd", MAX_BUFFER);
-    let mut out = buffer(max.min(input.len().saturating_mul(ZSTD_RATIO)), &mut budget)?;
-    let mut decoder = ruzstd::decoding::FrameDecoder::new();
-    let len = decoder
-        .decode_all(input, &mut out)
-        .map_err(|e| malformed("zstd", e.to_string()))?;
+    let len = max.min(input.len().saturating_mul(ZSTD_RATIO));
+    // The buffer, a window as large and the decoder's staging.
+    let mut budget = Budget::with_limit("zstd", MAX_BUFFER * 2 + ZSTD_STAGING);
+    let mut out = buffer(len, &mut budget)?;
+    let len =
+        zstd_into(input, &mut out, &mut budget)?.map_err(|e| malformed("zstd", e.to_string()))?;
     out.truncate(len);
     Ok(out)
+}
+
+/// Decodes zstd frames into `out`. The decoder keeps a frame's window and stages past it
+/// ([`ZSTD_STAGING`]): the widest window the frames declare is charged to `budget` with the
+/// staging before the decoder is made, and is the most it may keep.
+fn zstd_into(
+    input: &[u8],
+    out: &mut [u8],
+    budget: &mut Budget,
+) -> Result<std::result::Result<usize, ruzstd::decoding::errors::FrameDecoderError>> {
+    let window = zstd_window(input)?;
+    let kept = usize::try_from(window).unwrap_or(usize::MAX);
+    budget.bytes(kept.saturating_add(ZSTD_STAGING))?;
+    let mut decoder = ruzstd::decoding::FrameDecoder::new();
+    decoder.set_max_window_size(window);
+    Ok(decoder.decode_all(input, out))
+}
+
+/// The widest window the zstd frames of `input` declare: each frame's window descriptor, or a
+/// single-segment frame's content size (RFC 8878 3.1.1). The frames are walked by their block
+/// headers, nothing decoded; skippable frames are passed over.
+fn zstd_window(mut input: &[u8]) -> Result<u64> {
+    let short = || malformed("zstd", "a frame cut short");
+    let mut widest = 0u64;
+    while !input.is_empty() {
+        let magic = input
+            .first_chunk::<4>()
+            .map(|magic| u32::from_le_bytes(*magic))
+            .ok_or_else(short)?;
+        if magic & 0xFFFF_FFF0 == ZSTD_SKIPPABLE {
+            let len = input.get(4..8).ok_or_else(short)?;
+            let len = u32::from_le_bytes(len.try_into().expect("four bytes")) as usize;
+            input = input.get(8usize.saturating_add(len)..).ok_or_else(short)?;
+            continue;
+        }
+        if magic != ZSTD_MAGIC {
+            return Err(malformed("zstd", "not a zstd frame"));
+        }
+        let descriptor = *input.get(4).ok_or_else(short)?;
+        let single = descriptor & 0x20 != 0;
+        let dictionary = [0, 1, 2, 4][usize::from(descriptor & 3)];
+        let size_len = match descriptor >> 6 {
+            0 => usize::from(single),
+            flag => [0, 2, 4, 8][usize::from(flag)],
+        };
+        let mut at = 5;
+        let window = if single {
+            let size = input
+                .get(at + dictionary..at + dictionary + size_len)
+                .ok_or_else(short)?;
+            let size = size
+                .iter()
+                .rev()
+                .fold(0u64, |size, &byte| size << 8 | u64::from(byte));
+            if size_len == 2 { size + 256 } else { size }
+        } else {
+            let descriptor = *input.get(at).ok_or_else(short)?;
+            at += 1;
+            let base = 1u64 << (10 + (descriptor >> 3));
+            base + base / 8 * u64::from(descriptor & 7)
+        };
+        widest = widest.max(window);
+        at += dictionary + size_len;
+        loop {
+            let header = input.get(at..at + 3).ok_or_else(short)?;
+            let header =
+                u32::from(header[0]) | u32::from(header[1]) << 8 | u32::from(header[2]) << 16;
+            let content = match (header >> 1) & 3 {
+                1 => 1,
+                3 => return Err(malformed("zstd", "a reserved block type")),
+                _ => (header >> 3) as usize,
+            };
+            at += 3 + content;
+            if header & 1 != 0 {
+                break;
+            }
+        }
+        if descriptor & 0x04 != 0 {
+            at += 4;
+        }
+        input = input.get(at..).ok_or_else(short)?;
+    }
+    Ok(widest)
 }
 
 /// A string-table entry, charged to `budget`; ids out of range (-1 is the empty string) read

@@ -990,3 +990,41 @@ fn a_document_decoded_within_a_budget_tells_what_it_took() {
     let error = kv3::decode_within(&file, spent - 1).unwrap_err();
     assert!(error.to_string().contains("more than it may"), "{error}");
 }
+
+/// A version 2 KV3 compressed with zstd whose buffer is one byte: one frame of no stated
+/// content size and a 128 MiB window, of `blocks` RLE blocks of 128 KiB zeros each. Some
+/// hundred bytes of the file for every 32 MiB the frame makes.
+fn wide_window_kv3(blocks: u32) -> Vec<u8> {
+    let mut frame = 0xFD2F_B528u32.to_le_bytes().to_vec();
+    // No single segment, no content size, no checksum; a window of 2^27 bytes.
+    frame.extend([0x00, (27 - 10) << 3]);
+    for n in 0..blocks {
+        let last = u32::from(n + 1 == blocks);
+        let header = (128 << 10) << 3 | 1 << 1 | last;
+        frame.extend(&header.to_le_bytes()[..3]);
+        frame.push(0);
+    }
+    let mut out = (0x4B56_3300u32 | 2).to_le_bytes().to_vec();
+    out.extend([0; 16]);
+    out.extend(2u32.to_le_bytes());
+    out.extend([0; 4]);
+    // The 1-, 4- and 8-byte lanes and the type stream: empty.
+    out.extend([0; 16]);
+    out.extend([0; 4]);
+    // The buffer's length, the compressed length, no blobs.
+    out.extend(1u32.to_le_bytes());
+    out.extend((frame.len() as u32).to_le_bytes());
+    out.extend([0; 8]);
+    out.extend(frame);
+    out
+}
+
+/// The window a zstd frame declares is the decoder's to keep: it is charged to the document's
+/// budget before the decoder is made, and a frame wider than the buffer needs is refused.
+#[test]
+fn a_zstd_window_past_the_budget_is_refused_before_the_decoder_keeps_it() {
+    let file = wide_window_kv3(256);
+    assert!(file.len() < 2048, "{} bytes", file.len());
+    let error = kv3::decode_within(&file, 1).unwrap_err();
+    assert!(error.to_string().contains("more than it may"), "{error}");
+}
