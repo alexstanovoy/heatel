@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 
+use crate::budget::Budget;
 use crate::error::{Result, malformed};
 
 /// Deepest nesting of a script's blocks.
@@ -177,18 +178,43 @@ fn quoted_end(bytes: &[u8], from: usize) -> std::result::Result<usize, usize> {
 /// KeyValues text as a tree (a [`Kv::Block`] at the root). Keys and values are quoted strings;
 /// a block without a key, or whose key already holds a string, is read and dropped; a repeated
 /// block key reopens the first block of that key in its place. Blocks nested deeper than 64
-/// are an error.
+/// are an error. What it makes is bounded by the text's size alone; [`parse_kv_in`] holds it to
+/// a budget.
 pub fn parse_kv(text: &str) -> Result<Kv> {
-    parse(text, false)
+    parse(text, false, &mut Budget::new(usize::MAX))
+}
+
+/// [`parse_kv`] within `budget`: every key and string copied, every block's growth of its items
+/// and of the index of its keys, charged before it is made.
+pub fn parse_kv_in(text: &str, budget: &mut Budget) -> Result<Kv> {
+    parse(text, false, budget)
 }
 
 /// [`parse_kv`] that keeps every repeated string key (a `precache` block lists its particles
 /// under one key, `"particle"`, many times); [`Block::get`] still finds the first.
 pub fn parse_kv_repeats(text: &str) -> Result<Kv> {
-    parse(text, true)
+    parse(text, true, &mut Budget::new(usize::MAX))
 }
 
-fn parse(text: &str, keep_repeats: bool) -> Result<Kv> {
+/// What pushing an item of a key of `key` bytes into `block` makes: the key's copy as the item's
+/// and as the index's, the items' growth (a list doubles, from four), and the index's (a table of
+/// a power of two buckets past 8/7 of what it holds, doubling from three, an entry and a
+/// control byte each).
+fn push_cost(block: &Block, key: usize) -> usize {
+    let mut bytes = 2 * (key + 16);
+    let items = block.items.capacity();
+    if block.items.len() == items {
+        bytes += (2 * items).max(4).saturating_sub(items) * size_of::<(String, Kv)>();
+    }
+    if block.first.len() == block.first.capacity() {
+        let grown = (2 * block.first.capacity()).max(3);
+        let buckets = (grown * 8 / 7 + 1).next_power_of_two();
+        bytes += buckets * (size_of::<(String, usize)>() + 1) + 16;
+    }
+    bytes
+}
+
+fn parse(text: &str, keep_repeats: bool, budget: &mut Budget) -> Result<Kv> {
     // Each open block: its items, and its key and place in its parent (none for a dropped one).
     let mut stack: Vec<Open> = vec![(Block::default(), None)];
     let mut key: Option<String> = None;
@@ -214,12 +240,13 @@ fn parse(text: &str, keep_repeats: bool) -> Result<Kv> {
                     None => stack.push((Block::default(), None)),
                 }
             }
-            Token::Close => close(&mut stack),
+            Token::Close => close(&mut stack, budget)?,
             Token::Text(s) => match key.take() {
                 None => key = Some(s.to_owned()),
                 Some(k) => {
                     let top = &mut stack.last_mut().expect("the root stays").0;
                     if keep_repeats || top.position(&k).is_none() {
+                        budget.charge(push_cost(top, k.len()) + s.len() + 16)?;
                         top.push(k, Kv::Text(s.to_owned()));
                     }
                 }
@@ -227,7 +254,7 @@ fn parse(text: &str, keep_repeats: bool) -> Result<Kv> {
         }
     }
     while stack.len() > 1 {
-        close(&mut stack);
+        close(&mut stack, budget)?;
     }
     Ok(Kv::Block(
         stack.pop().map(|(block, _)| block).unwrap_or_default(),
@@ -239,19 +266,23 @@ type Open = (Block, Option<(String, usize)>);
 
 /// Closes the innermost open block, putting it back in its place (the root stays open): where
 /// it was taken from when reopened, else after its parent's items (none came while it was open).
-fn close(stack: &mut Vec<Open>) {
+fn close(stack: &mut Vec<Open>, budget: &mut Budget) -> Result<()> {
     if stack.len() < 2 {
-        return;
+        return Ok(());
     }
     let (block, place) = stack.pop().expect("more than the root");
     let Some((key, at)) = place else {
-        return;
+        return Ok(());
     };
     let parent = &mut stack.last_mut().expect("the root stays").0;
     match parent.items.get_mut(at) {
         Some((k, slot)) if *k == key => *slot = Kv::Block(block),
-        _ => parent.push(key, Kv::Block(block)),
+        _ => {
+            budget.charge(push_cost(parent, key.len()))?;
+            parent.push(key, Kv::Block(block));
+        }
     }
+    Ok(())
 }
 
 /// The localization's `"key" "value"` lines (`resource/localization/*_english.txt`), keys
