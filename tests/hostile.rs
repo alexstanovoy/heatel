@@ -1,8 +1,9 @@
 //! Files built here that once crashed or blew up a converter, found by the fuzz
 //! targets (`fuzz/`) or in their review: models whose draw calls or attributes run past their
 //! buffers or copy one large buffer many times, the glTF writer given what glTF cannot say,
-//! materials of more parameters than any, a world that lists its files again and again, and
-//! tooltip scripts that took quadratic time. Each is an error now, or converts within bounds.
+//! materials of more parameters than any, a world that lists its files again and again,
+//! tooltip scripts that took quadratic time, and portrait framings of hostile numbers, tints and
+//! structure. Each is an error now, or converts within bounds.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -758,6 +759,30 @@ fn scripts_with_an_unclosed_quote_read_in_linear_time() {
     assert_eq!(found[0].name, "item_blink");
 }
 
+/// Each quote of `portraits.txt` was searched to the end of its line for the line's end: a
+/// Portraits block on one line of many keys and values took quadratic time (23 s at 2 MiB).
+/// A file of the largest size read, on one line, reads in well under a second; 10 s leaves room
+/// for a loaded machine, and a quadratic scan takes some half an hour.
+#[test]
+fn a_portraits_file_on_one_line_reads_in_linear_time() {
+    use heatel::portraits::framings;
+    let pairs = "\"k\" \"v\" ".repeat((16 << 20) / 8 - 64);
+    let file = format!(
+        "\"Portraits\" {{ \"models/a.vmdl\" {{ {pairs} }} \"models/b.vmdl\" {{ \"k\" \"v\" }} }}"
+    );
+    assert!(file.len() <= 16 << 20, "{}", file.len());
+    let started = std::time::Instant::now();
+    let read = framings(file.as_bytes(), &[("b", "models/b.vmdl")]).expect("a file of Portraits");
+    let took = started.elapsed();
+    assert!(took < std::time::Duration::from_secs(10), "{took:?}");
+    assert_eq!(
+        read.refused.len(),
+        1,
+        "b's entry lacks its numbers: {:?}",
+        read.refused
+    );
+}
+
 #[test]
 fn flagbearer_particle_operators_read_synthetic_orientation_and_object_scale() {
     use heatel::particle::PreEmission;
@@ -1214,4 +1239,62 @@ fn a_dangling_keyvalues_key_is_charged_as_it_is_copied() {
     let mut budget = heatel::Budget::new(1 << 10);
     let error = heatel::keyvalues::parse_kv_in(&text, &mut budget).unwrap_err();
     assert!(error.to_string().contains("more than it may"), "{error}");
+}
+
+/// A portrait entry the reviews found taken or the whole file refused for: a tint of 2 (Dota's
+/// own, which the fuzz target once held to 1), a far plane at the near floor, an entry that is no
+/// KeyValues among good ones, an error repeating megabytes of the file, more entries than any
+/// file has. Each framing read holds every number within its bounds; refusals are short.
+#[test]
+fn hostile_portrait_entries_are_refused_alone_and_bounded() {
+    use heatel::portraits::{MAX_TINT, MIN_FAR, framings};
+    let good = r#""PortraitLightPosition" "1 2 3" "PortraitLightAngles" "1 2 0" "PortraitLightFOV" "90"
+        "PortraitLightColor" "255 255 255" "PortraitAmbientColor" "9 9 9"
+        "PortraitAmbientDirection" "-1 -1 -1"
+        "PortraitBackgroundTexture" "materials/a.vmat" "PortraitBackgroundColor4" "2 2 .5"
+        "cameras" { "default" { "PortraitPosition" "100 0 100" "PortraitAngles" "0 180 0" "PortraitFOV" "25" } }"#;
+    let huge = "9".repeat(4 << 20);
+    let entry = |name: &str, extra: &str| format!("\"models/{name}.vmdl\" {{ {good} {extra} }}\n");
+    let near = good.replacen(
+        "\"PortraitFOV\" \"25\"",
+        "\"PortraitFOV\" \"25\" \"PortraitFar\" \"8\"",
+        1,
+    );
+    let ok = entry("ok", "");
+    let long = entry("long", &format!("\"PortraitAmbientScale\" \"{huge}\""));
+    let broken = "\"models/broken.vmdl\" { \"PortraitLightColor\" }";
+    let file =
+        format!("\"Portraits\" {{\n{ok}\"models/near.vmdl\" {{ {near} }}\n{broken}\n{long}}}");
+    let wanted = [
+        ("ok", "models/ok.vmdl"),
+        ("near", "models/near.vmdl"),
+        ("broken", "models/broken.vmdl"),
+        ("long", "models/long.vmdl"),
+    ];
+    let read = framings(file.as_bytes(), &wanted).expect("a file of Portraits");
+    let labels: Vec<&str> = read.framings.iter().map(|f| f.label.as_str()).collect();
+    assert_eq!(labels, ["ok"]);
+    let refused: Vec<&str> = read.refused.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(refused.len(), 3, "{:?}", read.refused);
+    assert!(
+        read.refused.iter().all(|r| r.why.len() < 200),
+        "{:?}",
+        refused
+    );
+    let f = &read.framings[0];
+    assert!(f.camera.far > MIN_FAR);
+    let tints = f.background.as_ref().expect("a background").tints;
+    assert!(
+        tints
+            .as_flattened()
+            .iter()
+            .all(|t| (0.0..=MAX_TINT).contains(t))
+    );
+    assert_eq!(tints[3], [2.0, 2.0, 0.5]);
+    let many = format!("\"Portraits\" {{ {} }}", "\"m\" { }".repeat(70_000));
+    let why = framings(many.as_bytes(), &[])
+        .map(|_| ())
+        .unwrap_err()
+        .to_string();
+    assert!(why.contains("more entries than any file has"), "{why}");
 }

@@ -16,13 +16,28 @@ fuzz_target!(|data: &[u8]| {
     let Ok(framed) = framings(data, &wanted) else {
         return;
     };
-    for f in framed {
+    for f in framed.framings {
         let (c, l) = (f.camera, f.light);
         let numbers = [
-            c.position, c.angles, l.position, l.angles, l.color, l.ambient,
+            c.position,
+            c.angles,
+            l.position,
+            l.angles,
+            l.color,
+            l.ambient,
+            l.shadow,
+            l.ambient_direction,
         ]
         .concat();
-        let singles = [c.fov, c.far, l.fov, l.scale, l.ambient_scale];
+        let singles = [
+            c.fov,
+            c.far,
+            l.fov,
+            l.distance,
+            l.scale,
+            l.ambient_scale,
+            l.shadow_scale,
+        ];
         assert!(
             numbers.iter().chain(&singles).all(|n| n.is_finite()),
             "{f:?}"
@@ -32,7 +47,9 @@ fuzz_target!(|data: &[u8]| {
                 b.tints
                     .as_flattened()
                     .iter()
-                    .all(|n| (0.0..=1.0).contains(n))
+                    .all(|n| (0.0..=heatel::portraits::MAX_TINT).contains(n)),
+                "{:?}",
+                b.tints
             );
         }
     }
