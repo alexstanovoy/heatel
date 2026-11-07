@@ -1,6 +1,7 @@
 //! Sound event files (`vsndevts_c`): each event a game names (`Hero_Nevermore.Attack`) with the
 //! sound files it picks among and how it plays them.
 
+use crate::budget::Budget;
 use crate::error::{Result, malformed};
 use crate::kv3::Value;
 use crate::model::finite;
@@ -131,22 +132,79 @@ pub fn read_sound_events(resource: &Resource) -> Result<Vec<SoundEvent>> {
     let data = resource
         .data()
         .ok_or_else(|| malformed("vsndevts", "no DATA block"))??;
+    events_of(&data, &mut Budget::new("vsndevts"))
+}
+
+/// The events of a `vsndevts_c` resource, decoded and read taking at most `limit` bytes, and
+/// the bytes they took: the decoding's every buffer, string and value, and the events' own
+/// texts and lists, each charged before it was allocated.
+pub fn read_sound_events_within(
+    resource: &Resource,
+    limit: usize,
+) -> Result<(Vec<SoundEvent>, usize)> {
+    let data = resource
+        .block(b"DATA")
+        .ok_or_else(|| malformed("vsndevts", "no DATA block"))?;
+    if !crate::kv3::is_kv3(data) {
+        return Err(malformed("vsndevts", "a DATA block that is not KV3"));
+    }
+    let (document, decoded) = crate::kv3::decode_within(data, limit)?;
+    let mut budget = Budget::with_limit("vsndevts", limit - decoded);
+    let events = events_of(&document.root, &mut budget)?;
+    Ok((events, decoded + budget.spent()))
+}
+
+fn events_of(data: &Value, budget: &mut Budget) -> Result<Vec<SoundEvent>> {
     let root = data
         .as_object()
         .ok_or_else(|| malformed("vsndevts", "not an object"))?;
     if root.len() > MAX_EVENTS {
         return Err(malformed("vsndevts", "more events than any file has"));
     }
+    budget.slots::<SoundEvent>(root.len())?;
     let mut out = Vec::with_capacity(root.len());
     for (name, value) in root.iter() {
         if value.as_object().is_some() {
-            out.push(event(name, value)?);
+            out.push(event(name, value, budget)?);
         }
     }
     Ok(out)
 }
 
-fn event(name: &str, v: &Value) -> Result<SoundEvent> {
+/// The texts an event keeps, each charged before it is copied.
+fn texts(v: &Value, budget: &mut Budget) -> Result<EventTexts> {
+    let mut text = |key: &str| -> Result<Option<String>> {
+        v.get(key)
+            .and_then(Value::as_str)
+            .map(|text| budget.copy(text))
+            .transpose()
+    };
+    Ok(EventTexts {
+        kind: text("type")?,
+        mix_group: text("mixgroup")?,
+        layers: [text(LAYERS[0].0)?, text(LAYERS[1].0)?],
+        limiter_event_name: limiter_event_name(|key| v.get(key))
+            .map(|name| budget.copy(name))
+            .transpose()?,
+    })
+}
+
+struct EventTexts {
+    kind: Option<String>,
+    mix_group: Option<String>,
+    layers: [Option<String>; 2],
+    limiter_event_name: Option<String>,
+}
+
+fn event(name: &str, v: &Value, budget: &mut Budget) -> Result<SoundEvent> {
+    let kept_name = budget.copy(name)?;
+    let files = files(v.get("vsnd_files"), budget)?;
+    let EventTexts {
+        kind,
+        mix_group,
+        layers: [layer2, layer3],
+        limiter_event_name,
+    } = texts(v, budget)?;
     // A number that does not fit an f32 would read as 0 (or as nothing) and sound wrong without a
     // word, so it is refused, naming the event and the field.
     let mut refused = None;
@@ -164,7 +222,6 @@ fn event(name: &str, v: &Value) -> Result<SoundEvent> {
         }
         Some(narrowed)
     };
-    let text = |key: &str| v.get(key).and_then(Value::as_str).map(str::to_owned);
     let jitter = number("pitch_rand_min").zip(number("pitch_rand_max"));
     // A volume that is not a number (a range string, say) would play at the file's level
     // unnoticed, so it is refused: no event of Dota's install states one.
@@ -176,16 +233,18 @@ fn event(name: &str, v: &Value) -> Result<SoundEvent> {
             format!("event {name}: its volume is not a number"),
         ));
     }
+    let mut limits = limits(|key| v.get(key));
+    limits.limiter_event_name = limiter_event_name;
     let event = SoundEvent {
-        name: name.to_owned(),
-        kind: text("type").unwrap_or_default(),
-        files: files(v.get("vsnd_files"))?,
+        name: kept_name,
+        kind: kind.unwrap_or_default(),
+        files,
         volume: number("volume"),
         pitch: number("pitch"),
         pitch_jitter: jitter,
         sound_level: number("soundlevel"),
         distance_max: number("distance_max"),
-        mix_group: text("mixgroup"),
+        mix_group,
         spread_radius: number("spread_radius"),
         delay: number("delay"),
         fade_in: number("volume_fade_in"),
@@ -194,12 +253,13 @@ fn event(name: &str, v: &Value) -> Result<SoundEvent> {
         volume_on_player_mult: number("volume_on_player_mult"),
         use_fog_of_war: number("volume_use_FOW").map(|n| n != 0.0),
         fog_of_war_radius: number("volume_FOW_radius"),
-        limits: limits(|key| v.get(key)),
-        layers: LAYERS
-            .iter()
-            .filter_map(|(key, on)| {
+        limits,
+        layers: [layer2, layer3]
+            .into_iter()
+            .zip(LAYERS)
+            .filter_map(|(event, (_, on))| {
                 Some(SoundLayer {
-                    event: text(key).filter(|e| !e.is_empty())?,
+                    event: event.filter(|e| !e.is_empty())?,
                     on: number(on).is_none_or(|n| n != 0.0),
                 })
             })
@@ -211,24 +271,35 @@ fn event(name: &str, v: &Value) -> Result<SoundEvent> {
     }
 }
 
-/// The files of `vsnd_files`: one string, or a list of them.
-fn files(value: Option<&Value>) -> Result<Vec<String>> {
+/// The files of `vsnd_files`: one string, or a list of them, charged before they are copied.
+fn files(value: Option<&Value>, budget: &mut Budget) -> Result<Vec<String>> {
     let list = match value {
-        Some(Value::String(one)) => return Ok(vec![one.clone()]),
+        Some(Value::String(one)) => {
+            budget.slots::<String>(1)?;
+            return Ok(vec![budget.copy(one)?]);
+        }
         Some(Value::Array(list)) => list,
         _ => return Ok(Vec::new()),
     };
     if list.len() > MAX_FILES {
         return Err(malformed("vsndevts", "more files than any event has"));
     }
-    Ok(list
-        .iter()
+    budget.slots::<String>(list.len())?;
+    list.iter()
         .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect())
+        .map(|file| budget.copy(file))
+        .collect()
 }
 
-/// The limits a getter finds under their keys; a stack states its numbers as strings.
+/// The limiter's event name a getter finds, when it names one.
+fn limiter_event_name<'a>(get: impl Fn(&str) -> Option<&'a Value>) -> Option<&'a str> {
+    get("limiter_event_name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty() && *name != "0")
+}
+
+/// The limits a getter finds under their keys, but the limiter's event name, which the caller
+/// copies; a stack states its numbers as strings.
 fn limits<'a>(get: impl Fn(&str) -> Option<&'a Value>) -> SoundLimits {
     let number = |key: &str| {
         get(key).and_then(|v| match v {
@@ -246,10 +317,7 @@ fn limits<'a>(get: impl Fn(&str) -> Option<&'a Value>) -> SoundLimits {
             Value::String(text) => Some(text != "false" && text != "0"),
             other => other.as_f64().map(|n| n != 0.0),
         }),
-        limiter_event_name: get("limiter_event_name")
-            .and_then(Value::as_str)
-            .filter(|name| !name.is_empty() && *name != "0")
-            .map(str::to_owned),
+        limiter_event_name: None,
         block_multiple_instances: flag("block_multiple_instances"),
         block_duration: float("block_duration"),
         block_distance: float("block_distance"),
@@ -284,7 +352,9 @@ pub fn read_sound_stacks(resource: &Resource) -> Result<Vec<SoundStack>> {
             continue;
         };
         // Each variable is `{data_type, value}`.
-        let limits = limits(|key| variables.get(key).and_then(|v| v.get("value")));
+        let value = |key: &str| variables.get(key).and_then(|v| v.get("value"));
+        let mut limits = limits(value);
+        limits.limiter_event_name = limiter_event_name(value).map(str::to_owned);
         let defaults = stack_defaults(name, |key| variables.get(key).and_then(|v| v.get("value")))?;
         out.push(SoundStack {
             name: name.to_owned(),
@@ -358,7 +428,11 @@ mod tests {
     fn event_with_volume(volume: Value) -> Result<SoundEvent> {
         let mut object = Object::with_capacity(1);
         object.push("volume".to_owned(), volume);
-        event("Test.Event", &Value::Object(object))
+        event(
+            "Test.Event",
+            &Value::Object(object),
+            &mut Budget::new("test"),
+        )
     }
 
     #[test]
@@ -401,7 +475,12 @@ mod default_tests {
         let mut object = Object::with_capacity(2);
         object.push("volume_use_FOW".to_owned(), Value::Float(1.0));
         object.push("volume_FOW_radius".to_owned(), Value::Float(300.0));
-        let event = event("Test.Event", &Value::Object(object)).expect("an event");
+        let event = event(
+            "Test.Event",
+            &Value::Object(object),
+            &mut Budget::new("test"),
+        )
+        .expect("an event");
         assert_eq!(event.use_fog_of_war, Some(true));
         assert_eq!(event.fog_of_war_radius, Some(300.0));
     }
@@ -416,7 +495,12 @@ mod overflow_tests {
     fn a_distance_max_too_large_for_a_number_refuses_the_event_naming_it() {
         let mut object = Object::with_capacity(1);
         object.push("distance_max".to_owned(), Value::Float(1e300));
-        let err = event("Far.Event", &Value::Object(object)).unwrap_err();
+        let err = event(
+            "Far.Event",
+            &Value::Object(object),
+            &mut Budget::new("test"),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("Far.Event"), "{err}");
         assert!(
             err.to_string().contains("distance_max does not fit"),
