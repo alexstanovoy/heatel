@@ -46,6 +46,7 @@ const MAX_PATH: usize = 256;
 /// out, and every value the file leaves out at the schema's default.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
 pub struct System {
     /// The behaviour version (`m_nBehaviorVersion`): below 6 an initializer that writes only
     /// what earlier ones wrote is skipped, from `first_multiple_override` on it runs.
@@ -217,7 +218,15 @@ impl System {
         {
             return Err(malformed(WHAT, "invalid snapshot path"));
         }
-        if self.initializers.iter().any(|op|matches!(op.class,Initializer::SkinnedSnapshot{start,..} if start>super::MAX_SNAPSHOT_POINTS as u32)) {return Err(malformed(WHAT,"snapshot start exceeds point limit"));}
+        let past_limit = |op: &Function<Initializer>| {
+            matches!(
+                op.class,
+                Initializer::SkinnedSnapshot { start, .. } if start > super::MAX_SNAPSHOT_POINTS as u32
+            )
+        };
+        if self.initializers.iter().any(past_limit) {
+            return Err(malformed(WHAT, "snapshot start exceeds point limit"));
+        }
         let lists = [
             ("pre-emission operators", self.pre_emission.len()),
             ("emitters", self.emitters.len()),

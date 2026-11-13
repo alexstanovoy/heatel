@@ -3,14 +3,16 @@
 #![no_main]
 
 use heatel::Resource;
-use heatel::particle::System;
+use heatel::particle::{Snapshot, System};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     let Ok(resource) = Resource::parse(data) else {
         return;
     };
-    if let Ok(snapshot)=heatel::particle::Snapshot::read(&resource) {assert!(snapshot.validate().is_ok());}
+    if let Ok(snapshot) = Snapshot::read(&resource) {
+        assert!(snapshot.validate().is_ok());
+    }
     let Ok(system) = System::read(&resource) else {
         return;
     };

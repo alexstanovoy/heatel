@@ -46,4 +46,4 @@ pub use system::{BOUNDS, Child, Constants, MAX_CHILDREN, MAX_PARTICLES, SLEEP_AF
 pub use transform::{ControlPoint, Transform};
 
 mod snapshot;
-pub use snapshot::{MAX_SNAPSHOT_POINTS, Snapshot};
+pub use snapshot::{MAX_SNAPSHOT_POINTS, MAX_UNSUPPORTED_NAME, Snapshot};

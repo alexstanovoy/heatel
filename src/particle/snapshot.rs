@@ -10,11 +10,15 @@ use serde::{Deserialize, Serialize};
 const WHAT: &str = "vsnap";
 /// Maximum points decoded from one snapshot.
 pub const MAX_SNAPSHOT_POINTS: usize = 5000;
+/// Longest name an [`Snapshot::Unsupported`] carries: the reader cuts what it formats to this, and
+/// [`Snapshot::validate`] rejects more, so a snapshot the reader returns always validates.
+pub const MAX_UNSUPPORTED_NAME: usize = 512;
 const MAX_BYTES: usize = 1024 * 1024;
 const MAX_METADATA: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
 /// Static snapshot geometry; other skinning bindings remain explicitly unsupported.
 pub enum Snapshot {
     /// Root-skinned local-space geometry.
@@ -91,13 +95,23 @@ impl Snapshot {
                     return Err(malformed(WHAT, "non-finite vector"));
                 }
             }
-            Self::Unsupported(name) if name.len() > 512 => {
+            Self::Unsupported(name) if name.len() > MAX_UNSUPPORTED_NAME => {
                 return Err(malformed(WHAT, "unsupported name too long"));
             }
             _ => (),
         }
         Ok(())
     }
+}
+/// An unsupported snapshot named by `why`, cut to the limit `validate` enforces (at a character
+/// boundary) because the name quotes file text of up to 256 bytes twice.
+fn unsupported(mut why: String) -> Snapshot {
+    let mut end = why.len().min(MAX_UNSUPPORTED_NAME);
+    while !why.is_char_boundary(end) {
+        end -= 1;
+    }
+    why.truncate(end);
+    Snapshot::Unsupported(why)
 }
 fn integer(value: Option<&Value>, max: usize, name: &str) -> Result<usize> {
     value
@@ -248,10 +262,10 @@ fn read_streams(
             ("normal", "float3") if normals.is_none() => normals = Some(vectors(stream, count)?),
             ("skinning", "skinning") => {
                 if let Some(why) = root_skinning(stream, count, strings)? {
-                    return Ok(Snapshot::Unsupported(why));
+                    return Ok(unsupported(why));
                 }
             }
-            _ => return Ok(Snapshot::Unsupported(format!("attribute {name}:{kind}"))),
+            _ => return Ok(unsupported(format!("attribute {name}:{kind}"))),
         }
     }
     let result = Snapshot::Points {

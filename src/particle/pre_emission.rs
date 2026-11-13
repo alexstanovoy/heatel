@@ -140,6 +140,7 @@ impl VectorComponent {
 /// A component remap, clamped to the declared range and interpolated per update.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
 pub struct ControlPointRemap {
     /// Control point read.
     pub input: ControlPoint,

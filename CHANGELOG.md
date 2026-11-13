@@ -4,7 +4,15 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - Unreleased
+
+### Breaking
+
+- `particle::System` gained the public fields `snapshot_file`, `snapshot` and `snapshot_control_point`,
+  so a complete struct literal no longer compiles. `System`, `Snapshot`, `ControlPointRemap` and
+  `ParticleNoise` are now `#[non_exhaustive]`: later fields and variants are not breaking. Read
+  systems with `System::read`/`System::from_document` and match `Snapshot` with a wildcard arm.
+- Converter revision 11 (`OUTPUT_REV`): particle caches made by 0.1.0 must be regenerated.
 
 ### Added
 
@@ -13,9 +21,10 @@ All notable changes to this crate are documented here. The format follows
 - Snapshot decoding limits: 5000 points, eight streams, 128 bounded strings,
   64 KiB metadata and 1 MiB unpacked stream data; unsupported skinning/streams are named.
 
-### Changed
+### Fixed
 
-- Converter revision 11 requires regenerating particle caches. `System` now retains optional snapshot metadata; complete struct literals need the new fields.
+- A snapshot with an unsupported attribute whose name and type together were long enough no longer
+  fails its own `Snapshot::validate`: the name is cut to `MAX_UNSUPPORTED_NAME` where it is made.
 
 ## [0.1.0] - 2026-11-13
 

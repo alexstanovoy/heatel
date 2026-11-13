@@ -7,7 +7,7 @@ Reads small files out of pak01_dir.vpk and the small map packages, and
 bundles the files a model or a world reads into one input each (the layout
 `heatel::fuzzing::files` reads). Writes corpus/<target>/seed-* under
 $FUZZ_DATA (default ~/.cache/heatel-fuzz), outside the repository: they are
-Valve's files.
+Valve's files. The synthetic snapshots of fuzz/seeds/particle are copied in as well.
 
 Other fuzz suites may import this module for its package reader and
 bundling (`Package`, `bundle`, `reachable`, `excerpt`, `spread`, `write`).
@@ -356,7 +356,16 @@ def texts(pak):
     write("items_game", "items", ("\"items_game\"\n{\n" + items[start : start + (200 << 10)]).encode())
 
 
+def synthetic():
+    """The small synthetic snapshots checked in under seeds/particle (tests/particle_snapshot.rs)."""
+    folder = os.path.join(HERE, "seeds", "particle")
+    for name in sorted(os.listdir(folder)):
+        with open(os.path.join(folder, name), "rb") as seed:
+            write("particle", "synthetic-" + name, seed.read())
+
+
 def main(game):
+    synthetic()
     pak = Package(game, "pak01_dir.vpk")
     formats(pak)
     models(pak)

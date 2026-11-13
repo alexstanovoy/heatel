@@ -496,3 +496,183 @@ fn hostile_component_counts_and_nonfinite_inputs_are_rejected() {
         assert!(System::from_document(&doc).is_err(), "{class} {key}");
     }
 }
+
+fn read_system(fields: Vec<(&'static str, K)>) -> Result<System, String> {
+    let root = K::Obj(
+        [("_class", s("CParticleSystemDefinition"))]
+            .into_iter()
+            .chain(fields)
+            .collect(),
+    );
+    let document = kv3::decode(&kv3_file(&root)).map_err(|e| e.to_string())?;
+    System::from_document(&document).map_err(|e| e.to_string())
+}
+fn noise_initializer(field: &'static str, value: K) -> Vec<(&'static str, K)> {
+    let input = K::Obj(vec![
+        ("m_nType", s("PF_TYPE_PARTICLE_NOISE")),
+        (field, value),
+    ]);
+    vec![(
+        "m_Initializers",
+        K::Arr(vec![operator(
+            "C_INIT_InitFloat",
+            vec![("m_InputValue", input)],
+        )]),
+    )]
+}
+fn remap(fields: Vec<(&'static str, K)>) -> Vec<(&'static str, K)> {
+    vec![(
+        "m_PreEmissionOperators",
+        K::Arr(vec![operator("C_OP_RemapCPtoCP", fields)]),
+    )]
+}
+
+#[test]
+fn particle_noise_numbers_that_are_not_finite_or_not_f32_are_errors() {
+    for (key, value) in [
+        ("m_flNoiseScale", f64::NAN),
+        ("m_flNoiseScale", f64::INFINITY),
+        ("m_flNoiseOutputMax", f64::NEG_INFINITY),
+        ("m_flNoiseOffset", f64::NAN),
+        ("m_flNoiseScale", 1e300),
+        ("m_flNoiseOutputMin", 3.5e38),
+    ] {
+        let error = read_system(noise_initializer(key, K::Float(value))).expect_err(key);
+        assert!(
+            error.contains(&format!("{key} is not a finite number")),
+            "{key}={value}: {error}"
+        );
+    }
+}
+
+#[test]
+fn particle_noise_octaves_outside_one_to_eight_are_errors() {
+    for octaves in [0, 9, -1, 1 << 40] {
+        let error = read_system(noise_initializer("m_nNoiseOctaves", K::Int(octaves)))
+            .expect_err("octaves");
+        assert!(error.contains("m_nNoiseOctaves"), "{octaves}: {error}");
+    }
+}
+
+#[test]
+fn particle_noise_types_the_reader_does_not_evaluate_stay_named_unsupported() {
+    for kind in ["PF_NOISE_TYPE_VALUE", "PF_NOISE_TYPE_SIMPLEX"] {
+        let system = read_system(noise_initializer("m_nNoiseType", s(kind))).expect("read");
+        assert!(
+            !matches!(
+                &system.initializers[0].class,
+                heatel::particle::Initializer::InitFloat {
+                    value: FloatInput::ParticleNoise(_),
+                    ..
+                }
+            ),
+            "{kind} must not read as Perlin"
+        );
+    }
+}
+
+#[test]
+fn control_point_remaps_with_bad_indices_or_interpolation_are_errors() {
+    for (key, value, expected) in [
+        (
+            "m_nInputControlPoint",
+            K::Int(64),
+            "m_nInputControlPoint 64 is outside -1..=63",
+        ),
+        (
+            "m_nInputControlPoint",
+            K::Int(-5),
+            "m_nInputControlPoint -5 is outside -1..=63",
+        ),
+        (
+            "m_nInputField",
+            K::Int(3),
+            "m_nInputField 3 is outside 0..=2",
+        ),
+        (
+            "m_nInputField",
+            K::Int(-1),
+            "m_nInputField -1 is outside 0..=2",
+        ),
+        (
+            "m_nOutputField",
+            K::Int(3),
+            "m_nOutputField 3 is outside 0..=2",
+        ),
+        (
+            "m_flInterpRate",
+            K::Float(f64::NAN),
+            "m_flInterpRate is not a finite number",
+        ),
+        (
+            "m_flInterpRate",
+            K::Float(f64::INFINITY),
+            "m_flInterpRate is not a finite number",
+        ),
+        (
+            "m_flInterpRate",
+            K::Float(1e300),
+            "m_flInterpRate is not a finite number",
+        ),
+    ] {
+        let error = read_system(remap(vec![(key, value)])).expect_err(key);
+        assert!(error.contains(expected), "{key}: {error}");
+    }
+}
+
+#[test]
+fn self_referential_remaps_are_read_and_a_flood_of_them_is_an_error() {
+    let ops = (0..60)
+        .map(|i| {
+            operator(
+                "C_OP_RemapCPtoCP",
+                vec![
+                    ("m_nInputControlPoint", K::Int(i % 4)),
+                    ("m_nOutputControlPoint", K::Int(i % 4)),
+                ],
+            )
+        })
+        .collect();
+    let system = read_system(vec![("m_PreEmissionOperators", K::Arr(ops))]).expect("60 remaps");
+    assert_eq!(system.pre_emission.len(), 60);
+    assert!(system.validate().is_ok());
+    let flood = (0..100_000)
+        .map(|_| operator("C_OP_RemapCPtoCP", vec![]))
+        .collect();
+    let error = read_system(vec![("m_PreEmissionOperators", K::Arr(flood))]).expect_err("flood");
+    assert!(error.contains("more than 128"), "{error}");
+}
+
+#[test]
+fn snapshot_paths_that_escape_or_are_absolute_are_errors_and_plain_ones_are_kept() {
+    for path in [
+        "../x.vsnap",
+        "/abs",
+        "a\\b",
+        "c:x",
+        "a/../b",
+        &"a".repeat(5000),
+    ] {
+        let error = read_system(vec![("m_hSnapshot", s(path))]).expect_err(path);
+        assert!(error.contains("invalid snapshot path"), "{error}");
+    }
+    let system = read_system(vec![("m_hSnapshot", s("ok/x.vsnap_c"))]).expect("plain path");
+    assert_eq!(system.snapshot_file.as_deref(), Some("ok/x.vsnap_c"));
+}
+
+#[test]
+fn snapshot_start_points_past_the_limit_or_negative_are_errors() {
+    let start = |value: i64| {
+        read_system(vec![(
+            "m_Initializers",
+            K::Arr(vec![operator(
+                "C_INIT_InitSkinnedPositionFromCPSnapshot",
+                vec![("m_nSnapShotStartPoint", K::Int(value))],
+            )]),
+        )])
+    };
+    for value in [-1, 5001, i64::MAX] {
+        assert!(start(value).is_err(), "{value}");
+    }
+    assert!(start(5000).expect("limit itself").validate().is_ok());
+}

@@ -86,6 +86,7 @@ pub enum FloatInput {
 /// Bounded Perlin spatial input, without turbulence or post modifiers.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
 pub struct ParticleNoise {
     /// The vector attribute sampled.
     pub field: Field,
