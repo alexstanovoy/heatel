@@ -139,8 +139,11 @@ approximate. Particle systems are read as definitions; simulating and drawing th
 
 ## Tests with an install
 
-The tests that read a Dota 2 install (written against patch 7.41) are ignored by default; `HEATEL_DOTA_PATH` names a
-`dota 2 beta` folder when it is not in the usual Steam places:
+The tests that read a Dota 2 install are ignored by default; `HEATEL_DOTA_PATH` names a `dota 2 beta` folder when it
+is not in the usual Steam places. They were recorded on Dota 2 patch 7.41 (the counts in their comments, 18 675 models,
+83 312 particle systems and 946 sound event files, are that patch's; the tests themselves only require lower bounds on
+them), and their expectations on individual models, particle systems, sounds and scripts are the values that patch
+holds. Another patch may change a value and fail one:
 
 ```sh
 cargo test --release -- --ignored
