@@ -6,23 +6,23 @@ All notable changes to this crate are documented here. The format follows
 
 ## [0.1.0] - unreleased
 
-First release.
-
-### Changed
-
-- Converter revision 7 normalizes literal distance-shell limits and skips empty vertex
-  buffers and primitives instead of emitting zero-count accessors. Regenerate caches.
-- `System` retains `infinite_bounds`; complete struct literals must include that field.
-- `ModelOptions` has a new required field in complete struct literals; use
-  `..ModelOptions::new(texture_uri)` to remain compatible with new options.
+First release: Valve's Source 2 formats read and converted, tested on Dota 2 only.
 
 ### Added
 
+- `Budget`: bounds what reading takes, so that a hostile file is an `Error`, never an unbounded
+  allocation or loop; callers reading several files share one.
+- `OUTPUT_REV`: bumped whenever an export's output changes for the same input, for caches made
+  from exports.
+- `find_game_dir` and `DirSource`: a Dota 2 install on disk (`HEATEL_DOTA_PATH` is read by the
+  tests and the gate only, never by the library).
+- `scripts`: the items and abilities of Dota's `items.txt`, `npc_abilities.txt` and the heroes'
+  scripts.
 - `sound::read_sound_mixer` reads Dota's `scripts/soundmixers.txt` (mix groups matched by the
   path of a sound, the levels of each mix, and the layers that duck groups while another
   sounds), and `kv3::parse_text` reads the text KeyValues3 it is written in, both bounded.
 - `C_OP_ConstrainDistance` shell constraints, including legacy control-point fields and
-  collection transform/vector inputs. Regenerate particle caches for the new definition.
+  collection transform/vector inputs.
 - `C_OP_SetControlPointToCenter`, including its offset, live-mean and ancestor-scope settings.
 - Exported meshes retain their render bounds in `extras.render_bounds` (`min` and
   `max` in glTF metres), for clients that release CPU vertex buffers after upload.

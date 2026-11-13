@@ -151,7 +151,8 @@ cargo test --release -- --ignored
 
 ## Minimum Rust version
 
-1.88.
+1.88 for the library and its examples. Running the tests takes a newer compiler (1.95): the Bevy crates of a dev-dependency
+(`bevy_image`) ask for it.
 
 ## Acknowledgements
 
@@ -162,7 +163,7 @@ sprite sheet crop and a few particle operators are written to give the same resu
 the reference to compare against. One part is derived from its code, not only compatible with it: the table of which
 inputs the channels of each shader's texture parameters hold, with the rules that match them to glTF's slots
 (`src/material/inputs.rs`), and the constants of the sRGB to linear conversion (`src/material/convert.rs`). Its
-copyright and licence are in [`THIRD-PARTY-NOTICES`](THIRD-PARTY-NOTICES).
+copyright and licence are in the `THIRD-PARTY-NOTICES` file of the repository and the package.
 
 The libraries heatel builds on (meshoptimizer through `meshoptimizer-rs`, `lz4_flex`, `ruzstd`, `texpresso`,
 `texture2ddecoder`, `png` and others) are listed in `Cargo.toml`.
