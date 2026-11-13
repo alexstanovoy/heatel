@@ -695,3 +695,28 @@ fn default_remaps_and_noise_inputs_equal_what_the_reader_gives_for_absent_keys()
         FloatInput::ParticleNoise(Box::<ParticleNoise>::default())
     );
 }
+
+#[test]
+fn renderers_read_their_depth_bias_and_default_to_none() {
+    use heatel::particle::Renderer;
+    let bias = K::Obj(vec![
+        ("m_nType", s("PF_TYPE_LITERAL")),
+        ("m_flLiteralValue", K::Float(5.0)),
+    ]);
+    let renderers = |fields: Vec<(&'static str, K)>| {
+        read_system(vec![(
+            "m_Renderers",
+            K::Arr(vec![operator("C_OP_RenderRopes", fields)]),
+        )])
+        .expect("renderer")
+    };
+    let look = |system: &System| match &system.renderers[0].class {
+        Renderer::Ropes(ropes) => ropes.look.depth_bias.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        look(&renderers(vec![("m_flDepthBias", bias)])),
+        FloatInput::Literal(5.0)
+    );
+    assert_eq!(look(&renderers(vec![])), FloatInput::Literal(0.0));
+}

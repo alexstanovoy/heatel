@@ -258,6 +258,15 @@ pub struct Look {
     /// The texture is a normal map that bends the view of what is behind (a heat haze), not a
     /// colour.
     pub refract: bool,
+    /// World units the card is moved toward the camera when depth-tested (`m_flDepthBias`): what
+    /// keeps a card lying on the ground from sinking into it.
+    #[cfg_attr(feature = "serde", serde(default = "no_depth_bias"))]
+    pub depth_bias: FloatInput,
+}
+
+#[cfg(feature = "serde")]
+fn no_depth_bias() -> FloatInput {
+    FloatInput::Literal(0.0)
 }
 
 /// `C_OP_RenderSprites`' parameters.
@@ -651,6 +660,7 @@ impl Look {
                 Orientation::Full,
             ][obj.choice("m_nOrientationType", &ORIENTATIONS, 0)?],
             refract: obj.bool("m_bRefract", false)?,
+            depth_bias: FloatInput::read(obj, "m_flDepthBias", 0.0)?,
         })
     }
 }

@@ -12,12 +12,13 @@ All notable changes to this crate are documented here. The format follows
   so a complete struct literal no longer compiles. `System`, `Snapshot`, `ControlPointRemap` and
   `ParticleNoise` are now `#[non_exhaustive]`: later fields and variants are not breaking. Read
   systems with `System::read`/`System::from_document` and match `Snapshot` with a wildcard arm.
-- Converter revision 11 (`OUTPUT_REV`): particle caches made by 0.1.0 must be regenerated.
+- Converter revision 12 (`OUTPUT_REV`): particle caches made by 0.1.0 must be regenerated.
 
 ### Added
 
 - Typed control-point remapping, root-skinned particle snapshots (`vsnap` DATA/SNAP),
   snapshot placement initializers and bounded Perlin particle float inputs.
+- `particle::Look::depth_bias` (`m_flDepthBias`), a new public field: a complete `Look` literal needs it.
 - `Default` for `ParticleNoise` and `ControlPointRemap` (the reader's defaults): the way to build
   these `#[non_exhaustive]` values outside the crate.
 - Snapshot decoding limits: 5000 points, eight streams, 128 bounded strings,
