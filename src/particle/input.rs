@@ -79,6 +79,39 @@ pub enum FloatInput {
         /// Its `m_flLiteralValue`.
         literal: f32,
     },
+    /// Spatial Perlin noise evaluated from a particle vector attribute.
+    ParticleNoise(Box<ParticleNoise>),
+}
+
+/// Bounded Perlin spatial input, without turbulence or post modifiers.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ParticleNoise {
+    /// The vector attribute sampled.
+    pub field: Field,
+    #[cfg_attr(
+        feature = "serde",
+        serde(deserialize_with = "super::read::finite_array")
+    )]
+    /// Values at the low and high ends of noise.
+    pub output: [f32; 2],
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "super::read::finite"))]
+    /// Spatial sampling frequency.
+    pub scale: f32,
+    #[cfg_attr(
+        feature = "serde",
+        serde(deserialize_with = "super::read::finite_array")
+    )]
+    /// Sample displacement per second on each axis.
+    pub offset_rate: [f32; 3],
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "super::read::finite"))]
+    /// Constant sample displacement.
+    pub offset: f32,
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "super::read::octaves"))]
+    /// Octaves, bounded to 1..=8.
+    pub octaves: u8,
+    /// Mapping applied after the noise output range.
+    pub mapping: Mapping,
 }
 
 /// The bias of a random draw or a remap.
@@ -255,6 +288,28 @@ impl FloatInput {
         let kind = input.str("m_nType")?.unwrap_or("PF_TYPE_LITERAL");
         let mapping = || Mapping::read(input);
         Ok(match kind {
+            "PF_TYPE_PARTICLE_NOISE"
+                if input.get("m_nNoiseType").is_none_or(|v| {
+                    v.as_str() == Some("PF_NOISE_TYPE_PERLIN") || v.as_i64() == Some(0)
+                }) && input.get("m_nNoiseTurbulence").is_none_or(|v| {
+                    v.as_str() == Some("PF_NOISE_TURB_NONE") || v.as_i64() == Some(0)
+                }) && input.get("m_nNoiseModifier").is_none_or(|v| {
+                    v.as_str() == Some("PF_NOISE_MODIFIER_NONE") || v.as_i64() == Some(0)
+                }) =>
+            {
+                Self::ParticleNoise(Box::new(ParticleNoise {
+                    field: input.field("m_nNoiseInputVectorAttribute", Field::POSITION)?,
+                    output: [
+                        input.float("m_flNoiseOutputMin", 0.0)?,
+                        input.float("m_flNoiseOutputMax", 1.0)?,
+                    ],
+                    scale: input.float("m_flNoiseScale", 0.1)?,
+                    offset_rate: input.vec3("m_vecNoiseOffsetRate", [0.0; 3])?,
+                    offset: input.float("m_flNoiseOffset", 0.0)?,
+                    octaves: input.int_in("m_nNoiseOctaves", 1, 1, 8)? as u8,
+                    mapping: mapping()?,
+                }))
+            }
             "PF_TYPE_LITERAL" => Self::Literal(input.float("m_flLiteralValue", 0.0)?),
             "PF_TYPE_RANDOM_UNIFORM" | "PF_TYPE_RANDOM_BIASED" => Self::Random {
                 min: input.float("m_flRandomMin", 0.0)?,
@@ -328,6 +383,10 @@ impl FloatInput {
 
     fn map_mapping(self, f: fn(Mapping) -> Mapping) -> Self {
         match self {
+            Self::ParticleNoise(mut n) => {
+                n.mapping = f(n.mapping);
+                Self::ParticleNoise(n)
+            }
             Self::CollectionAge(m) => Self::CollectionAge(f(m)),
             Self::EndCapAge(m) => Self::EndCapAge(f(m)),
             Self::ParticleAge(m) => Self::ParticleAge(f(m)),

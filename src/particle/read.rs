@@ -247,3 +247,40 @@ fn text_vector(key: &str, text: &str) -> Result<[f32; 3]> {
     }
     Ok(out)
 }
+
+#[cfg(feature = "serde")]
+pub(super) fn finite<'de, D: serde::Deserializer<'de>>(
+    input: D,
+) -> std::result::Result<f32, D::Error> {
+    let value = <f32 as serde::Deserialize>::deserialize(input)?;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom("non-finite particle number"))
+    }
+}
+#[cfg(feature = "serde")]
+pub(super) fn finite_array<'de, D: serde::Deserializer<'de>, const N: usize>(
+    input: D,
+) -> std::result::Result<[f32; N], D::Error>
+where
+    [f32; N]: serde::Deserialize<'de>,
+{
+    let value = <[f32; N] as serde::Deserialize>::deserialize(input)?;
+    if value.iter().all(|v| v.is_finite()) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom("non-finite particle vector"))
+    }
+}
+#[cfg(feature = "serde")]
+pub(super) fn octaves<'de, D: serde::Deserializer<'de>>(
+    input: D,
+) -> std::result::Result<u8, D::Error> {
+    let value = <u8 as serde::Deserialize>::deserialize(input)?;
+    if (1..=8).contains(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom("noise octaves outside 1..=8"))
+    }
+}

@@ -50,6 +50,15 @@ pub struct System {
     /// The behaviour version (`m_nBehaviorVersion`): below 6 an initializer that writes only
     /// what earlier ones wrote is skipped, from `first_multiple_override` on it runs.
     pub behavior_version: i32,
+    /// Optional authored snapshot resource path.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub snapshot_file: Option<String>,
+    /// Decoded snapshot supplied by the resource loader.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub snapshot: Option<super::Snapshot>,
+    /// Control point to which the snapshot resource is bound.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub snapshot_control_point: super::ControlPoint,
     /// See `behavior_version` (-1 none).
     pub first_multiple_override: i32,
     /// Most particles at once.
@@ -148,6 +157,9 @@ impl System {
             .clamp(1, i64::from(MAX_PARTICLES)) as u32;
         let system = Self {
             behavior_version,
+            snapshot_file: snapshot_path(&root)?,
+            snapshot: None,
+            snapshot_control_point: root.control_point("m_nSnapshotControlPoint", 0)?,
             first_multiple_override: root.int_in(
                 "m_nFirstMultipleOverride_BackwardCompat",
                 -1,
@@ -195,6 +207,17 @@ impl System {
 
     /// Checks the bounds the reader keeps, for a system read back from elsewhere (a cache).
     pub fn validate(&self) -> Result<()> {
+        if let Some(snapshot) = &self.snapshot {
+            snapshot.validate()?;
+        }
+        if self
+            .snapshot_file
+            .as_ref()
+            .is_some_and(|path| !valid_snapshot_path(path))
+        {
+            return Err(malformed(WHAT, "invalid snapshot path"));
+        }
+        if self.initializers.iter().any(|op|matches!(op.class,Initializer::SkinnedSnapshot{start,..} if start>super::MAX_SNAPSHOT_POINTS as u32)) {return Err(malformed(WHAT,"snapshot start exceeds point limit"));}
         let lists = [
             ("pre-emission operators", self.pre_emission.len()),
             ("emitters", self.emitters.len()),
@@ -415,4 +438,22 @@ fn children(root: &Obj<'_>) -> Result<Vec<Child>> {
         });
     }
     Ok(out)
+}
+
+fn valid_snapshot_path(path: &str) -> bool {
+    path.len() <= MAX_PATH
+        && !path.starts_with('/')
+        && !path.contains(char::from(92))
+        && !path.contains(':')
+        && !path.chars().any(char::is_control)
+        && !path.split('/').any(|part| part == "..")
+}
+fn snapshot_path(root: &Obj<'_>) -> Result<Option<String>> {
+    let Some(path) = root.str("m_hSnapshot")?.filter(|p| !p.is_empty()) else {
+        return Ok(None);
+    };
+    if !valid_snapshot_path(path) {
+        return Err(malformed(WHAT, "invalid snapshot path"));
+    }
+    Ok(Some(path.to_owned()))
 }

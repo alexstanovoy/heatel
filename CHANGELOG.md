@@ -4,6 +4,19 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Typed control-point remapping, root-skinned particle snapshots (`vsnap` DATA/SNAP),
+  snapshot placement initializers and bounded Perlin particle float inputs.
+- Snapshot decoding limits: 5000 points, eight streams, 128 bounded strings,
+  64 KiB metadata and 1 MiB unpacked stream data; unsupported skinning/streams are named.
+
+### Changed
+
+- Converter revision 11 requires regenerating particle caches. `System` now retains optional snapshot metadata; complete struct literals need the new fields.
+
 ## [0.1.0] - 2026-11-13
 
 First release: Valve's Source 2 formats read and converted, tested on Dota 2 only.

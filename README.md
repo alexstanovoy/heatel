@@ -127,7 +127,7 @@ table for is taken as one input named after the parameter; an animation channel 
 
 It reads and converts, never writes Valve's formats. Materials are mapped by a table of each shader's texture parameters
 rather than by running Valve's compiled shaders, so base colour and normals are right and the other channels are
-approximate. Particle systems are read as definitions; simulating and drawing them is up to you.
+approximate. Particle systems are read as definitions; simulating and drawing them is up to you. Particle snapshots read position/normal streams and root-bone skinning; other streams or skinning bindings stay named `Unsupported`. Snapshots are capped at 5000 points, eight streams, 128 strings of 256 bytes, 64 KiB metadata and 1 MiB unpacked data. Spatial float noise supports Perlin with no turbulence/modifier and one to eight octaves; other modes remain `Unsupported`.
 
 ## Features
 

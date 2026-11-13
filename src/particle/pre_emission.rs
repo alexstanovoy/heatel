@@ -105,6 +105,67 @@ pub enum PreEmission {
         /// Which ancestor starts the write down the system tree.
         target: ParentSet,
     },
+    /// `C_OP_RemapCPtoCP`: a control-point component remapped into another control point.
+    RemapControlPoint(Box<ControlPointRemap>),
+}
+
+/// A component of a three-dimensional control-point position.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum VectorComponent {
+    /// First coordinate.
+    #[default]
+    X,
+    /// Second coordinate.
+    Y,
+    /// Third coordinate.
+    Z,
+}
+
+impl VectorComponent {
+    /// Its index in a three-dimensional position.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::X => 0,
+            Self::Y => 1,
+            Self::Z => 2,
+        }
+    }
+
+    fn read(obj: &Obj<'_>, key: &str) -> Result<Self> {
+        Ok([Self::X, Self::Y, Self::Z][obj.int_in(key, 0, 0, 2)? as usize])
+    }
+}
+
+/// A component remap, clamped to the declared range and interpolated per update.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ControlPointRemap {
+    /// Control point read.
+    pub input: ControlPoint,
+    /// Control point written.
+    pub output: ControlPoint,
+    /// Component read, including the existing output value used for interpolation.
+    pub input_component: VectorComponent,
+    /// Component written.
+    pub output_component: VectorComponent,
+    #[cfg_attr(
+        feature = "serde",
+        serde(deserialize_with = "super::read::finite_array")
+    )]
+    /// Clamped input interval.
+    pub input_range: [f32; 2],
+    #[cfg_attr(
+        feature = "serde",
+        serde(deserialize_with = "super::read::finite_array")
+    )]
+    /// Mapped output interval.
+    pub output_range: [f32; 2],
+    /// A per-update interpolation coefficient, clamped to 0..=1.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "super::read::finite"))]
+    pub interpolation: f32,
+    /// Remap the input's change per second instead of its current value.
+    pub derivative: bool,
 }
 
 /// Where a control-point position write starts (`ParticleParentSetMode_t`).
@@ -282,6 +343,22 @@ pub struct ControlPointPositions {
 impl PreEmission {
     pub(super) fn read(class: &str, obj: &Obj<'_>) -> Result<Self> {
         Ok(match class {
+            "C_OP_RemapCPtoCP" => Self::RemapControlPoint(Box::new(ControlPointRemap {
+                input: obj.control_point("m_nInputControlPoint", 0)?,
+                output: obj.control_point("m_nOutputControlPoint", 0)?,
+                input_component: VectorComponent::read(obj, "m_nInputField")?,
+                output_component: VectorComponent::read(obj, "m_nOutputField")?,
+                input_range: [
+                    obj.float("m_flInputMin", 0.0)?,
+                    obj.float("m_flInputMax", 1.0)?,
+                ],
+                output_range: [
+                    obj.float("m_flOutputMin", 0.0)?,
+                    obj.float("m_flOutputMax", 1.0)?,
+                ],
+                interpolation: obj.float("m_flInterpRate", 1.0)?,
+                derivative: obj.bool("m_bDerivative", false)?,
+            })),
             "C_OP_SetControlPointToCenter" => Self::SetControlPointToCenter {
                 control_point: obj.control_point("m_nCP1", 1)?,
                 offset: obj.vec3("m_vecCP1Pos", [0.0; 3])?,

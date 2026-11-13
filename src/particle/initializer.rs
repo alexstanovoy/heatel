@@ -280,6 +280,19 @@ pub enum Initializer {
     CreateOnModel(Box<OnModel>),
     /// A class this crate does not read.
     Unsupported(String),
+    /// Positions from an authored root-skinned snapshot.
+    SkinnedSnapshot {
+        /// Spatial placement frame.
+        control_point: ControlPoint,
+        /// Control point carrying the snapshot resource.
+        snapshot_control_point: ControlPoint,
+        /// First snapshot point.
+        start: u32,
+        /// Choose a point randomly rather than in emission order.
+        random: bool,
+        /// Copy snapshot normals as well as positions.
+        set_normal: bool,
+    },
 }
 
 /// `C_INIT_CreateWithinBox`' parameters.
@@ -533,6 +546,23 @@ impl Initializer {
         behavior_version: i32,
     ) -> Result<Self> {
         Ok(match class {
+            "C_INIT_InitSkinnedPositionFromCPSnapshot"
+                if !obj.bool("m_bRigid", false)? && !obj.bool("m_bRigidRotationLock", false)? =>
+            {
+                Self::SkinnedSnapshot {
+                    control_point: obj.control_point("m_nControlPointNumber", 0)?,
+                    snapshot_control_point: obj
+                        .control_point("m_nSnapshotControlPointNumber", 1)?,
+                    start: obj.int_in(
+                        "m_nSnapShotStartPoint",
+                        0,
+                        0,
+                        super::MAX_SNAPSHOT_POINTS as i64,
+                    )? as u32,
+                    random: obj.bool("m_bRandom", false)?,
+                    set_normal: obj.bool("m_bSetNormal", false)?,
+                }
+            }
             "C_INIT_InitFloat" => Self::InitFloat {
                 field: obj.field("m_nOutputField", Field::RADIUS)?,
                 value: FloatInput::read(obj, "m_InputValue", 0.0)?,

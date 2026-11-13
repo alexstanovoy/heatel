@@ -24,7 +24,7 @@ pub use initializer::{
     DistanceToCp, Epitrochoid, Hitbox, Initializer, PlaceOnGround, Ring, Sphere, TraceMiss,
     TransformToVector, Warp, WithinBox,
 };
-pub use input::{Bias, Curve, FloatInput, Mapping, VectorInput};
+pub use input::{Bias, Curve, FloatInput, Mapping, ParticleNoise, VectorInput};
 pub use models::{LockToBone, Models, OnModel};
 pub use noise::{CreationNoise, CurlNoise, DirectionNoise, NoiseEmitter};
 pub use operator::{
@@ -33,8 +33,8 @@ pub use operator::{
 };
 pub use path::{MaintainPath, Path, SequentialPath};
 pub use pre_emission::{
-    ControlPointPositions, DistanceBetweenCps, ParentSet, PreEmission, ScalarExpression,
-    ScalarExpressionToCp,
+    ControlPointPositions, ControlPointRemap, DistanceBetweenCps, ParentSet, PreEmission,
+    ScalarExpression, ScalarExpressionToCp, VectorComponent,
 };
 pub use preview::{ControlPointConfig, ControlPointDriver, control_point_configurations};
 pub use read::MAX_CONTROL_POINT;
@@ -44,3 +44,6 @@ pub use renderer::{
 };
 pub use system::{BOUNDS, Child, Constants, MAX_CHILDREN, MAX_PARTICLES, SLEEP_AFTER, System};
 pub use transform::{ControlPoint, Transform};
+
+mod snapshot;
+pub use snapshot::{MAX_SNAPSHOT_POINTS, Snapshot};

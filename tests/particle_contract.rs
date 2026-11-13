@@ -323,3 +323,176 @@ fn sequential_path_count_and_distance_pass_through_raw_for_the_consumer_to_clamp
         assert_eq!(legacy.max_distance, FloatInput::Literal(value as f32));
     }
 }
+
+#[test]
+fn control_point_component_remaps_are_executable_in_the_imported_program() {
+    let program = system(vec![(
+        "m_PreEmissionOperators",
+        K::Arr(vec![operator(
+            "C_OP_RemapCPtoCP",
+            vec![
+                ("m_nInputControlPoint", K::Int(3)),
+                ("m_nOutputControlPoint", K::Int(9)),
+                ("m_nInputField", K::Int(2)),
+                ("m_nOutputField", K::Int(0)),
+                ("m_flInputMin", K::Float(-4.0)),
+                ("m_flInputMax", K::Float(12.0)),
+                ("m_flOutputMin", K::Float(20.0)),
+                ("m_flOutputMax", K::Float(100.0)),
+                ("m_flInterpRate", K::Float(0.25)),
+            ],
+        )]),
+    )]);
+    assert!(
+        program
+            .unsupported_classes()
+            .into_iter()
+            .all(|class| class != "C_OP_RemapCPtoCP"),
+        "the control-point component remap must be executable, not an unsupported operator"
+    );
+}
+
+#[test]
+fn snapshot_placement_is_an_executable_initializer() {
+    let program = system(vec![(
+        "m_Initializers",
+        K::Arr(vec![operator(
+            "C_INIT_InitSkinnedPositionFromCPSnapshot",
+            vec![
+                ("m_nSnapshotControlPointNumber", K::Int(6)),
+                ("m_nSnapShotStartPoint", K::Int(2)),
+            ],
+        )]),
+    )]);
+    assert!(
+        !program
+            .unsupported_classes()
+            .contains(&"C_INIT_InitSkinnedPositionFromCPSnapshot")
+    );
+}
+
+#[test]
+fn particle_noise_is_typed_without_a_zero_literal_fallback() {
+    let program = system(vec![(
+        "m_Initializers",
+        K::Arr(vec![operator(
+            "C_INIT_InitFloat",
+            vec![(
+                "m_InputValue",
+                K::Obj(vec![
+                    ("m_nType", s("PF_TYPE_PARTICLE_NOISE")),
+                    ("m_flNoiseOutputMin", K::Float(12.0)),
+                    ("m_flNoiseOutputMax", K::Float(24.0)),
+                ]),
+            )],
+        )]),
+    )]);
+    let heatel::particle::Initializer::InitFloat { value, .. } = &program.initializers[0].class
+    else {
+        panic!("float initializer")
+    };
+    assert!(
+        !matches!(value, FloatInput::Unsupported { .. }),
+        "noise must retain its spatial input instead of becoming zero"
+    );
+}
+
+#[test]
+fn component_remap_keeps_distinct_components_ranges_and_timing() {
+    let program = system(vec![(
+        "m_PreEmissionOperators",
+        K::Arr(vec![operator(
+            "C_OP_RemapCPtoCP",
+            vec![
+                ("m_nInputControlPoint", K::Int(3)),
+                ("m_nOutputControlPoint", K::Int(9)),
+                ("m_nInputField", K::Int(2)),
+                ("m_nOutputField", K::Int(0)),
+                ("m_flInputMin", K::Float(-4.0)),
+                ("m_flInputMax", K::Float(12.0)),
+                ("m_flOutputMin", K::Float(20.0)),
+                ("m_flOutputMax", K::Float(100.0)),
+                ("m_flInterpRate", K::Float(0.25)),
+                ("m_bDerivative", K::Bool(true)),
+                ("m_bRunOnce", K::Bool(true)),
+            ],
+        )]),
+    )]);
+    let PreEmission::RemapControlPoint(remap) = &program.pre_emission[0].class else {
+        panic!("typed remap")
+    };
+    assert_eq!((remap.input.index(), remap.output.index()), (3, 9));
+    assert_eq!(
+        (
+            remap.input_component.index(),
+            remap.output_component.index()
+        ),
+        (2, 0)
+    );
+    assert_eq!(
+        (remap.input_range, remap.output_range),
+        ([-4.0, 12.0], [20.0, 100.0])
+    );
+    assert_eq!(remap.interpolation, 0.25);
+    assert!(remap.derivative);
+    assert!(program.pre_emission[0].timing.run_once);
+}
+
+#[test]
+fn snapshot_and_noise_defaults_keep_resource_and_spatial_controls_distinct() {
+    let program = system(vec![
+        ("m_hSnapshot", s("particles/test.vsnap")),
+        ("m_nSnapshotControlPoint", K::Int(6)),
+        (
+            "m_Initializers",
+            K::Arr(vec![operator(
+                "C_INIT_InitSkinnedPositionFromCPSnapshot",
+                vec![("m_nSnapshotControlPointNumber", K::Int(6))],
+            )]),
+        ),
+    ]);
+    assert_eq!(
+        program.snapshot_file.as_deref(),
+        Some("particles/test.vsnap")
+    );
+    assert_eq!(program.snapshot_control_point.index(), 6);
+    let heatel::particle::Initializer::SkinnedSnapshot {
+        control_point,
+        snapshot_control_point,
+        start,
+        random,
+        set_normal,
+    } = &program.initializers[0].class
+    else {
+        panic!("typed snapshot")
+    };
+    assert_eq!(
+        (
+            control_point.index(),
+            snapshot_control_point.index(),
+            *start
+        ),
+        (0, 6, 0)
+    );
+    assert!(!random);
+    assert!(!set_normal);
+}
+
+#[test]
+fn hostile_component_counts_and_nonfinite_inputs_are_rejected() {
+    for (class, key, value) in [
+        ("C_OP_RemapCPtoCP", "m_nInputField", K::Int(3)),
+        (
+            "C_OP_RemapCPtoCP",
+            "m_flInterpRate",
+            K::Float(f64::INFINITY),
+        ),
+    ] {
+        let root = K::Obj(vec![(
+            "m_PreEmissionOperators",
+            K::Arr(vec![operator(class, vec![(key, value)])]),
+        )]);
+        let doc = kv3::decode(&kv3_file(&root)).expect("synthetic KV3");
+        assert!(System::from_document(&doc).is_err(), "{class} {key}");
+    }
+}

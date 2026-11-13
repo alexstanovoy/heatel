@@ -10,6 +10,7 @@ fuzz_target!(|data: &[u8]| {
     let Ok(resource) = Resource::parse(data) else {
         return;
     };
+    if let Ok(snapshot)=heatel::particle::Snapshot::read(&resource) {assert!(snapshot.validate().is_ok());}
     let Ok(system) = System::read(&resource) else {
         return;
     };
