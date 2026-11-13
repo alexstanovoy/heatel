@@ -81,9 +81,11 @@ impl Path {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct SequentialPath {
-    /// A random offset of up to this per axis.
+    /// A random offset of up to this per axis. Kept as the file gives it (negative or huge
+    /// included); the consumer clamps.
     pub max_distance: FloatInput,
-    /// How many points the path is cut into.
+    /// How many points the path is cut into (100 when the file leaves it out). Kept as the file
+    /// gives it, fractional, negative or huge included; the consumer rounds and clamps it.
     pub count: FloatInput,
     /// Past the end the walk starts over rather than turning back.
     pub looped: bool,

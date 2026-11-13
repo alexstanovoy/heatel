@@ -205,3 +205,121 @@ fn legacy_sequential_path_scalars_are_preserved_as_literal_inputs() {
     assert_eq!(path.count, FloatInput::Literal(4.0));
     assert_eq!(path.max_distance, FloatInput::Literal(2.0));
 }
+
+fn sequential_path(
+    class: &str,
+    fields: Vec<(&'static str, K)>,
+) -> heatel::particle::SequentialPath {
+    let system = system(vec![(
+        "m_Initializers",
+        K::Arr(vec![operator(class, fields)]),
+    )]);
+    let heatel::particle::Initializer::CreateSequentialPath(path) = &system.initializers[0].class
+    else {
+        panic!("{class} is a supported sequential path");
+    };
+    *path.clone()
+}
+
+#[test]
+fn sequential_path_absent_keys_default_to_a_hundred_points_looped_without_offset() {
+    for class in [
+        "C_INIT_CreateSequentialPath",
+        "C_INIT_CreateSequentialPathV2",
+    ] {
+        let path = sequential_path(class, Vec::new());
+        assert_eq!(path.count, FloatInput::Literal(100.0), "{class} count");
+        assert_eq!(
+            path.max_distance,
+            FloatInput::Literal(0.0),
+            "{class} distance"
+        );
+        assert!(path.looped, "{class} loops");
+        assert!(!path.pairs, "{class} pairs");
+        assert!(!path.save_offset, "{class} saves no offset");
+    }
+}
+
+#[test]
+fn sequential_path_v2_keeps_input_driven_count_and_distance() {
+    let path = sequential_path(
+        "C_INIT_CreateSequentialPathV2",
+        vec![
+            (
+                "m_flNumToAssign",
+                K::Obj(vec![
+                    ("m_nType", s("PF_TYPE_RANDOM_UNIFORM")),
+                    ("m_flRandomMin", K::Float(4.0)),
+                    ("m_flRandomMax", K::Float(8.0)),
+                ]),
+            ),
+            (
+                "m_fMaxDistance",
+                K::Obj(vec![
+                    ("m_nType", s("PF_TYPE_CONTROL_POINT_COMPONENT")),
+                    ("m_nControlPoint", K::Int(2)),
+                    ("m_nVectorComponent", K::Int(1)),
+                ]),
+            ),
+        ],
+    );
+    assert_eq!(
+        path.count,
+        FloatInput::Random {
+            min: 4.0,
+            max: 8.0,
+            varying: false,
+            bias: None,
+            sign_flip: false,
+        }
+    );
+    let FloatInput::ControlPointComponent {
+        control_point,
+        component,
+        ..
+    } = path.max_distance
+    else {
+        panic!(
+            "distance follows a control point component: {:?}",
+            path.max_distance
+        );
+    };
+    assert_eq!(control_point.index(), 2);
+    assert_eq!(component, 1);
+}
+
+#[test]
+fn sequential_path_unsupported_input_kind_is_named_not_read_as_zero() {
+    let path = sequential_path(
+        "C_INIT_CreateSequentialPathV2",
+        vec![(
+            "m_flNumToAssign",
+            K::Obj(vec![
+                ("m_nType", s("PF_TYPE_PARTICLE_DETAIL_LEVEL")),
+                ("m_flLiteralValue", K::Float(7.0)),
+            ]),
+        )],
+    );
+    assert_eq!(
+        path.count,
+        FloatInput::Unsupported {
+            kind: "PF_TYPE_PARTICLE_DETAIL_LEVEL".to_owned(),
+            literal: 7.0,
+        }
+    );
+}
+
+#[test]
+fn sequential_path_count_and_distance_pass_through_raw_for_the_consumer_to_clamp() {
+    for value in [-3.0_f64, 2.5, 1.0e30] {
+        let legacy = sequential_path(
+            "C_INIT_CreateSequentialPath",
+            vec![
+                ("m_flNumToAssign", K::Float(value)),
+                ("m_fMaxDistance", K::Float(value)),
+            ],
+        );
+        assert_eq!(legacy.count, FloatInput::Literal(value as f32));
+        assert_eq!(legacy.max_distance, FloatInput::Literal(value as f32));
+    }
+}

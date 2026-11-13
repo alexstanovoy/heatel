@@ -23,6 +23,11 @@ First release: Valve's Source 2 formats read and converted, tested on Dota 2 onl
   sounds), and `kv3::parse_text` reads the text KeyValues3 it is written in, both bounded.
 - `C_OP_ConstrainDistance` shell constraints, including legacy control-point fields and
   collection transform/vector inputs.
+- `C_INIT_CreateSequentialPathV2`, read into the same `SequentialPath` as `C_INIT_CreateSequentialPath`:
+  its `count` and `max_distance` are `FloatInput`s (a legacy scalar is a `Literal`; 100 and 0 when the
+  file leaves them out). Values are passed through raw, fractional, negative or huge, so the
+  consumer rounds and clamps them. An input kind heatel does not read is `FloatInput::Unsupported`
+  with the kind's name.
 - `C_OP_SetControlPointToCenter`, including its offset, live-mean and ancestor-scope settings.
 - Exported meshes retain their render bounds in `extras.render_bounds` (`min` and
   `max` in glTF metres), for clients that release CPU vertex buffers after upload.

@@ -215,7 +215,9 @@ pub enum Initializer {
     },
     /// `C_INIT_SetHitboxToModel`: a place on the model at a control point.
     SetHitboxToModel(Box<Hitbox>),
-    /// `C_INIT_CreateSequentialPath`: positions one after another along a path.
+    /// `C_INIT_CreateSequentialPath` and `C_INIT_CreateSequentialPathV2`: positions one after
+    /// another along a path. The count and the distance are kept as the file gives them, a
+    /// fractional, negative or huge value included: the consumer clamps.
     CreateSequentialPath(Box<SequentialPath>),
     /// `C_INIT_CreateWithinBox`: a position in a box about a control point.
     CreateWithinBox(Box<WithinBox>),
