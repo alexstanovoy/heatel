@@ -152,3 +152,56 @@ fn center_parent_modes_preserve_numeric_order_and_symbolic_spellings() {
         }
     }
 }
+
+#[test]
+fn sequential_path_v2_reads_its_input_count_and_endpoints() {
+    let system = system(vec![(
+        "m_Initializers",
+        K::Arr(vec![operator(
+            "C_INIT_CreateSequentialPathV2",
+            vec![
+                (
+                    "m_flNumToAssign",
+                    K::Obj(vec![
+                        ("m_nType", s("PF_TYPE_LITERAL")),
+                        ("m_flLiteralValue", K::Float(16.0)),
+                    ]),
+                ),
+                (
+                    "m_PathParams",
+                    K::Obj(vec![
+                        ("m_nStartControlPointNumber", K::Int(3)),
+                        ("m_nEndControlPointNumber", K::Int(4)),
+                    ]),
+                ),
+            ],
+        )]),
+    )]);
+    let heatel::particle::Initializer::CreateSequentialPath(path) = &system.initializers[0].class
+    else {
+        panic!("the V2 sequential path is supported, not omitted");
+    };
+    assert_eq!(path.count, FloatInput::Literal(16.0));
+    assert_eq!(path.path.start.index(), 3);
+    assert_eq!(path.path.end.index(), 4);
+}
+
+#[test]
+fn legacy_sequential_path_scalars_are_preserved_as_literal_inputs() {
+    let system = system(vec![(
+        "m_Initializers",
+        K::Arr(vec![operator(
+            "C_INIT_CreateSequentialPath",
+            vec![
+                ("m_flNumToAssign", K::Float(4.0)),
+                ("m_fMaxDistance", K::Float(2.0)),
+            ],
+        )]),
+    )]);
+    let heatel::particle::Initializer::CreateSequentialPath(path) = &system.initializers[0].class
+    else {
+        panic!("the legacy sequential path is supported");
+    };
+    assert_eq!(path.count, FloatInput::Literal(4.0));
+    assert_eq!(path.max_distance, FloatInput::Literal(2.0));
+}

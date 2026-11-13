@@ -627,7 +627,7 @@ impl Initializer {
     /// The initializers of paths, boxes, curves and noise, the town portal's and the missiles'.
     fn read_shapes(class: &str, obj: &Obj<'_>, behavior_version: i32) -> Result<Self> {
         Ok(match class {
-            "C_INIT_CreateSequentialPath" => {
+            "C_INIT_CreateSequentialPath" | "C_INIT_CreateSequentialPathV2" => {
                 Self::CreateSequentialPath(Box::new(SequentialPath::read(obj)?))
             }
             "C_INIT_CreateWithinBox" => Self::CreateWithinBox(Box::new(within_box(obj)?)),

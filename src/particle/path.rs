@@ -76,15 +76,15 @@ impl Path {
     }
 }
 
-/// `C_INIT_CreateSequentialPath`'s parameters: particles placed one after another at evenly
-/// spaced points of a path.
+/// `C_INIT_CreateSequentialPath` and its input-driven V2: particles placed one after another
+/// at evenly spaced points of a path.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct SequentialPath {
     /// A random offset of up to this per axis.
-    pub max_distance: f32,
+    pub max_distance: FloatInput,
     /// How many points the path is cut into.
-    pub count: f32,
+    pub count: FloatInput,
     /// Past the end the walk starts over rather than turning back.
     pub looped: bool,
     /// The path runs through every control point from the start to the end, a segment between
@@ -122,8 +122,8 @@ pub struct MaintainPath {
 impl SequentialPath {
     pub(super) fn read(obj: &Obj<'_>) -> Result<Self> {
         Ok(Self {
-            max_distance: obj.float("m_fMaxDistance", 0.0)?,
-            count: obj.float("m_flNumToAssign", 100.0)?,
+            max_distance: FloatInput::read(obj, "m_fMaxDistance", 0.0)?,
+            count: FloatInput::read(obj, "m_flNumToAssign", 100.0)?,
             looped: obj.bool("m_bLoop", true)?,
             pairs: obj.bool("m_bCPPairs", false)?,
             save_offset: obj.bool("m_bSaveOffset", false)?,
