@@ -18,6 +18,8 @@ All notable changes to this crate are documented here. The format follows
 
 - Typed control-point remapping, root-skinned particle snapshots (`vsnap` DATA/SNAP),
   snapshot placement initializers and bounded Perlin particle float inputs.
+- `Default` for `ParticleNoise` and `ControlPointRemap` (the reader's defaults): the way to build
+  these `#[non_exhaustive]` values outside the crate.
 - Snapshot decoding limits: 5000 points, eight streams, 128 bounded strings,
   64 KiB metadata and 1 MiB unpacked stream data; unsupported skinning/streams are named.
 

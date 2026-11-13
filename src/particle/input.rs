@@ -115,6 +115,21 @@ pub struct ParticleNoise {
     pub mapping: Mapping,
 }
 
+/// The reader's defaults for a noise input the file leaves out: a unit range sampled at 0.1.
+impl Default for ParticleNoise {
+    fn default() -> Self {
+        Self {
+            field: Field::POSITION,
+            output: [0.0, 1.0],
+            scale: 0.1,
+            offset_rate: [0.0; 3],
+            offset: 0.0,
+            octaves: 1,
+            mapping: Mapping::Direct,
+        }
+    }
+}
+
 /// The bias of a random draw or a remap.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]

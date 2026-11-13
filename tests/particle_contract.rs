@@ -676,3 +676,22 @@ fn snapshot_start_points_past_the_limit_or_negative_are_errors() {
     }
     assert!(start(5000).expect("limit itself").validate().is_ok());
 }
+
+#[test]
+fn default_remaps_and_noise_inputs_equal_what_the_reader_gives_for_absent_keys() {
+    use heatel::particle::{ControlPointRemap, ParticleNoise};
+    let remap = read_system(remap(vec![])).expect("remap");
+    assert_eq!(
+        remap.pre_emission[0].class,
+        PreEmission::RemapControlPoint(Box::<ControlPointRemap>::default())
+    );
+    let noise = read_system(noise_initializer("m_nNoiseOctaves", K::Int(1))).expect("noise");
+    let heatel::particle::Initializer::InitFloat { value, .. } = &noise.initializers[0].class
+    else {
+        panic!("InitFloat")
+    };
+    assert_eq!(
+        *value,
+        FloatInput::ParticleNoise(Box::<ParticleNoise>::default())
+    );
+}

@@ -122,6 +122,23 @@ pub enum VectorComponent {
     Z,
 }
 
+/// The reader's defaults for a remap the file leaves out: control point 0's first component onto
+/// itself over 0 to 1, at once. A `#[non_exhaustive]` value is built from this and its fields set.
+impl Default for ControlPointRemap {
+    fn default() -> Self {
+        Self {
+            input: ControlPoint::default(),
+            output: ControlPoint::default(),
+            input_component: VectorComponent::X,
+            output_component: VectorComponent::X,
+            input_range: [0.0, 1.0],
+            output_range: [0.0, 1.0],
+            interpolation: 1.0,
+            derivative: false,
+        }
+    }
+}
+
 impl VectorComponent {
     /// Its index in a three-dimensional position.
     pub const fn index(self) -> usize {
