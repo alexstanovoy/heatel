@@ -1,7 +1,7 @@
 //! The lip sync a voice line carries in its `vsnd_c`, as Valve's sound compiler bakes it in:
 //! its sentence (the phonemes heard, each over its stretch of time, and the emphasis curve)
 //! and, in newer files, a morph animation (facial flex controller curves, named by the hash of
-//! the controller's name). The client moves a speaking face by them (see its `face` module).
+//! the controller's name). A renderer can move a speaking face by them (see [`crate::face`]).
 
 use crate::budget::Budget;
 use crate::bytes::Cursor;

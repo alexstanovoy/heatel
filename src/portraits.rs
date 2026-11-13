@@ -21,7 +21,7 @@ const MIN_WAY: f32 = 1e-3;
 /// Most a background's corner colour multiplies its image by, a channel (Dota's reach 2).
 pub const MAX_TINT: f32 = 4.0;
 /// A far plane must lie past this many inches: nearer, no portrait camera sees past its own near
-/// plane (dbota's is at 4, twice it the floor both refuse at).
+/// plane (this is twice a near plane of 4 inches).
 pub const MIN_FAR: f32 = 8.0;
 
 /// A Valve KV1 value: a string, or a block of keyed values.

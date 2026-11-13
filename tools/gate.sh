@@ -8,6 +8,7 @@
 # deny, then fmt (last: it changes no code).
 # A step that does not run fails the gate; nothing is skipped quietly.
 # Environment:
+#   HEATEL_DOTA_PATH=DIR  the `dota 2 beta` folder, when it is not in the usual Steam places
 #   GATE_STEP_LOG=FILE   append the seconds each step took to FILE (tab separated)
 #   GATE_LOGS=DIR        where each step's output goes (default: temp/gate under the repository)
 # Prints GATE-OK when every step ran and passed, GATE-FAIL <step> (with the tail of its output) otherwise.
@@ -35,11 +36,12 @@ step() { # name command...
 
 has_install() {
     local library
-    for library in "${DBOTA_DOTA_PATH:+$DBOTA_DOTA_PATH/..}" "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common" \
+    [ -n "${HEATEL_DOTA_PATH:-}" ] && [ -f "$HEATEL_DOTA_PATH/game/dota/pak01_dir.vpk" ] && return 0
+    for library in "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common" \
         "$HOME/.steam/steam/steamapps/common" "$HOME/.local/share/Steam/steamapps/common"; do
-        [ -n "$library" ] && [ -f "$library/dota 2 beta/game/dota/pak01_dir.vpk" ] && return 0
+        [ -f "$library/dota 2 beta/game/dota/pak01_dir.vpk" ] && return 0
     done
-    [ -n "${DBOTA_DOTA_PATH:-}" ] && [ -f "$DBOTA_DOTA_PATH/game/dota/pak01_dir.vpk" ]
+    return 1
 }
 
 step ignored-audit tools/ignored_audit.sh
