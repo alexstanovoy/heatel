@@ -1,27 +1,50 @@
 # heatel
 
-Reads Valve's Source 2 formats out of a local Dota 2 install and converts them to open ones: models with their
-skeletons, animations and faces to glTF, textures to PNG or KTX2, sounds to WAV or MP3, particle systems and KV3 data
-to JSON. Pure Rust with no `unsafe`, hardened and fuzzed against hostile files, and it runs in a browser on files the
-user picks, reading only the bytes it needs.
+Reads Valve's Source 2 file formats and converts them to open ones: models with their skeletons, animations and faces
+to glTF, textures to PNG or KTX2, sounds to WAV or MP3, particle systems and KV3 data to JSON. Pure Rust, no `unsafe` in
+the crate, fuzzed against hostile files, and it runs in a browser on files the user picks, reading only the bytes it
+needs.
 
-| Dota's file | heatel reads it as | and writes |
+**Tested on Dota 2, and only on Dota 2.** Another Source 2 game's files may use versions or variants heatel does not
+read; mostly they are an [`Error`] that names what was met, see [Limits](#limits). A few
+helpers read Dota 2's own scripts and maps and mean nothing elsewhere, see [Dota 2 data](#dota-2-data).
+
+## Source 2 formats
+
+| File | heatel reads it as | and writes |
 |---|---|---|
 | `*.vpk` packages | [`Vpk`](vpk::Vpk): the directory tree, archives, CRCs | the stored files |
 | any compiled `*_c` file | [`Resource`](resource::Resource): its blocks, references, `DATA` | |
-| KV3 blocks, NTRO data | [`kv3::Value`] | JSON (feature `serde`) |
-| scripts, localization (KV1 text) | [`keyvalues::Kv`], [`keyvalues::localization_table`] | |
+| KV3 blocks (binary and text), NTRO data | [`kv3::Value`] | JSON (feature `serde`) |
+| KV1 text, localization | [`keyvalues::Kv`], [`keyvalues::localization_table`] | |
 | `vtex_c` textures | [`Texture`](texture::Texture): every level, block formats as stored | PNG, KTX2 |
 | `vsnd_c` sounds | [`Sound`](sound::Sound), a voice line's [`Lipsync`](sound::Lipsync) (phonemes, baked morph curves) | the WAV or MP3 inside |
-| a mesh's `MRPH` morph set and `_vmorf.vtex` atlas, `phonemes.txt`, `vcd_c` scenes | [`MorphSet`](face::MorphSet) (flexes, controllers, rules), [`PhonemeTable`](face::PhonemeTable), [`Scene`](face::Scene) | glTF morph targets |
+| a mesh's `MRPH` morph set and `_vmorf.vtex` atlas, phoneme tables, `vcd_c` scenes | [`MorphSet`](face::MorphSet) (flexes, controllers, rules), [`PhonemeTable`](face::PhonemeTable), [`Scene`](face::Scene) | glTF morph targets |
 | `vmdl_c` models, `vmat_c` materials, embedded animations | [`Model`](model::Model), [`Material`](material::Material), [`Clip`](anim::Clip) | `.glb` with PNG or KTX2 images |
+| a model's sequences | [`read_sequences`](anim::read_sequences): activities, frames, events | |
 | `vpcf_c` particle systems | [`System`](particle::System): emitters, initializers, operators, forces, renderers, children | JSON (feature `serde`) |
-| `vwrld_c` worlds, `vents_c` entity lumps | [`EntityLump`](world::EntityLump), [`placements`](world::placements), [`lighting`](world::lighting) | `.gltf` + `.bin` |
-| `items.txt`, `npc_abilities.txt`, `shops.txt`, `portraits.txt` | [`tooltips`](tooltips::tooltips), [`categories`](shops::categories), [`framings`](portraits::framings) | |
+| `vwrld_c` worlds, `vents_c` entity lumps | [`EntityLump`](world::EntityLump), [`placements`](world::placements) | `.gltf` + `.bin` |
+| `vsndevts_c` sound events, `vrr_c` response rules | [`read_sound_events`](sound::read_sound_events), [`read_response_rules`](talker::read_response_rules) | |
 
-**heatel reads files from your own Dota 2 install. It ships no Valve content and is not
-affiliated with or endorsed by Valve Corporation. Dota 2 and Source 2 are trademarks of Valve
-Corporation.** What you convert stays subject to Valve's terms for your copy of the game.
+## Dota 2 data
+
+These know Dota 2's file names, scripts or entity classes, so they are of no use for another game:
+
+| Dota 2's file | heatel reads it as |
+|---|---|
+| the Steam install | [`find_game_dir`] finds its `game/dota` folder |
+| `items.txt`, `npc_abilities.txt`, the heroes' scripts, localization | [`scripts::entries`], [`tooltips`](tooltips::tooltips) |
+| `shops.txt` | [`shops::categories`] |
+| `portraits.txt` | [`portraits::framings`] |
+| `items_game.txt` | [`items_game::read_hero_items`]: the cosmetics a hero wears |
+| `soundmixers.txt` | [`sound::read_sound_mixer`] |
+| the map's `ent_dota_lightinfo` entities | [`world::lighting`] |
+| the map's mid-lane diagonal | [`world::Band`] cuts a world to a band along it |
+| `AE_DOTA_PLAY_SOUND_ATTACK` animation events | [`anim::EventData::AttackSound`] |
+
+**heatel ships no Valve content and is not affiliated with or endorsed by Valve Corporation. Dota 2 and Source 2 are
+trademarks of Valve Corporation.** It reads files you already have, such as your own Dota 2 install, and what you
+convert stays subject to Valve's terms for your copy of the game.
 
 ## Quick start
 
@@ -30,7 +53,7 @@ Corporation.** What you convert stays subject to Valve's terms for your copy of 
 heatel = "0.1"
 ```
 
-Open the install (its `game/dota` folder) and read from its main package:
+Open a Dota 2 install (its `game/dota` folder) and read from its main package:
 
 ```rust,no_run
 use heatel::{DirSource, Texture, Vpk, find_game_dir};
@@ -81,23 +104,30 @@ cargo run --release --example model_to_gltf -- "<...>/dota 2 beta/game/dota" \
 
 Everything builds for `wasm32-unknown-unknown`. Reads go through the [`Source`] trait, which is
 synchronous: implement [`Slice`] over a `File` the user picked (`File.slice` read with
-`FileReaderSync` in a Web Worker), put the files in a [`SliceSource`] under their paths in
-`game/dota` (`pak01_dir.vpk`, `pak01_042.vpk`, `maps/dota.vpk`), and use it as a folder.
+`FileReaderSync` in a Web Worker), put the files in a [`SliceSource`] under the paths they have in
+the game folder (Dota 2: `pak01_dir.vpk`, `pak01_042.vpk`, `maps/dota.vpk`), and use it as a folder.
 Only the bytes asked for are read.
 
 ## Untrusted input
 
 Every reader treats its file as hostile: reads are range-checked, allocations, recursion and
 work are bounded by what a real file of the kind needs, and a malformed file is an
-[`Error`], never a panic. The readers are fuzzed (`fuzz/`, libFuzzer on stable Rust), and the
-crate has no `unsafe` code (`#![forbid(unsafe_code)]`).
+[`Error`], never a panic. The readers are fuzzed (`fuzz/`, libFuzzer on stable Rust), and heatel's
+own code has no `unsafe` (`#![forbid(unsafe_code)]`).
 
 ## Limits
 
-heatel is built and tested against Dota 2; other Source 2 games may use versions of the formats it doesn't know. It
-reads and converts, never writes Valve's formats. Materials are mapped by texture name rather than by running Valve's
-compiled shaders, so base colour and normals are right and the other channels are approximate. Particle systems are
-read as definitions; simulating and drawing them is up to you.
+heatel is built and tested against Dota 2. What it reads of each format is what Dota 2's files use, and the rest is an
+[`Error`] that names it: a resource header other than version 12, a VPK other than version 1 or 2, KV3 other than
+versions 1 to 5 and the first `VKV\x03` layout, a `vtex_c` other than version 1 or one that is a cube map, volume, array
+or JPEG, a sound that is not 8- or 16-bit PCM or MP3, a vertex attribute in a format it has no reader for. Three cases are
+softer: a particle class heatel does not read is kept as `Unsupported` and listed by
+[`System::unsupported_classes`](particle::System::unsupported_classes); a texture parameter of a shader that heatel has no
+table for is taken as one input named after the parameter; an animation channel in a codec it does not read is left out.
+
+It reads and converts, never writes Valve's formats. Materials are mapped by a table of each shader's texture parameters
+rather than by running Valve's compiled shaders, so base colour and normals are right and the other channels are
+approximate. Particle systems are read as definitions; simulating and drawing them is up to you.
 
 ## Features
 
@@ -109,7 +139,7 @@ read as definitions; simulating and drawing them is up to you.
 
 ## Tests with an install
 
-Tests that need Dota's own files are ignored by default; `HEATEL_DOTA_PATH` names a
+The tests that read a Dota 2 install (written against patch 7.41) are ignored by default; `HEATEL_DOTA_PATH` names a
 `dota 2 beta` folder when it is not in the usual Steam places:
 
 ```sh
