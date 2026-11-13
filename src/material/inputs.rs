@@ -1,6 +1,7 @@
 //! Which glTF slot each of a material's textures feeds, and through which channels: the table
 //! Source2Viewer 20 falls back to when it cannot read a game's compiled shaders (it cannot read
-//! Dota's), and its rules for matching the shader's inputs to glTF's.
+//! Dota's), and its rules for matching the shader's inputs to glTF's. Derived from that project
+//! (ValveResourceFormat, MIT): see THIRD-PARTY-NOTICES.
 
 use super::vmat::Material;
 

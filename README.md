@@ -150,6 +150,20 @@ cargo test --release -- --ignored
 
 1.88.
 
+## Acknowledgements
+
+heatel stands on the reverse-engineering work of the
+[ValveResourceFormat](https://github.com/ValveResourceFormat/ValveResourceFormat) project (VRF, the library behind
+Source 2 Viewer; MIT licensed). heatel's glTF exports of materials, animation clips, vertex attributes and worlds, its
+sprite sheet crop and a few particle operators are written to give the same results as Source 2 Viewer's, which was
+the reference to compare against. One part is derived from its code, not only compatible with it: the table of which
+inputs the channels of each shader's texture parameters hold, with the rules that match them to glTF's slots
+(`src/material/inputs.rs`), and the constants of the sRGB to linear conversion (`src/material/convert.rs`). Its
+copyright and licence are in [`THIRD-PARTY-NOTICES`](THIRD-PARTY-NOTICES).
+
+The libraries heatel builds on (meshoptimizer through `meshoptimizer-rs`, `lz4_flex`, `ruzstd`, `texpresso`,
+`texture2ddecoder`, `png` and others) are listed in `Cargo.toml`.
+
 ## License
 
-MIT, see the `LICENSE` file.
+MIT, see the `LICENSE` file. Material derived from other projects is listed in `THIRD-PARTY-NOTICES`.

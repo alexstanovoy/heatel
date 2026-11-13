@@ -126,7 +126,8 @@ fn base_color(material: &Material, tint: [f32; 4]) -> [f32; 4] {
     })
 }
 
-/// sRGB-encoded colour to linear, with Source2Viewer's rounding.
+/// sRGB-encoded colour to linear, with Source2Viewer's rounding (derived from ValveResourceFormat's,
+/// MIT: see THIRD-PARTY-NOTICES).
 pub(crate) fn srgb_to_linear(c: [f32; 3]) -> [f32; 3] {
     c.map(|c| {
         if c <= 0.04045 {

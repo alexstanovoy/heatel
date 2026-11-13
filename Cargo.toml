@@ -9,7 +9,7 @@ repository = "https://github.com/alexstanovoy/heatel"
 readme = "README.md"
 keywords = ["source2", "dota2", "valve", "vpk", "gltf"]
 categories = ["parser-implementations", "game-development", "multimedia::images", "rendering::data-formats"]
-include = ["/src", "/examples", "/tests", "/README.md", "/CHANGELOG.md", "/LICENSE"]
+include = ["/src", "/examples", "/tests", "/README.md", "/CHANGELOG.md", "/LICENSE", "/THIRD-PARTY-NOTICES"]
 
 [features]
 default = ["encode"]

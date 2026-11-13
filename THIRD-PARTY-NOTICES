@@ -1,0 +1,49 @@
+THIRD-PARTY NOTICES
+
+heatel is licensed under the MIT License (see LICENSE). The parts below were derived from
+another project, whose licence asks that its copyright and permission notice accompany
+substantial portions of it. Libraries heatel depends on are not listed: they are separate
+packages under their own licences, which Cargo fetches with them.
+
+
+ValveResourceFormat (Source 2 Viewer)
+https://github.com/ValveResourceFormat/ValveResourceFormat
+
+Derived from it:
+
+- src/material/inputs.rs: the table of which inputs the channels of each shader's texture
+  parameters hold (the shaders' names, the texture parameters' names and the channels'
+  input names), and the glTF slots with the inputs each takes. The rules that match a
+  shader's inputs to a slot follow the project's too. The table is in the project's
+  ValveResourceFormat/IO/ShaderDataProvider.cs.
+- src/material/convert.rs: the constants and the error correction of the sRGB to linear
+  conversion (`srgb_to_linear`), from the project's ColorSpace.SrgbGammaToLinear.
+
+Everything else that mentions the project (the glTF exports of materials, clips, vertex
+attributes and worlds; the sprite sheet crop; the normal map reconstruction; the semantics of
+a few particle operators) is heatel's own code, written to give the same results as the
+project's output or behaviour; it is not a transcription of the project's code.
+
+The licence of the project, as published in its repository:
+
+    The MIT License (MIT)
+
+    Copyright (c) 2015 ValveResourceFormat Contributors
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
