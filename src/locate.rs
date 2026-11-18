@@ -85,12 +85,25 @@ pub fn steam_roots(os: Os, home: Option<&Path>, registered: &[PathBuf]) -> Vec<P
         .collect()
 }
 
-/// Whether `path` names a place on this machine by a full path with no `..` step: a place a
-/// program may look at without being asked. A relative path would be looked for in whatever
-/// folder the program was started from, and a network path (on Windows `\\server\share`, the
-/// `\\?\UNC` and device forms) would connect to another machine, which hands over the
-/// user's credentials to whoever named it.
+/// Whether a path may be looked at without the player asking: it passes both steps below. A
+/// relative path would be looked for in whatever folder the program was started from, and a
+/// network path (on Windows `\\server\share`, the `\\?\UNC` and device forms) would connect
+/// to another machine, which hands over the user's credentials to whoever named it. Every path
+/// that comes from a file or the registry goes through this before it reaches the filesystem.
+///
+/// 1. [`is_well_formed_local_text`]: the path as text, in either system's syntax (the security
+///    rule, the same on every host). A path that is not UTF-8 cannot be judged as text; it is
+///    a Unix name and goes on to the second step alone.
+/// 2. [`is_usable_here`]: what this host takes for a full local path (a plain usability filter,
+///    which on Windows also reads the prefix as the system will).
 fn is_local_absolute(path: &Path) -> bool {
+    path.to_str().is_none_or(is_well_formed_local_text) && is_usable_here(path)
+}
+
+/// Step two of [`is_local_absolute`]: `path` is a full path with no `..` step as this host reads
+/// it (a Windows path is not one on Linux, nor a Unix path on Windows), and on Windows its
+/// prefix is a drive.
+fn is_usable_here(path: &Path) -> bool {
     use std::path::{Component, Prefix};
     path.is_absolute()
         && path.components().all(|part| match part {
@@ -100,23 +113,33 @@ fn is_local_absolute(path: &Path) -> bool {
         })
 }
 
-/// [`is_local_absolute`] for the text of a library list, whichever system it was written on
-/// (so it can be judged on any system): a Unix path from `/`, or a Windows one from a drive
-/// letter and a separator.
-fn is_local_absolute_text(text: &str) -> bool {
+/// Step one of [`is_local_absolute`], the security rule, made on the text alone so that it gives
+/// the same answer on every system: a Unix path from `/` or a Windows one from a drive letter
+/// and a separator, with no `..` step and no control character (no install has one, and the path
+/// goes into a log line). A second separator of either kind after a leading `/` is refused:
+/// Windows reads a leading `/` as `\`, so `//server/share` and `/\server\share` are network
+/// paths and `/\.\C:` a device path.
+fn is_well_formed_local_text(text: &str) -> bool {
     let mut chars = text.chars();
     let rooted = match (chars.next(), chars.next(), chars.next()) {
-        (Some('/'), Some(second), _) => second != '/',
+        (Some('/'), Some(second), _) => second != '/' && second != '\\',
         (Some('/'), None, _) => true,
         (Some(drive), Some(':'), Some('\\' | '/')) => drive.is_ascii_alphabetic(),
         _ => false,
     };
-    rooted && !text.contains('\0') && !text.split(['/', '\\']).any(|step| step == "..")
+    rooted
+        && !text.chars().any(char::is_control)
+        && !text.split(['/', '\\']).any(|step| step == "..")
 }
 
 /// The library folders a `libraryfolders.vdf` lists, in its order: Steam's current format
 /// (`"0" { "path" "…" }`) and the old one (`"1" "…"`), backslashes unescaped as Steam writes
-/// them on Windows. Text that is not a library list gives none.
+/// them on Windows. Text that is not a library list gives none, and so does an entry that is
+/// not well formed as a local absolute path in either system's syntax
+/// (step one of the rule): such a list is the player's file, but
+/// it is not trusted to send the program anywhere. The result is what the list says, the same on
+/// every host; [`libraries`] applies the second step (this host's reading) before any of it is
+/// looked at, and a caller that looks at these paths itself must do that too.
 pub fn library_paths(vdf: &[u8]) -> Vec<PathBuf> {
     let Ok(text) = text(vdf) else {
         return Vec::new();
@@ -143,7 +166,7 @@ pub fn library_paths(vdf: &[u8]) -> Vec<PathBuf> {
             },
         })
         .map(unescape)
-        .filter(|path| is_local_absolute_text(path))
+        .filter(|path| is_well_formed_local_text(path))
         .map(PathBuf::from)
         .take(MAX_LIBRARIES)
         .collect()
@@ -522,6 +545,14 @@ mod tests {
             ("10", Some("/games/steam")),
             ("11", Some(r"D:\\Games\\Steam")),
             ("12", Some("D:/Games/Steam")),
+            // Windows reads a leading `/` as `\`: these are a network and a device path.
+            ("13", Some(r"/\\server\\share\\steam")),
+            ("14", Some(r"/\\.\\C:\\steam")),
+            ("15", Some(r"/\\?\\UNC\\server\\share")),
+            // No install is at a path with a control character, which also goes into a log line.
+            ("16", Some("/games/ste\u{7}am")),
+            ("17", Some("/games/ste\u{1b}[2Jam")),
+            ("18", Some("D:\\Games\\Ste\u{1}am")),
         ]);
         assert_eq!(
             library_paths(vdf.as_bytes()),
@@ -550,6 +581,17 @@ mod tests {
                 PathBuf::from("/games/old/style")
             ]
         );
+    }
+
+    /// The rule judges every path before it reaches the filesystem, not only those of a library
+    /// list: a registered Steam folder is held to the text rule too.
+    #[test]
+    fn a_registered_steam_folder_with_a_mixed_separator_network_form_is_no_root() {
+        let bad = [
+            PathBuf::from(r"/\server\share\Steam"),
+            PathBuf::from("/steam/ste\u{7}am"),
+        ];
+        assert_eq!(steam_roots(Os::Linux, None, &bad), Vec::<PathBuf>::new());
     }
 
     #[test]
