@@ -1,3 +1,45 @@
+// The README is the crate's front page on GitHub, crates.io and docs.rs alike. Its API links are reference links whose
+// definitions in the README point at docs.rs; the same labels are defined here first, as intra-doc paths, and the first
+// definition of a label wins, so rustdoc links the crate's own items.
+#![doc = r"
+[`Error`]: Error
+[`Vpk`]: vpk::Vpk
+[`Resource`]: resource::Resource
+[`kv3::Value`]: kv3::Value
+[`keyvalues::Kv`]: keyvalues::Kv
+[`keyvalues::localization_table`]: keyvalues::localization_table
+[`Texture`]: texture::Texture
+[`Sound`]: sound::Sound
+[`Lipsync`]: sound::Lipsync
+[`MorphSet`]: face::MorphSet
+[`PhonemeTable`]: face::PhonemeTable
+[`Scene`]: face::Scene
+[`Model`]: model::Model
+[`Material`]: material::Material
+[`Clip`]: anim::Clip
+[`read_sequences`]: anim::read_sequences
+[`System`]: particle::System
+[`EntityLump`]: world::EntityLump
+[`placements`]: world::placements
+[`read_sound_events`]: sound::read_sound_events
+[`read_response_rules`]: talker::read_response_rules
+[`find_game_dir`]: find_game_dir
+[`scripts::entries`]: scripts::entries
+[`tooltips`]: tooltips::tooltips
+[`shops::categories`]: shops::categories
+[`portraits::framings`]: portraits::framings
+[`items_game::read_hero_items`]: items_game::read_hero_items
+[`sound::read_sound_mixer`]: sound::read_sound_mixer
+[`world::lighting`]: world::lighting
+[`world::Band`]: world::Band
+[`anim::EventData::AttackSound`]: anim::EventData::AttackSound
+[`Source`]: Source
+[`Slice`]: Slice
+[`SliceSource`]: SliceSource
+[`System::unsupported_classes`]: particle::System::unsupported_classes
+[`Texture::compressed`]: texture::Texture::compressed
+[`ExportedTexture::to_ktx2`]: export::ExportedTexture::to_ktx2
+"]
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

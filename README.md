@@ -9,22 +9,25 @@ needs.
 read; mostly they are an [`Error`] that names what was met, see [Limits](#limits). A few
 helpers read Dota 2's own scripts and maps and mean nothing elsewhere, see [Dota 2 data](#dota-2-data).
 
+**State:** version 0.1 on crates.io; the API may still change before 1.0. It needs Rust 1.88 or newer
+([details](#minimum-rust-version)).
+
 ## Source 2 formats
 
 | File | heatel reads it as | and writes |
 |---|---|---|
-| `*.vpk` packages | [`Vpk`](vpk::Vpk): the directory tree, archives, CRCs | the stored files |
-| any compiled `*_c` file | [`Resource`](resource::Resource): its blocks, references, `DATA` | |
+| `*.vpk` packages | [`Vpk`]: the directory tree, archives, CRCs | the stored files |
+| any compiled `*_c` file | [`Resource`]: its blocks, references, `DATA` | |
 | KV3 blocks (binary and text), NTRO data | [`kv3::Value`] | JSON (feature `serde`) |
 | KV1 text, localization | [`keyvalues::Kv`], [`keyvalues::localization_table`] | |
-| `vtex_c` textures | [`Texture`](texture::Texture): every level, block formats as stored | PNG, KTX2 |
-| `vsnd_c` sounds | [`Sound`](sound::Sound), a voice line's [`Lipsync`](sound::Lipsync) (phonemes, baked morph curves) | the WAV or MP3 inside |
-| a mesh's `MRPH` morph set and `_vmorf.vtex` atlas, phoneme tables, `vcd_c` scenes | [`MorphSet`](face::MorphSet) (flexes, controllers, rules), [`PhonemeTable`](face::PhonemeTable), [`Scene`](face::Scene) | glTF morph targets |
-| `vmdl_c` models, `vmat_c` materials, embedded animations | [`Model`](model::Model), [`Material`](material::Material), [`Clip`](anim::Clip) | `.glb` with PNG or KTX2 images |
-| a model's sequences | [`read_sequences`](anim::read_sequences): activities, frames, events | |
-| `vpcf_c` particle systems | [`System`](particle::System): emitters, initializers, operators, forces, renderers, children | JSON (feature `serde`) |
-| `vwrld_c` worlds, `vents_c` entity lumps | [`EntityLump`](world::EntityLump), [`placements`](world::placements) | `.gltf` + `.bin` |
-| `vsndevts_c` sound events, `vrr_c` response rules | [`read_sound_events`](sound::read_sound_events), [`read_response_rules`](talker::read_response_rules) | |
+| `vtex_c` textures | [`Texture`]: every level, block formats as stored | PNG, KTX2 |
+| `vsnd_c` sounds | [`Sound`], a voice line's [`Lipsync`] (phonemes, baked morph curves) | the WAV or MP3 inside |
+| a mesh's `MRPH` morph set and `_vmorf.vtex` atlas, phoneme tables, `vcd_c` scenes | [`MorphSet`] (flexes, controllers, rules), [`PhonemeTable`], [`Scene`] | glTF morph targets |
+| `vmdl_c` models, `vmat_c` materials, embedded animations | [`Model`], [`Material`], [`Clip`] | `.glb` with PNG or KTX2 images |
+| a model's sequences | [`read_sequences`]: activities, frames, events | |
+| `vpcf_c` particle systems | [`System`]: emitters, initializers, operators, forces, renderers, children | JSON (feature `serde`) |
+| `vwrld_c` worlds, `vents_c` entity lumps | [`EntityLump`], [`placements`] | `.gltf` + `.bin` |
+| `vsndevts_c` sound events, `vrr_c` response rules | [`read_sound_events`], [`read_response_rules`] | |
 
 ## Dota 2 data
 
@@ -33,7 +36,7 @@ These know Dota 2's file names, scripts or entity classes, so they are of no use
 | Dota 2's file | heatel reads it as |
 |---|---|
 | the Steam install | [`find_game_dir`] finds its `game/dota` folder |
-| `items.txt`, `npc_abilities.txt`, the heroes' scripts, localization | [`scripts::entries`], [`tooltips`](tooltips::tooltips) |
+| `items.txt`, `npc_abilities.txt`, the heroes' scripts, localization | [`scripts::entries`], [`tooltips`] |
 | `shops.txt` | [`shops::categories`] |
 | `portraits.txt` | [`portraits::framings`] |
 | `items_game.txt` | [`items_game::read_hero_items`]: the cosmetics a hero wears |
@@ -58,14 +61,16 @@ Open a Dota 2 install (its `game/dota` folder) and read from its main package:
 ```rust,no_run
 use heatel::{DirSource, Texture, Vpk, find_game_dir};
 
-let game = find_game_dir(None).expect("no Dota 2 in the usual Steam places");
-let src = DirSource::new(game);
-let pak = Vpk::open(&src, "pak01_dir.vpk")?;
-for entry in pak.entries().filter(|e| e.ext() == "vtex_c").take(5) {
-    let texture = Texture::parse(&pak.read(&src, entry)?)?;
-    println!("{}: {} x {} {:?}", entry.path(), texture.width(), texture.height(), texture.format());
+fn main() -> Result<(), heatel::Error> {
+    let game = find_game_dir(None).expect("no Dota 2 in the usual Steam places");
+    let src = DirSource::new(game);
+    let pak = Vpk::open(&src, "pak01_dir.vpk")?;
+    for entry in pak.entries().filter(|e| e.ext() == "vtex_c").take(5) {
+        let texture = Texture::parse(&pak.read(&src, entry)?)?;
+        println!("{}: {} x {} {:?}", entry.path(), texture.width(), texture.height(), texture.format());
+    }
+    Ok(())
 }
-# Ok::<(), heatel::Error>(())
 ```
 
 A model with its materials, skeleton and animations as a `.glb`, its images as PNG:
@@ -74,21 +79,23 @@ A model with its materials, skeleton and animations as a `.glb`, its images as P
 use heatel::export::{ModelOptions, export_model};
 use heatel::{DirSource, Texture, Vpk, read_from};
 
-let src = DirSource::new("/path/to/dota 2 beta/game/dota");
-let pak = Vpk::open(&src, "pak01_dir.vpk")?;
-let png = |vtex: &str| format!("{}.png", vtex.rsplit('/').next().unwrap_or(vtex));
-let options = ModelOptions {
-    skeleton: true,
-    generator: "my tool",
-    ..ModelOptions::new(&png)
-};
-let model = export_model(&src, &[&pak], "models/heroes/pudge/pudge.vmdl_c", &options)?;
-std::fs::write("pudge.glb", &model.glb).unwrap();
-for image in &model.textures {
-    let texture = Texture::parse(&read_from(&src, &[&pak], &format!("{}_c", image.vtex))?)?;
-    std::fs::write(&image.uri, image.to_png(&texture)?).unwrap();
+fn main() -> Result<(), heatel::Error> {
+    let src = DirSource::new("/path/to/dota 2 beta/game/dota");
+    let pak = Vpk::open(&src, "pak01_dir.vpk")?;
+    let png = |vtex: &str| format!("{}.png", vtex.rsplit('/').next().unwrap_or(vtex));
+    let options = ModelOptions {
+        skeleton: true,
+        generator: "my tool",
+        ..ModelOptions::new(&png)
+    };
+    let model = export_model(&src, &[&pak], "models/heroes/pudge/pudge.vmdl_c", &options)?;
+    std::fs::write("pudge.glb", &model.glb).unwrap();
+    for image in &model.textures {
+        let texture = Texture::parse(&read_from(&src, &[&pak], &format!("{}_c", image.vtex))?)?;
+        std::fs::write(&image.uri, image.to_png(&texture)?).unwrap();
+    }
+    Ok(())
 }
-# Ok::<(), heatel::Error>(())
 ```
 
 The [`examples`](https://docs.rs/crate/heatel/latest/source/examples/) do the common jobs from
@@ -96,6 +103,8 @@ the command line: `vpk_list`, `vpk_extract`, `model_to_gltf`, `texture_convert` 
 `sound_extract` (WAV or MP3) and `kv3_to_json` (`--features serde`), e.g.
 
 ```sh
+git clone https://github.com/alexstanovoy/heatel
+cd heatel
 cargo run --release --example model_to_gltf -- "<...>/dota 2 beta/game/dota" \
     models/heroes/pudge/pudge.vmdl_c out/ idle
 ```
@@ -122,7 +131,7 @@ heatel is built and tested against Dota 2. What it reads of each format is what 
 versions 1 to 5 and the first `VKV\x03` layout, a `vtex_c` other than version 1 or one that is a cube map, volume, array
 or JPEG, a sound that is not 8- or 16-bit PCM or MP3, a vertex attribute in a format it has no reader for. Three cases are
 softer: a particle class heatel does not read is kept as `Unsupported` and listed by
-[`System::unsupported_classes`](particle::System::unsupported_classes); a texture parameter of a shader that heatel has no
+[`System::unsupported_classes`]; a texture parameter of a shader that heatel has no
 table for is taken as one input named after the parameter; an animation channel in a codec it does not read is left out.
 
 It reads and converts, never writes Valve's formats. Materials are mapped by a table of each shader's texture parameters
@@ -132,8 +141,8 @@ approximate. Particle systems are read as definitions; simulating and drawing th
 ## Features
 
 - `encode` (default): BC1/BC3/BC4/BC5 compression of RGBA8 images
-  ([`Texture::compressed`](texture::Texture::compressed),
-  [`ExportedTexture::to_ktx2`](export::ExportedTexture::to_ktx2)).
+  ([`Texture::compressed`],
+  [`ExportedTexture::to_ktx2`]).
 - `serde`: `Serialize` for KV3 documents and values; `Serialize` and `Deserialize` for particle
   systems.
 
@@ -171,3 +180,42 @@ The libraries heatel builds on (meshoptimizer through `meshoptimizer-rs`, `lz4_f
 ## License
 
 MIT, see the `LICENSE` file. Material derived from other projects is listed in `THIRD-PARTY-NOTICES`.
+
+<!-- API links for GitHub and crates.io; rustdoc resolves the same labels to the crate's items (src/lib.rs). -->
+[`Error`]: https://docs.rs/heatel/latest/heatel/enum.Error.html
+[`Vpk`]: https://docs.rs/heatel/latest/heatel/vpk/struct.Vpk.html
+[`Resource`]: https://docs.rs/heatel/latest/heatel/resource/struct.Resource.html
+[`kv3::Value`]: https://docs.rs/heatel/latest/heatel/kv3/enum.Value.html
+[`keyvalues::Kv`]: https://docs.rs/heatel/latest/heatel/keyvalues/enum.Kv.html
+[`keyvalues::localization_table`]: https://docs.rs/heatel/latest/heatel/keyvalues/fn.localization_table.html
+[`Texture`]: https://docs.rs/heatel/latest/heatel/texture/struct.Texture.html
+[`Sound`]: https://docs.rs/heatel/latest/heatel/sound/struct.Sound.html
+[`Lipsync`]: https://docs.rs/heatel/latest/heatel/sound/struct.Lipsync.html
+[`MorphSet`]: https://docs.rs/heatel/latest/heatel/face/struct.MorphSet.html
+[`PhonemeTable`]: https://docs.rs/heatel/latest/heatel/face/struct.PhonemeTable.html
+[`Scene`]: https://docs.rs/heatel/latest/heatel/face/struct.Scene.html
+[`Model`]: https://docs.rs/heatel/latest/heatel/model/struct.Model.html
+[`Material`]: https://docs.rs/heatel/latest/heatel/material/struct.Material.html
+[`Clip`]: https://docs.rs/heatel/latest/heatel/anim/struct.Clip.html
+[`read_sequences`]: https://docs.rs/heatel/latest/heatel/anim/fn.read_sequences.html
+[`System`]: https://docs.rs/heatel/latest/heatel/particle/struct.System.html
+[`EntityLump`]: https://docs.rs/heatel/latest/heatel/world/struct.EntityLump.html
+[`placements`]: https://docs.rs/heatel/latest/heatel/world/fn.placements.html
+[`read_sound_events`]: https://docs.rs/heatel/latest/heatel/sound/fn.read_sound_events.html
+[`read_response_rules`]: https://docs.rs/heatel/latest/heatel/talker/fn.read_response_rules.html
+[`find_game_dir`]: https://docs.rs/heatel/latest/heatel/fn.find_game_dir.html
+[`scripts::entries`]: https://docs.rs/heatel/latest/heatel/scripts/fn.entries.html
+[`tooltips`]: https://docs.rs/heatel/latest/heatel/tooltips/fn.tooltips.html
+[`shops::categories`]: https://docs.rs/heatel/latest/heatel/shops/fn.categories.html
+[`portraits::framings`]: https://docs.rs/heatel/latest/heatel/portraits/fn.framings.html
+[`items_game::read_hero_items`]: https://docs.rs/heatel/latest/heatel/items_game/fn.read_hero_items.html
+[`sound::read_sound_mixer`]: https://docs.rs/heatel/latest/heatel/sound/fn.read_sound_mixer.html
+[`world::lighting`]: https://docs.rs/heatel/latest/heatel/world/fn.lighting.html
+[`world::Band`]: https://docs.rs/heatel/latest/heatel/world/struct.Band.html
+[`anim::EventData::AttackSound`]: https://docs.rs/heatel/latest/heatel/anim/enum.EventData.html#variant.AttackSound
+[`Source`]: https://docs.rs/heatel/latest/heatel/source/trait.Source.html
+[`Slice`]: https://docs.rs/heatel/latest/heatel/source/trait.Slice.html
+[`SliceSource`]: https://docs.rs/heatel/latest/heatel/source/struct.SliceSource.html
+[`System::unsupported_classes`]: https://docs.rs/heatel/latest/heatel/particle/struct.System.html#method.unsupported_classes
+[`Texture::compressed`]: https://docs.rs/heatel/latest/heatel/texture/struct.Texture.html#method.compressed
+[`ExportedTexture::to_ktx2`]: https://docs.rs/heatel/latest/heatel/export/struct.ExportedTexture.html#method.to_ktx2
