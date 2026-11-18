@@ -25,6 +25,9 @@ All notable changes to this crate are documented here. The format follows
   Linux (native, Flatpak, Snap), macOS and Windows (Program Files, or the Steam folder a caller reads from
   the registry), and in a folder picked at any usual level. `find_game_dir` searches them all; before it
   tried three folders under `$HOME`, none on Windows nor beyond the first library.
+  A library list is the player's file, not a trusted one: an entry that is relative, has a `..` step or is a
+  network path (`\\server\share`, `\\?\UNC`, device paths) is not looked at, and a folder given relative
+  to the working folder is made a whole path first.
 - Typed control-point remapping, root-skinned particle snapshots (`vsnap` DATA/SNAP),
   snapshot placement initializers and bounded Perlin particle float inputs.
 - `particle::Look::depth_bias` (`m_flDepthBias`), a new public field: a complete `Look` literal needs it.

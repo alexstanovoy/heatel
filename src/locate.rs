@@ -76,13 +76,42 @@ pub fn steam_roots(os: Os, home: Option<&Path>, registered: &[PathBuf]) -> Vec<P
         ],
         Os::MacOs => &["Library/Application Support/Steam"],
     };
-    let home = home.filter(|home| home.is_absolute());
+    let home = home.filter(|home| is_local_absolute(home));
     registered
         .iter()
-        .filter(|root| root.is_absolute())
+        .filter(|root| is_local_absolute(root))
         .cloned()
         .chain(under_home.iter().filter_map(|rel| Some(home?.join(rel))))
         .collect()
+}
+
+/// Whether `path` names a place on this machine by a full path with no `..` step: a place a
+/// program may look at without being asked. A relative path would be looked for in whatever
+/// folder the program was started from, and a network path (on Windows `\\server\share`, the
+/// `\\?\UNC` and device forms) would connect to another machine, which hands over the
+/// user's credentials to whoever named it.
+fn is_local_absolute(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    path.is_absolute()
+        && path.components().all(|part| match part {
+            Component::ParentDir => false,
+            Component::Prefix(prefix) => matches!(prefix.kind(), Prefix::Disk(_)),
+            _ => true,
+        })
+}
+
+/// [`is_local_absolute`] for the text of a library list, whichever system it was written on
+/// (so it can be judged on any system): a Unix path from `/`, or a Windows one from a drive
+/// letter and a separator.
+fn is_local_absolute_text(text: &str) -> bool {
+    let mut chars = text.chars();
+    let rooted = match (chars.next(), chars.next(), chars.next()) {
+        (Some('/'), Some(second), _) => second != '/',
+        (Some('/'), None, _) => true,
+        (Some(drive), Some(':'), Some('\\' | '/')) => drive.is_ascii_alphabetic(),
+        _ => false,
+    };
+    rooted && !text.contains('\0') && !text.split(['/', '\\']).any(|step| step == "..")
 }
 
 /// The library folders a `libraryfolders.vdf` lists, in its order: Steam's current format
@@ -105,7 +134,7 @@ pub fn library_paths(vdf: &[u8]) -> Vec<PathBuf> {
     };
     list.items()
         .iter()
-        .filter(|(key, _)| key.bytes().all(|b| b.is_ascii_digit()))
+        .filter(|(key, _)| !key.is_empty() && key.bytes().all(|b| b.is_ascii_digit()))
         .filter_map(|(_, value)| match value {
             Kv::Text(path) => Some(path.as_str()),
             Kv::Block(_) => match value.get("path") {
@@ -114,7 +143,7 @@ pub fn library_paths(vdf: &[u8]) -> Vec<PathBuf> {
             },
         })
         .map(unescape)
-        .filter(|path| !path.is_empty())
+        .filter(|path| is_local_absolute_text(path))
         .map(PathBuf::from)
         .take(MAX_LIBRARIES)
         .collect()
@@ -136,14 +165,21 @@ fn unescape(text: &str) -> String {
     out
 }
 
-/// The libraries of the Steam folder `root`: itself, then what its library list names.
+/// The libraries of the Steam folder `root`: itself, then what its library list names (the
+/// local ones, see [`library_paths`]).
 pub fn libraries(root: &Path) -> Vec<PathBuf> {
     let listed = ["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"]
         .iter()
         .find_map(|rel| read_bounded(&root.join(rel), MAX_LIBRARY_FILE))
         .map(|vdf| library_paths(&vdf))
         .unwrap_or_default();
-    std::iter::once(root.to_path_buf()).chain(listed).collect()
+    std::iter::once(root.to_path_buf())
+        .chain(
+            listed
+                .into_iter()
+                .filter(|library| is_local_absolute(library)),
+        )
+        .collect()
 }
 
 /// A file's bytes when it is at most `limit` long.
@@ -157,19 +193,32 @@ fn read_bounded(path: &Path, limit: u64) -> Option<Vec<u8>> {
 
 /// Every Dota 2 install in the libraries of the Steam folders `roots`, in their order; an
 /// install reached twice (`~/.steam/steam` is often a link to `~/.local/share/Steam`) is
-/// listed once.
+/// listed once. At most [`MAX_LIBRARIES`] different libraries are looked into: a library that
+/// several Steam folders list does not use up the allowance twice.
 pub fn find_installs(roots: &[PathBuf]) -> Vec<Install> {
-    let mut seen: Vec<PathBuf> = Vec::new();
-    let mut found = Vec::new();
-    let libraries = roots.iter().flat_map(|root| libraries(root));
-    for library in libraries.take(MAX_LIBRARIES) {
-        let folder = library.join("steamapps/common").join(DOTA_FOLDER);
+    let mut libraries_seen: Vec<PathBuf> = Vec::new();
+    let mut found: Vec<Install> = Vec::new();
+    let mut real_games: Vec<PathBuf> = Vec::new();
+    let libraries = roots
+        .iter()
+        .take(MAX_LIBRARIES)
+        .flat_map(|root| libraries(root));
+    for library in libraries {
+        let real_library = std::fs::canonicalize(&library).unwrap_or_else(|_| library.clone());
+        if libraries_seen.contains(&real_library) {
+            continue;
+        }
+        if libraries_seen.len() == MAX_LIBRARIES {
+            break;
+        }
+        libraries_seen.push(real_library);
+        let folder = library.join("steamapps").join("common").join(DOTA_FOLDER);
         let Some(install) = install_at(&folder) else {
             continue;
         };
         let real = std::fs::canonicalize(&install.game).unwrap_or_else(|_| install.game.clone());
-        if !seen.contains(&real) {
-            seen.push(real);
+        if !real_games.contains(&real) {
+            real_games.push(real);
             found.push(install);
         }
     }
@@ -178,7 +227,7 @@ pub fn find_installs(roots: &[PathBuf]) -> Vec<Install> {
 
 /// The install in `folder` (a `dota 2 beta` folder) when it holds Dota 2's package directory.
 fn install_at(folder: &Path) -> Option<Install> {
-    let game = folder.join("game/dota");
+    let game = folder.join("game").join("dota");
     is_package(&game.join(PACKAGE)).then(|| Install {
         folder: folder.to_path_buf(),
         game,
@@ -196,27 +245,51 @@ fn is_package(path: &Path) -> bool {
 
 /// The install in a folder the player picked: the `dota 2 beta` folder itself, its `game` or
 /// `game/dota` folder, the Steam library holding it, that library's `steamapps` or
-/// `steamapps/common`, or a Steam folder. None when none of these places holds Dota 2.
+/// `steamapps/common`, or a Steam folder. None when none of these places holds Dota 2. A
+/// relative folder is taken from the working folder, so that the places above it exist (and
+/// the folder shown to the player is a whole path).
 pub fn install_in(picked: &Path) -> Option<Install> {
-    let up = |path: &Path, levels: usize| -> Option<PathBuf> {
-        let mut path = path;
+    if picked.as_os_str().is_empty() {
+        return None;
+    }
+    let picked = without_parent_steps(&std::path::absolute(picked).ok()?);
+    let up = |levels: usize| -> Option<PathBuf> {
+        let mut path = picked.as_path();
         for _ in 0..levels {
             path = path.parent()?;
         }
         Some(path.to_path_buf())
     };
     let candidates = [
-        Some(picked.to_path_buf()),
-        up(picked, 1),
-        up(picked, 2),
+        Some(picked.clone()),
+        up(1),
+        up(2),
         Some(picked.join(DOTA_FOLDER)),
         Some(picked.join("common").join(DOTA_FOLDER)),
-        Some(picked.join("steamapps/common").join(DOTA_FOLDER)),
+        Some(picked.join("steamapps").join("common").join(DOTA_FOLDER)),
     ];
     candidates
         .into_iter()
         .flatten()
         .find_map(|folder| install_at(&folder))
+}
+
+/// `path` with each `..` step taken out together with the folder it leaves, which is what the
+/// step means when no link is in the way: the levels above a folder are then the folders the
+/// player sees in a file manager.
+fn without_parent_steps(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// The `game/dota` folder of a Dota 2 install: the one in `dota_path` when given (any usual level
@@ -418,6 +491,95 @@ mod tests {
         }
         vdf.push('}');
         assert_eq!(library_paths(vdf.as_bytes()).len(), MAX_LIBRARIES);
+    }
+
+    /// A library list with one block entry per `(key, path)`; a `None` path leaves `"path"` out.
+    fn list_of(entries: &[(&str, Option<&str>)]) -> String {
+        let mut vdf = String::from("\"libraryfolders\" {");
+        for (key, path) in entries {
+            match path {
+                Some(path) => vdf.push_str(&format!(" \"{key}\" {{ \"path\" \"{path}\" }}")),
+                None => vdf.push_str(&format!(" \"{key}\" {{ \"label\" \"x\" }}")),
+            }
+        }
+        vdf.push('}');
+        vdf
+    }
+
+    #[test]
+    fn a_library_list_entry_must_be_a_local_absolute_path() {
+        let vdf = list_of(&[
+            ("0", Some("games/steam")),
+            ("1", Some("../steam")),
+            ("2", Some("/games/../../steam")),
+            ("3", Some(r"\\server\\share\\steam")),
+            ("4", Some("//server/share/steam")),
+            ("5", Some(r"\\?\\UNC\\server\\share\\steam")),
+            ("6", Some(r"\\.\\C:\\steam")),
+            ("7", Some(r"C:steam")),
+            ("8", Some(r"\steam")),
+            ("9", Some(r"D:\\Games\\..\\steam")),
+            ("10", Some("/games/steam")),
+            ("11", Some(r"D:\\Games\\Steam")),
+            ("12", Some("D:/Games/Steam")),
+        ]);
+        assert_eq!(
+            library_paths(vdf.as_bytes()),
+            vec![
+                PathBuf::from("/games/steam"),
+                PathBuf::from(r"D:\Games\Steam"),
+                PathBuf::from("D:/Games/Steam"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_library_list_entry_without_a_path_or_with_an_empty_one_or_key_is_skipped() {
+        let mut vdf = list_of(&[
+            ("0", None),
+            ("1", Some("")),
+            ("", Some("/games/under/an/empty/key")),
+            ("x", Some("/games/under/a/word")),
+            ("2", Some("/games/steam")),
+        ]);
+        vdf.insert_str(vdf.len() - 1, r#" "3" "" "4" "/games/old/style""#);
+        assert_eq!(
+            library_paths(vdf.as_bytes()),
+            vec![
+                PathBuf::from("/games/steam"),
+                PathBuf::from("/games/old/style")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_registered_steam_folder_on_the_network_or_with_a_parent_step_is_no_root() {
+        let ok = PathBuf::from(if cfg!(windows) { r"C:\Steam" } else { "/steam" });
+        let bad = [
+            PathBuf::from("steam"),
+            PathBuf::from(if cfg!(windows) {
+                r"C:\a\..\Steam"
+            } else {
+                "/a/../steam"
+            }),
+            PathBuf::from(r"\\server\share\Steam"),
+            PathBuf::from(r"\\?\UNC\server\share\Steam"),
+        ];
+        let registered: Vec<PathBuf> = bad.iter().cloned().chain([ok.clone()]).collect();
+        assert_eq!(steam_roots(Os::Windows, None, &registered), vec![ok]);
+    }
+
+    #[test]
+    fn an_install_in_a_library_after_duplicate_steam_folders_is_still_found() {
+        let tree = Tree::new("duplicates");
+        let first = tree.0.join("first");
+        let second = tree.0.join("second");
+        let others: Vec<PathBuf> = (0..40).map(|n| tree.0.join(format!("other-{n}"))).collect();
+        let listed: Vec<&Path> = others.iter().map(PathBuf::as_path).collect();
+        tree.list(&first, &listed);
+        let dota = tree.dota(&second);
+        let roots = vec![first.clone(), first.clone(), second];
+        assert_eq!(folders(&find_installs(&roots)), vec![dota]);
     }
 
     #[test]
