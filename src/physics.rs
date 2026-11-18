@@ -2,23 +2,25 @@
 //! convex hulls (a trigger's volume), each naming what it collides as: its collision group and
 //! the layers it interacts as (`water`, `playerclip`, ...).
 //!
-//! Positions are in the model's frame, in world units (inches), as the block stores them. Every
-//! key below that the reader uses is required: a block without one is an error naming it. The
-//! one optional part is the spheres and capsules, which are counted, not read.
+//! Positions are in the model's frame, in the units the block stores them in (the map's own for a
+//! map's world). Every key the reader uses is required: a block without one is an error naming
+//! it, except that a hull's corners are `m_VertexPositions` or, in an older block, `m_Vertices`
+//! (see `hull_positions`). The one optional part is the spheres and capsules ([`OPTIONAL_SHAPES`]): absent, there
+//! are none; present, they are counted toward [`MAX_SHAPES`], not read.
 
 use crate::budget::Budget;
 use crate::error::{Result, malformed};
 use crate::kv3::Value;
 use crate::resource::Resource;
 
-/// Most vertices all shapes of one model may have together; the main Dota map's ground has some
-/// 140,000.
+/// Most vertices all shapes of one model may have together.
 pub const MAX_VERTICES: usize = 4 << 20;
-/// Most triangles all meshes of one model may have together; the main Dota map's ground has
-/// some 290,000.
+/// Most triangles all meshes of one model may have together.
 pub const MAX_TRIANGLES: usize = 8 << 20;
-/// Most meshes and hulls of one model together.
+/// Most shapes of one model together: meshes, hulls, spheres and capsules.
 pub const MAX_SHAPES: usize = 1 << 16;
+/// The shape lists a block may leave out, each read as empty when absent.
+pub const OPTIONAL_SHAPES: [&str; 2] = ["m_spheres", "m_capsules"];
 /// Most collision attributes of one model.
 pub const MAX_ATTRIBUTES: usize = 1024;
 /// Most layers one collision attribute interacts as.
@@ -109,12 +111,11 @@ impl Physics {
         let mut counts = Counts::default();
         for part in list(root, "m_parts", MAX_SHAPES)? {
             let shape = required(part, "m_rnShape")?;
-            for key in ["m_spheres", "m_capsules"] {
-                if let Some(value) = shape.get(key) {
-                    let items = value
-                        .as_array()
-                        .ok_or_else(|| malformed(WHAT, format!("{key} is not an array")))?;
-                    physics.unread = physics.unread.saturating_add(items.len());
+            for key in OPTIONAL_SHAPES {
+                if shape.get(key).is_some() {
+                    let unread = list(shape, key, MAX_SHAPES)?.len();
+                    counts.shapes(unread)?;
+                    physics.unread += unread;
                 }
             }
             let meshes = list(shape, "m_meshes", MAX_SHAPES)?;
@@ -138,7 +139,7 @@ impl Physics {
                 });
             }
             for hull in hulls {
-                let positions = required(required(hull, "m_Hull")?, "m_VertexPositions")?;
+                let positions = hull_positions(required(hull, "m_Hull")?)?;
                 physics.hulls.push(Hull {
                     attributes: attribute_index(hull, physics.attributes.len())?,
                     vertices: points(positions, &mut counts, budget)?,
@@ -217,6 +218,17 @@ fn attributes_of(attribute: &Value, budget: &mut Budget) -> Result<Attributes> {
     })
 }
 
+/// A hull's corner positions: `m_VertexPositions`, or in an older block, which lacks it,
+/// `m_Vertices` (a newer block keeps one byte a vertex there, its first edge).
+fn hull_positions(hull: &Value) -> Result<&Value> {
+    match hull.get("m_VertexPositions") {
+        Some(positions) => Ok(positions),
+        None => hull
+            .get("m_Vertices")
+            .ok_or_else(|| malformed(WHAT, "no m_VertexPositions or m_Vertices")),
+    }
+}
+
 fn attribute_index(shape: &Value, count: usize) -> Result<usize> {
     let index = required(shape, "m_nCollisionAttributeIndex")?
         .as_u64()
@@ -230,12 +242,20 @@ fn attribute_index(shape: &Value, count: usize) -> Result<usize> {
     }
 }
 
-/// The bytes of geometry: a blob, or an array of byte values (as the JSON-like form of a block
-/// stores them). Borrowed when a blob; an array's copy is charged first.
-fn geometry<'a>(value: &'a Value, budget: &mut Budget) -> Result<std::borrow::Cow<'a, [u8]>> {
+/// The bytes of geometry: a blob, or an array of byte values. Their count is checked by `check`
+/// before an array's bytes are copied (and charged); a blob is borrowed.
+fn geometry<'a>(
+    value: &'a Value,
+    check: impl FnOnce(usize) -> Result<()>,
+    budget: &mut Budget,
+) -> Result<std::borrow::Cow<'a, [u8]>> {
     match value {
-        Value::Blob(blob) => Ok(std::borrow::Cow::Borrowed(blob)),
+        Value::Blob(blob) => {
+            check(blob.len())?;
+            Ok(std::borrow::Cow::Borrowed(blob))
+        }
         Value::Array(items) => {
+            check(items.len())?;
             budget.bytes(items.len())?;
             items
                 .iter()
@@ -254,11 +274,24 @@ fn geometry<'a>(value: &'a Value, budget: &mut Budget) -> Result<std::borrow::Co
 /// Three little-endian floats each, counted against [`MAX_VERTICES`] and charged before they are
 /// made.
 fn points(value: &Value, counts: &mut Counts, budget: &mut Budget) -> Result<Vec<[f32; 3]>> {
-    let raw = geometry(value, budget)?;
-    if raw.len() % 12 != 0 {
-        return Err(malformed(WHAT, format!("{} bytes of vertices", raw.len())));
+    if let Some(vectors) = value.as_array().filter(|items| {
+        items
+            .first()
+            .is_some_and(|first| first.as_array().is_some())
+    }) {
+        return vectors_of(vectors, counts, budget);
     }
-    counts.vertices = add_within(counts.vertices, raw.len() / 12, MAX_VERTICES, "vertices")?;
+    let raw = geometry(
+        value,
+        |len| {
+            if len % 12 != 0 {
+                return Err(malformed(WHAT, format!("{len} bytes of vertices")));
+            }
+            counts.vertices = add_within(counts.vertices, len / 12, MAX_VERTICES, "vertices")?;
+            Ok(())
+        },
+        budget,
+    )?;
     budget.slots::<[f32; 3]>(raw.len() / 12)?;
     raw.as_chunks::<12>()
         .0
@@ -276,6 +309,28 @@ fn points(value: &Value, counts: &mut Counts, budget: &mut Budget) -> Result<Vec
         .collect()
 }
 
+/// Positions stored as an array of three-number arrays, as a block decoded from older
+/// (NTRO) data has them: counted and charged as [`points`] does.
+fn vectors_of(items: &[Value], counts: &mut Counts, budget: &mut Budget) -> Result<Vec<[f32; 3]>> {
+    counts.vertices = add_within(counts.vertices, items.len(), MAX_VERTICES, "vertices")?;
+    budget.slots::<[f32; 3]>(items.len())?;
+    items
+        .iter()
+        .map(|item| {
+            let point = match item.as_array() {
+                Some([x, y, z]) => [x, y, z].map(|v| v.as_f64().map(|v| v as f32)),
+                _ => return Err(malformed(WHAT, "a vertex that is not three numbers")),
+            };
+            match point {
+                [Some(x), Some(y), Some(z)] if [x, y, z].iter().all(|v| v.is_finite()) => {
+                    Ok([x, y, z])
+                }
+                _ => Err(malformed(WHAT, format!("a vertex at {point:?}"))),
+            }
+        })
+        .collect()
+}
+
 /// Three little-endian `u32` vertex indices each, every one below `count`, counted against
 /// [`MAX_TRIANGLES`] and charged before they are made.
 fn corners(
@@ -284,11 +339,17 @@ fn corners(
     counts: &mut Counts,
     budget: &mut Budget,
 ) -> Result<Vec<[u32; 3]>> {
-    let raw = geometry(value, budget)?;
-    if raw.len() % 12 != 0 {
-        return Err(malformed(WHAT, format!("{} bytes of triangles", raw.len())));
-    }
-    counts.triangles = add_within(counts.triangles, raw.len() / 12, MAX_TRIANGLES, "triangles")?;
+    let raw = geometry(
+        value,
+        |len| {
+            if len % 12 != 0 {
+                return Err(malformed(WHAT, format!("{len} bytes of triangles")));
+            }
+            counts.triangles = add_within(counts.triangles, len / 12, MAX_TRIANGLES, "triangles")?;
+            Ok(())
+        },
+        budget,
+    )?;
     budget.slots::<[u32; 3]>(raw.len() / 12)?;
     raw.as_chunks::<12>()
         .0
@@ -523,7 +584,10 @@ mod tests {
             ("m_nCollisionAttributeIndex", Value::UInt(0)),
             ("m_Hull", object(vec![])),
         ]);
-        refused(&physics(vec![], vec![bare_hull]), "no m_VertexPositions");
+        refused(
+            &physics(vec![], vec![bare_hull]),
+            "no m_VertexPositions or m_Vertices",
+        );
         let bare_attribute = object(vec![("m_InteractAsStrings", strings(&[]))]);
         let root = object(vec![
             ("m_collisionAttributes", Value::Array(vec![bare_attribute])),
@@ -609,5 +673,179 @@ mod tests {
         assert!(budget.spent() < 200_000, "{} bytes", budget.spent());
         let err = Physics::from_document_root(&root, &mut Budget::new(10_000)).unwrap_err();
         assert!(err.to_string().contains("more than it may"), "{err}");
+    }
+
+    #[test]
+    fn a_resource_without_a_collision_block_has_no_shapes() {
+        // A resource header (size, header version 12, version 0, block table 8 bytes on, no
+        // blocks) and nothing else.
+        let mut bytes = 16u32.to_le_bytes().to_vec();
+        bytes.extend(12u16.to_le_bytes());
+        bytes.extend(0u16.to_le_bytes());
+        bytes.extend(8u32.to_le_bytes());
+        bytes.extend(0u32.to_le_bytes());
+        let resource = Resource::parse(&bytes).unwrap();
+        let read = Physics::read(&resource, &mut Budget::default()).unwrap();
+        assert_eq!(read, Physics::default());
+    }
+
+    #[test]
+    fn an_older_hull_keeps_its_corners_in_its_vertices() {
+        let older = object(vec![
+            ("m_nCollisionAttributeIndex", Value::UInt(0)),
+            (
+                "m_Hull",
+                object(vec![("m_Vertices", floats(&[1.0, 2.0, 3.0]))]),
+            ),
+        ]);
+        let read = read(&physics(vec![], vec![older])).unwrap();
+        assert_eq!(read.hulls[0].vertices, [[1.0, 2.0, 3.0]]);
+        let newer = object(vec![
+            ("m_nCollisionAttributeIndex", Value::UInt(0)),
+            (
+                "m_Hull",
+                object(vec![
+                    ("m_Vertices", Value::Blob(vec![0])),
+                    ("m_VertexPositions", floats(&[4.0, 5.0, 6.0])),
+                ]),
+            ),
+        ]);
+        let read = super::tests::read(&physics(vec![], vec![newer])).unwrap();
+        assert_eq!(read.hulls[0].vertices, [[4.0, 5.0, 6.0]]);
+    }
+
+    #[test]
+    fn corners_stored_as_vectors_are_read_and_checked() {
+        let vector = |v: [f64; 3]| Value::Array(v.iter().map(|&c| Value::Float(c)).collect());
+        let corners = Value::Array(vec![vector([1.0, 2.0, 3.0]), vector([4.0, 5.0, 6.0])]);
+        let read = read(&physics(vec![], vec![hull(corners)])).unwrap();
+        assert_eq!(read.hulls[0].vertices, [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]);
+        let short = Value::Array(vec![Value::Array(vec![Value::Float(1.0)])]);
+        refused(
+            &physics(vec![], vec![hull(short)]),
+            "a vertex that is not three numbers",
+        );
+        let infinite = Value::Array(vec![vector([1.0, f64::INFINITY, 3.0])]);
+        refused(&physics(vec![], vec![hull(infinite)]), "a vertex at");
+    }
+
+    #[test]
+    fn the_keys_of_a_hull_and_of_an_attribute_are_required() {
+        let hull_without = |key: &str| without(&hull(floats(&[1.0; 3])), key);
+        refused(&physics(vec![], vec![hull_without("m_Hull")]), "no m_Hull");
+        refused(
+            &physics(vec![], vec![hull_without("m_nCollisionAttributeIndex")]),
+            "no m_nCollisionAttributeIndex",
+        );
+        let root = object(vec![
+            (
+                "m_collisionAttributes",
+                Value::Array(vec![without(
+                    &attributes("default", &[]),
+                    "m_InteractAsStrings",
+                )]),
+            ),
+            ("m_parts", Value::Array(vec![])),
+        ]);
+        refused(&root, "no m_InteractAsStrings");
+    }
+
+    #[test]
+    fn a_key_of_the_wrong_type_is_an_error_naming_it() {
+        let with = |value: &Value, key: &str, replacement: Value| {
+            let mut out = without(value, key);
+            let Value::Object(members) = &mut out else {
+                unreachable!()
+            };
+            members.push(key.to_owned(), replacement);
+            out
+        };
+        refused(
+            &with(&physics(vec![], vec![]), "m_parts", Value::Int(1)),
+            "m_parts is not an array",
+        );
+        let group = with(
+            &attributes("default", &[]),
+            "m_CollisionGroupString",
+            Value::Int(1),
+        );
+        let root = object(vec![
+            ("m_collisionAttributes", Value::Array(vec![group])),
+            ("m_parts", Value::Array(vec![])),
+        ]);
+        refused(&root, "m_CollisionGroupString is not a string");
+        let layer = with(
+            &attributes("default", &[]),
+            "m_InteractAsStrings",
+            Value::Array(vec![Value::Int(1)]),
+        );
+        let root = object(vec![
+            ("m_collisionAttributes", Value::Array(vec![layer])),
+            ("m_parts", Value::Array(vec![])),
+        ]);
+        refused(&root, "an interaction layer is not a string");
+        let index = with(
+            &hull(floats(&[1.0; 3])),
+            "m_nCollisionAttributeIndex",
+            Value::Int(-1),
+        );
+        refused(
+            &physics(vec![], vec![index]),
+            "m_nCollisionAttributeIndex is not an index",
+        );
+        let shape = object(vec![
+            ("m_meshes", Value::Array(vec![])),
+            ("m_hulls", Value::Array(vec![])),
+            ("m_spheres", Value::Int(3)),
+        ]);
+        refused(
+            &physics_of(vec![object(vec![("m_rnShape", shape)])]),
+            "m_spheres is not an array",
+        );
+    }
+
+    #[test]
+    fn spheres_and_capsules_count_toward_the_shape_limit_and_may_be_left_out() {
+        let shape = |spheres: usize| {
+            object(vec![
+                ("m_meshes", Value::Array(vec![])),
+                ("m_hulls", Value::Array(vec![Value::Null; MAX_SHAPES / 2])),
+                ("m_capsules", Value::Array(vec![Value::Null; spheres])),
+            ])
+        };
+        refused(
+            &physics_of(vec![object(vec![("m_rnShape", shape(MAX_SHAPES / 2 + 1))])]),
+            "more than 65536 shapes",
+        );
+        let bare = object(vec![
+            ("m_meshes", Value::Array(vec![])),
+            ("m_hulls", Value::Array(vec![])),
+        ]);
+        let read = read(&physics_of(vec![object(vec![("m_rnShape", bare)])])).unwrap();
+        assert_eq!(read.unread, 0);
+    }
+
+    #[test]
+    fn parts_beyond_the_limit_are_refused() {
+        let parts = vec![Value::Null; MAX_SHAPES + 1];
+        refused(&physics_of(parts), "65537 m_parts, more than 65536");
+    }
+
+    #[test]
+    fn every_shape_and_its_geometry_is_charged_to_the_budget() {
+        let charged = |root: &Value| {
+            let mut budget = Budget::default();
+            Physics::from_document_root(root, &mut budget).unwrap();
+            budget.spent()
+        };
+        let none = charged(&physics(vec![], vec![]));
+        let one = charged(&physics(vec![], vec![hull(floats(&[1.0; 3]))]));
+        let two = charged(&physics(vec![], vec![hull(floats(&[1.0; 3])); 2]));
+        let size = size_of::<Hull>() + size_of::<[f32; 3]>();
+        assert_eq!(one - none, size);
+        assert_eq!(two - one, size);
+        let corner = Value::Array(vec![Value::UInt(0); 12]);
+        let as_bytes = charged(&physics(vec![], vec![hull(corner)]));
+        assert_eq!(as_bytes - one, 12, "the copied bytes are charged too");
     }
 }

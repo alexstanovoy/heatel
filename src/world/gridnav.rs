@@ -58,13 +58,11 @@ impl GridNav {
         let mut float = || -> Result<f32> { c.array().map(f32::from_le_bytes) };
         let edge = float()?;
         let center = [float()?, float()?];
-        if !(edge.is_finite() && edge > 0.0 && edge <= MAX_EDGE)
-            || !center.iter().all(|v| v.is_finite())
-        {
-            return Err(malformed(
-                "gnv",
-                format!("cell edge {edge}, centre {center:?}"),
-            ));
+        if !(edge.is_finite() && edge > 0.0 && edge <= MAX_EDGE) {
+            return Err(malformed("gnv", format!("cell edge {edge}")));
+        }
+        if !center.iter().all(|v| v.is_finite()) {
+            return Err(malformed("gnv", format!("cell centre {center:?}")));
         }
         let (width, height) = (c.u32()?, c.u32()?);
         if width == 0 || height == 0 || width > MAX_SIDE || height > MAX_SIDE {
@@ -182,11 +180,18 @@ mod tests {
     fn a_cell_edge_or_centre_that_is_not_a_finite_size_is_an_error() {
         for edge in [0.0, -64.0, f32::NAN, f32::INFINITY, MAX_EDGE * 2.0] {
             let err = GridNav::read(&grid_with(edge, [32.0, 32.0], 1, 1, &[1])).unwrap_err();
-            assert!(err.to_string().contains("cell edge"), "{edge}: {err}");
+            assert!(
+                err.to_string().ends_with(&format!("cell edge {edge}")),
+                "{edge}: {err}"
+            );
         }
         for centre in [f32::NAN, f32::NEG_INFINITY] {
             let err = GridNav::read(&grid_with(64.0, [32.0, centre], 1, 1, &[1])).unwrap_err();
-            assert!(err.to_string().contains("centre"), "{centre}: {err}");
+            assert!(
+                err.to_string()
+                    .ends_with(&format!("cell centre [32.0, {centre:?}]")),
+                "{centre}: {err}"
+            );
         }
         assert!(GridNav::read(&grid_with(MAX_EDGE, [32.0, 32.0], 1, 1, &[1])).is_ok());
     }
