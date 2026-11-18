@@ -9,16 +9,14 @@ needs.
 read; mostly they are an [`Error`] that names what was met, see [Limits](#limits). A few
 helpers read Dota 2's own scripts and maps and mean nothing elsewhere, see [Dota 2 data](#dota-2-data).
 
-**State:** crates.io has version 0.1. This repository's main branch is the unreleased 0.2.0
-([changelog](https://github.com/alexstanovoy/heatel/blob/main/CHANGELOG.md)); what only it has is marked "on main, not
-yet released" below. The API may still change before 1.0. It needs Rust 1.88 or newer
-([details](#minimum-rust-version)).
+**State:** version 0.2 on crates.io ([changelog](https://github.com/alexstanovoy/heatel/blob/main/CHANGELOG.md)); the
+API may still change before 1.0. It needs Rust 1.88 or newer ([details](#minimum-rust-version)).
 
 ## Quick start
 
 ```toml
 [dependencies]
-heatel = "0.1"
+heatel = "0.2"
 ```
 
 Open a Dota 2 install (its `game/dota` folder) and read from its main package. `find_game_dir(None)` looks in the
@@ -140,7 +138,7 @@ table for is taken as one input named after the parameter; an animation channel 
 
 It reads and converts, never writes Valve's formats. Materials are mapped by a table of each shader's texture parameters
 rather than by running Valve's compiled shaders, so base colour and normals are right and the other channels are
-approximate. Particle systems are read as definitions; simulating and drawing them is up to you. On main, not yet released: particle snapshots read position/normal streams and root-bone skinning; other streams or skinning bindings stay named `Unsupported`. Snapshots are capped at 5000 points, eight streams, 128 strings of 256 bytes, 64 KiB metadata and 1 MiB unpacked data. Spatial float noise (on main, not yet released) supports Perlin with no turbulence/modifier and one to eight octaves; other modes remain `Unsupported`.
+approximate. Particle systems are read as definitions; simulating and drawing them is up to you. Particle snapshots read position/normal streams and root-bone skinning; other streams or skinning bindings stay named `Unsupported`. Snapshots are capped at 5000 points, eight streams, 128 strings of 256 bytes, 64 KiB metadata and 1 MiB unpacked data. Spatial float noise supports Perlin with no turbulence/modifier and one to eight octaves; other modes remain `Unsupported`.
 
 ## Features
 
