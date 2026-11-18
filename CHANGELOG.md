@@ -16,8 +16,9 @@ All notable changes to this crate are documented here. The format follows
 
 ### Added
 
-- `physics::Physics`: a model's collision shapes (`PHYS`), its triangle meshes and convex hulls with
-  their collision groups and interaction layers (a map's ground, its water, a trigger's volume).
+- `physics::Physics`: a model's collision shapes (`PHYS`), its triangle meshes and convex hulls, each
+  naming its collision group and interaction layers (a map's ground, its water, a trigger's volume);
+  read within a `Budget`, every key it uses required, its limits public (`MAX_SHAPES`, ...).
 - `world::GridNav`: a Dota 2 map's navigation grid (`maps/<map>.gnv`), each cell's flags and whether it
   is walkable.
 - Typed control-point remapping, root-skinned particle snapshots (`vsnap` DATA/SNAP),

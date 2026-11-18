@@ -2,7 +2,7 @@
 
 use heatel::physics::Physics;
 use heatel::world::GridNav;
-use heatel::{DirSource, Resource, Vpk, find_game_dir};
+use heatel::{Budget, DirSource, Resource, Vpk, find_game_dir};
 
 fn map_package() -> (DirSource, Vpk) {
     let dota = std::env::var_os("HEATEL_DOTA_PATH").map(std::path::PathBuf::from);
@@ -17,9 +17,12 @@ fn map_package() -> (DirSource, Vpk) {
 fn the_maps_grid_covers_the_playable_square_in_64_unit_cells() {
     let (source, package) = map_package();
     let nav = GridNav::read(&package.read_file(&source, "maps/dota.gnv").unwrap()).unwrap();
+    // The values the 7.41 and 7.42 maps' grids hold: 64-unit cells (Dota's `@gridnav(64, ...)`),
+    // centred, over a rectangle reaching past the playable square of +-9216 on every side.
     assert_eq!(nav.edge, 64.0);
-    assert!(nav.min[0] <= -144 && nav.min[1] <= -144);
-    assert!(nav.min[0] + nav.width as i32 >= 144 && nav.min[1] + nav.height as i32 >= 144);
+    assert_eq!(nav.center, [32.0, 32.0]);
+    assert_eq!((nav.width, nav.height), (320, 328));
+    assert_eq!(nav.min, [-160, -168]);
     // The river at the map's centre and the ground where Radiant heroes appear are walkable; the
     // map's corner beyond its edge is not.
     assert!(nav.walkable(0, 0));
@@ -37,18 +40,18 @@ fn the_maps_ground_and_water_are_collision_meshes() {
     let bytes = package
         .read_file(&source, "maps/dota/world_physics.vmdl_c")
         .unwrap();
-    let physics = Physics::read(&Resource::parse(&bytes).unwrap()).unwrap();
+    let physics = Physics::read(&Resource::parse(&bytes).unwrap(), &mut Budget::default()).unwrap();
     let ground: Vec<_> = physics
         .meshes
         .iter()
-        .filter(|m| m.attributes.group == "default")
+        .filter(|m| physics.attributes[m.attributes].group == "default")
         .collect();
     assert_eq!(ground.len(), 1);
     assert!(ground[0].triangles.len() > 100_000);
-    assert!(
-        physics
-            .meshes
+    assert!(physics.meshes.iter().any(|m| {
+        physics.attributes[m.attributes]
+            .interacts_as
             .iter()
-            .any(|m| m.attributes.interacts_as.iter().any(|a| a == "water"))
-    );
+            .any(|a| a == "water")
+    }));
 }
