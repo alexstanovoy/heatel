@@ -29,8 +29,10 @@ All notable changes to this crate are documented here. The format follows
   relative, has a `..` step or a control character, or is a network path (`\\server\share`, `/\server\share`,
   `\\?\UNC`, device paths) is not looked at, and a folder given relative to the working folder is made a
   whole path first. The rule has two named steps: well formed as a local absolute path in either system's
-  syntax (text only, the same on every host: the security rule, which `library_paths` applies), then usable on
-  this host (`Path::is_absolute`: what `libraries` and `steam_roots` add before anything is opened).
+  syntax (text only, the same on every host: the security rule, which `library_paths` applies; a path that is not
+  valid UTF-8 is judged by its lossy text, and a step of only dots and spaces, which Windows strips, is refused
+  like `..`), then usable on this host (a full path with no `..` step as this host reads it, and on Windows a
+  drive prefix: what `libraries` and `steam_roots` add before anything is opened).
 - Typed control-point remapping, root-skinned particle snapshots (`vsnap` DATA/SNAP),
   snapshot placement initializers and bounded Perlin particle float inputs.
 - `particle::Look::depth_bias` (`m_flDepthBias`), a new public field: a complete `Look` literal needs it.

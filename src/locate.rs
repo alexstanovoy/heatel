@@ -92,12 +92,14 @@ pub fn steam_roots(os: Os, home: Option<&Path>, registered: &[PathBuf]) -> Vec<P
 /// that comes from a file or the registry goes through this before it reaches the filesystem.
 ///
 /// 1. [`is_well_formed_local_text`]: the path as text, in either system's syntax (the security
-///    rule, the same on every host). A path that is not UTF-8 cannot be judged as text; it is
-///    a Unix name and goes on to the second step alone.
+///    rule, the same on every host). A path that is not valid UTF-8 (a legal Unix name) is
+///    judged by its lossy text: a replacement character is an ordinary character for the rule,
+///    and the bytes of a non-ASCII character can never spell a separator, a dot or a space, so
+///    the verdict is the one the bytes would get.
 /// 2. [`is_usable_here`]: what this host takes for a full local path (a plain usability filter,
 ///    which on Windows also reads the prefix as the system will).
 fn is_local_absolute(path: &Path) -> bool {
-    path.to_str().is_none_or(is_well_formed_local_text) && is_usable_here(path)
+    is_well_formed_local_text(&path.to_string_lossy()) && is_usable_here(path)
 }
 
 /// Step two of [`is_local_absolute`]: `path` is a full path with no `..` step as this host reads
@@ -116,7 +118,10 @@ fn is_usable_here(path: &Path) -> bool {
 /// Step one of [`is_local_absolute`], the security rule, made on the text alone so that it gives
 /// the same answer on every system: a Unix path from `/` or a Windows one from a drive letter
 /// and a separator, with no `..` step and no control character (no install has one, and the path
-/// goes into a log line). A second separator of either kind after a leading `/` is refused:
+/// goes into a log line). Windows strips the trailing dots and spaces of a path step, so a step
+/// made only of dots and spaces (`.`, `...`, `.. `, `. .`) may name the folder or its parent and
+/// is refused as `..` is; a name that merely contains dots or inner spaces (`.steam`, `..foo`,
+/// `v1.2`, `Steam Library`) is not. A second separator of either kind after a leading `/` is refused:
 /// Windows reads a leading `/` as `\`, so `//server/share` and `/\server\share` are network
 /// paths and `/\.\C:` a device path.
 fn is_well_formed_local_text(text: &str) -> bool {
@@ -129,7 +134,9 @@ fn is_well_formed_local_text(text: &str) -> bool {
     };
     rooted
         && !text.chars().any(char::is_control)
-        && !text.split(['/', '\\']).any(|step| step == "..")
+        && !text
+            .split(['/', '\\'])
+            .any(|step| !step.is_empty() && step.trim_end_matches(['.', ' ']).is_empty())
 }
 
 /// The library folders a `libraryfolders.vdf` lists, in its order: Steam's current format
@@ -553,6 +560,17 @@ mod tests {
             ("16", Some("/games/ste\u{7}am")),
             ("17", Some("/games/ste\u{1b}[2Jam")),
             ("18", Some("D:\\Games\\Ste\u{1}am")),
+            // A step of dots and spaces only: Windows strips them, so it may be `..`.
+            ("19", Some(r"C:\\Games\\.. \\steam")),
+            ("20", Some(r"C:\\Games\\. .\\steam")),
+            ("21", Some(r"C:\\Games\\...\\steam")),
+            ("22", Some("/games/.. /steam")),
+            ("23", Some("/games/ ../steam")),
+            ("24", Some("/games/./steam")),
+            // Names that merely contain dots or inner spaces are ordinary.
+            ("25", Some("/games/.steam")),
+            ("26", Some("/games/..foo/Steam Library/v1.2")),
+            ("27", Some(r"D:\\Games\\.steam\\Steam Library")),
         ]);
         assert_eq!(
             library_paths(vdf.as_bytes()),
@@ -560,6 +578,9 @@ mod tests {
                 PathBuf::from("/games/steam"),
                 PathBuf::from(r"D:\Games\Steam"),
                 PathBuf::from("D:/Games/Steam"),
+                PathBuf::from("/games/.steam"),
+                PathBuf::from("/games/..foo/Steam Library/v1.2"),
+                PathBuf::from(r"D:\Games\.steam\Steam Library"),
             ]
         );
     }
@@ -586,12 +607,31 @@ mod tests {
     /// The rule judges every path before it reaches the filesystem, not only those of a library
     /// list: a registered Steam folder is held to the text rule too.
     #[test]
-    fn a_registered_steam_folder_with_a_mixed_separator_network_form_is_no_root() {
+    fn a_registered_steam_folder_with_a_mixed_separator_network_form_or_a_control_character_is_no_root()
+     {
         let bad = [
             PathBuf::from(r"/\server\share\Steam"),
             PathBuf::from("/steam/ste\u{7}am"),
         ];
         assert_eq!(steam_roots(Os::Linux, None, &bad), Vec::<PathBuf>::new());
+    }
+
+    /// A library folder that is not valid UTF-8 is legal on Linux and judged by its lossy text
+    /// (the bytes of a non-ASCII character never spell a separator or a dot): an ordinary one
+    /// stays, one that would be refused as text is refused all the same.
+    #[cfg(unix)]
+    #[test]
+    fn a_registered_steam_folder_that_is_not_utf8_is_judged_by_its_lossy_text() {
+        use std::os::unix::ffi::OsStrExt;
+        let named = |bytes: &[u8]| PathBuf::from(std::ffi::OsStr::from_bytes(bytes));
+        let ordinary = named(b"/home/\xff/Steam");
+        let roots = [
+            ordinary.clone(),
+            named(b"/home/\xff/../Steam"),
+            named(b"/home/\xff/.. /Steam"),
+            named(b"/\\\xff\\share"),
+        ];
+        assert_eq!(steam_roots(Os::Linux, None, &roots), vec![ordinary]);
     }
 
     #[test]
