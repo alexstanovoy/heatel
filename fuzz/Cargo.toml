@@ -134,6 +134,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "map"
+path = "fuzz_targets/map.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "world"
 path = "fuzz_targets/world.rs"
 test = false

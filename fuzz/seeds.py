@@ -283,7 +283,13 @@ def worlds(game, pak):
                 data = package.read(path)
                 if data is not None:
                     write("entities", rel.replace("/", "_") + "-" + os.path.basename(path), data)
-        world = next((p for p in package.files if p.endswith("world.vwrld_c")), None)
+            # Navigation grids and the small collision models of map triggers.
+            small_phys = path.endswith(".vmdl_c") and "/entities/" in path and package.size(path) <= 64 << 10
+            if path.endswith(".gnv") or small_phys:
+                data = package.read(path)
+                if data is not None:
+                    write("map", rel.replace("/", "_") + "-" + os.path.basename(path), data)
+        world =next((p for p in package.files if p.endswith("world.vwrld_c")), None)
         if world is None or worlds_written >= 8:
             continue
         files = [(world, package.read(world))]

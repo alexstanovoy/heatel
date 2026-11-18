@@ -89,6 +89,7 @@ cargo run --release --example model_to_gltf -- "<...>/dota 2 beta/game/dota" \
 | a model's sequences | [`read_sequences`]: activities, frames, events | |
 | `vpcf_c` particle systems | [`System`]: emitters, initializers, operators, forces, renderers, children | JSON (feature `serde`) |
 | `vwrld_c` worlds, `vents_c` entity lumps | [`EntityLump`], [`placements`] | `.gltf` + `.bin` |
+| a model's `PHYS` collision shapes | [`Physics`]: triangle meshes and convex hulls with their collision groups | |
 | `vsndevts_c` sound events, `vrr_c` response rules | [`read_sound_events`], [`read_response_rules`] | |
 
 ## Dota 2 data
@@ -104,6 +105,7 @@ These know Dota 2's file names, scripts or entity classes, so they are of no use
 | `items_game.txt` | [`items_game::read_hero_items`]: the cosmetics a hero wears |
 | `soundmixers.txt` | [`sound::read_sound_mixer`] |
 | the map's `ent_dota_lightinfo` entities | [`world::lighting`] |
+| a map's navigation grid (`maps/<map>.gnv`) | [`world::GridNav`]: each cell's flags, walkability among them |
 | the map's mid-lane diagonal | [`world::Band`] cuts a world to a band along it |
 | `AE_DOTA_PLAY_SOUND_ATTACK` animation events | [`anim::EventData::AttackSound`] |
 
@@ -203,6 +205,7 @@ MIT, see the `LICENSE` file. Material derived from other projects is listed in `
 [`System`]: https://docs.rs/heatel/latest/heatel/particle/struct.System.html
 [`EntityLump`]: https://docs.rs/heatel/latest/heatel/world/struct.EntityLump.html
 [`placements`]: https://docs.rs/heatel/latest/heatel/world/fn.placements.html
+[`Physics`]: https://docs.rs/heatel/latest/heatel/physics/struct.Physics.html
 [`read_sound_events`]: https://docs.rs/heatel/latest/heatel/sound/fn.read_sound_events.html
 [`read_response_rules`]: https://docs.rs/heatel/latest/heatel/talker/fn.read_response_rules.html
 [`find_game_dir`]: https://docs.rs/heatel/latest/heatel/fn.find_game_dir.html
@@ -214,6 +217,7 @@ MIT, see the `LICENSE` file. Material derived from other projects is listed in `
 [`sound::read_sound_mixer`]: https://docs.rs/heatel/latest/heatel/sound/fn.read_sound_mixer.html
 [`world::lighting`]: https://docs.rs/heatel/latest/heatel/world/fn.lighting.html
 [`world::Band`]: https://docs.rs/heatel/latest/heatel/world/struct.Band.html
+[`world::GridNav`]: https://docs.rs/heatel/latest/heatel/world/struct.GridNav.html
 [`anim::EventData::AttackSound`]: https://docs.rs/heatel/latest/heatel/anim/enum.EventData.html#variant.AttackSound
 [`Source`]: https://docs.rs/heatel/latest/heatel/source/trait.Source.html
 [`Slice`]: https://docs.rs/heatel/latest/heatel/source/trait.Slice.html

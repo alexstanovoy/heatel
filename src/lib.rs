@@ -20,6 +20,7 @@
 [`read_sequences`]: anim::read_sequences
 [`System`]: particle::System
 [`EntityLump`]: world::EntityLump
+[`Physics`]: physics::Physics
 [`placements`]: world::placements
 [`read_sound_events`]: sound::read_sound_events
 [`read_response_rules`]: talker::read_response_rules
@@ -32,6 +33,7 @@
 [`sound::read_sound_mixer`]: sound::read_sound_mixer
 [`world::lighting`]: world::lighting
 [`world::Band`]: world::Band
+[`world::GridNav`]: world::GridNav
 [`anim::EventData::AttackSound`]: anim::EventData::AttackSound
 [`Source`]: Source
 [`Slice`]: Slice
@@ -71,6 +73,8 @@ mod ntro;
 /// Particle systems (`vpcf_c`): typed definitions of their emitters, initializers, operators,
 /// forces, renderers and children.
 pub mod particle;
+/// A model's collision shapes (`PHYS`): triangle meshes and convex hulls with their collision groups.
+pub mod physics;
 pub mod portraits;
 /// Compiled Source 2 resources: the block container every `*_c` file is.
 pub mod resource;

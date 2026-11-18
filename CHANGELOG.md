@@ -16,6 +16,10 @@ All notable changes to this crate are documented here. The format follows
 
 ### Added
 
+- `physics::Physics`: a model's collision shapes (`PHYS`), its triangle meshes and convex hulls with
+  their collision groups and interaction layers (a map's ground, its water, a trigger's volume).
+- `world::GridNav`: a Dota 2 map's navigation grid (`maps/<map>.gnv`), each cell's flags and whether it
+  is walkable.
 - Typed control-point remapping, root-skinned particle snapshots (`vsnap` DATA/SNAP),
   snapshot placement initializers and bounded Perlin particle float inputs.
 - `particle::Look::depth_bias` (`m_flDepthBias`), a new public field: a complete `Look` literal needs it.
