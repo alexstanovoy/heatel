@@ -7,7 +7,10 @@ use heatel::{DirSource, Resource, Vpk, find_game_dir};
 #[test]
 #[ignore = "needs a local Dota 2 install"]
 fn in_place_runs_preserve_every_authored_root_axis_and_rotation_over_the_whole_loop() {
-    let source = DirSource::new(find_game_dir(None).expect("local install"));
+    let dota = std::env::var_os("HEATEL_DOTA_PATH").map(std::path::PathBuf::from);
+    let source = DirSource::new(
+        find_game_dir(dota.as_deref()).expect("Dota 2 not found; set HEATEL_DOTA_PATH"),
+    );
     let pak = Vpk::open(&source, "pak01_dir.vpk").expect("VPK");
     let mut cases: Vec<_> = [
         ("n_creep_ogre_lrg", "run"),
