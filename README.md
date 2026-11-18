@@ -106,7 +106,7 @@ the command line: `vpk_list`, `vpk_extract`, `model_to_gltf`, `texture_convert` 
 git clone https://github.com/alexstanovoy/heatel
 cd heatel
 cargo run --release --example model_to_gltf -- "<...>/dota 2 beta/game/dota" \
-    models/heroes/pudge/pudge.vmdl_c out/ idle
+    models/heroes/pudge/pudge.vmdl_c out/ pudge_walkN_anim
 ```
 
 ## In a browser
