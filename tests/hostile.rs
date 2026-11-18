@@ -1,5 +1,5 @@
 //! Files built here that once crashed or blew up a converter, found by the fuzz
-//! targets (`fuzz/`) or in their review: models whose draw calls or attributes run past their
+//! targets (`fuzz/`) or by reading the code: models whose draw calls or attributes run past their
 //! buffers or copy one large buffer many times, the glTF writer given what glTF cannot say,
 //! materials of more parameters than any, a world that lists its files again and again,
 //! tooltip scripts that took quadratic time, and portrait framings of hostile numbers, tints and
@@ -1241,7 +1241,7 @@ fn a_dangling_keyvalues_key_is_charged_as_it_is_copied() {
     assert!(error.to_string().contains("more than it may"), "{error}");
 }
 
-/// A portrait entry the reviews found taken or the whole file refused for: a tint of 2 (Dota's
+/// A portrait entry that reading the code found taken or the whole file refused for: a tint of 2 (Dota's
 /// own, which the fuzz target once held to 1), a far plane at the near floor, an entry that is no
 /// KeyValues among good ones, an error repeating megabytes of the file, more entries than any
 /// file has. Each framing read holds every number within its bounds; refusals are short.
