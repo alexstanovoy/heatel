@@ -5,7 +5,7 @@
 //! Positions are in the model's frame, in the units the block stores them in (the map's own for a
 //! map's world). Every key the reader uses is required: a block without one is an error naming
 //! it, except that a hull's corners are `m_VertexPositions` or, in an older block, `m_Vertices`
-//! (see `hull_positions`). The one optional part is the spheres and capsules ([`OPTIONAL_SHAPES`]): absent, there
+//! (see [`CornerStore`]). The one optional part is the spheres and capsules ([`OPTIONAL_SHAPES`]): absent, there
 //! are none; present, they are counted toward [`MAX_SHAPES`], not read.
 
 use crate::budget::Budget;
@@ -57,8 +57,27 @@ pub struct Mesh {
 pub struct Hull {
     /// What it collides as: an index into [`Physics::attributes`].
     pub attributes: usize,
-    /// Its corners, finite.
+    /// Its corners, finite, as many as its edges and faces make (Euler's `V - E + F = 2`), each
+    /// within the hull's stated bounds.
     pub vertices: Vec<[f32; 3]>,
+    /// Where the block kept the corners.
+    pub stored: CornerStore,
+}
+
+/// Where a hull's corners were kept. Which one a block uses is told by its data: a hull of `V`
+/// corners (Euler's formula over its half-edges and faces) keeps them in `m_VertexPositions` when
+/// it has that key, and then `m_Vertices` holds one byte a vertex; an older hull without it keeps
+/// them in `m_Vertices` itself, `12 V` bytes, or, decoded from older data, `V` three-number
+/// arrays. `m_Vertices` of any other size, `V` bytes among them, is refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CornerStore {
+    /// `m_VertexPositions`, three floats a corner.
+    Positions,
+    /// `m_Vertices` of an older block, three floats a corner.
+    Vertices,
+    /// `m_Vertices` decoded from older data, three numbers an array a corner.
+    VertexVectors,
 }
 
 /// A model's collision shapes.
@@ -139,10 +158,13 @@ impl Physics {
                 });
             }
             for hull in hulls {
-                let positions = hull_positions(required(hull, "m_Hull")?)?;
+                let attributes = attribute_index(hull, physics.attributes.len())?;
+                let (vertices, stored) =
+                    hull_corners(required(hull, "m_Hull")?, &mut counts, budget)?;
                 physics.hulls.push(Hull {
-                    attributes: attribute_index(hull, physics.attributes.len())?,
-                    vertices: points(positions, &mut counts, budget)?,
+                    attributes,
+                    vertices,
+                    stored,
                 });
             }
         }
@@ -218,14 +240,109 @@ fn attributes_of(attribute: &Value, budget: &mut Budget) -> Result<Attributes> {
     })
 }
 
-/// A hull's corner positions: `m_VertexPositions`, or in an older block, which lacks it,
-/// `m_Vertices` (a newer block keeps one byte a vertex there, its first edge).
-fn hull_positions(hull: &Value) -> Result<&Value> {
-    match hull.get("m_VertexPositions") {
-        Some(positions) => Ok(positions),
-        None => hull
-            .get("m_Vertices")
-            .ok_or_else(|| malformed(WHAT, "no m_VertexPositions or m_Vertices")),
+/// A hull's corners and where they were kept ([`CornerStore`]), checked against its edges and
+/// faces (their count) and its bounds (each corner within them).
+fn hull_corners(
+    hull: &Value,
+    counts: &mut Counts,
+    budget: &mut Budget,
+) -> Result<(Vec<[f32; 3]>, CornerStore)> {
+    let half_edges = elements(required(hull, "m_Edges")?, 4, "m_Edges")?;
+    let faces = elements(required(hull, "m_Faces")?, 1, "m_Faces")?;
+    let corners = match half_edges % 2 {
+        0 => (half_edges / 2 + 2).checked_sub(faces),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        malformed(
+            WHAT,
+            format!("a hull of {half_edges} half-edges and {faces} faces"),
+        )
+    })?;
+    let (read, stored) = match hull.get("m_VertexPositions") {
+        Some(positions) => (points(positions, counts, budget)?, CornerStore::Positions),
+        None => {
+            let vertices = required(hull, "m_Vertices")?;
+            let as_vectors = vertices.as_array().is_some_and(|items| {
+                items
+                    .first()
+                    .is_some_and(|first| first.as_array().is_some())
+            });
+            let stored = if as_vectors {
+                CornerStore::VertexVectors
+            } else {
+                let bytes = elements(vertices, 1, "m_Vertices")?;
+                if bytes != corners * 12 {
+                    return Err(malformed(
+                        WHAT,
+                        format!(
+                            "a hull of {corners} corners keeps {bytes} bytes of m_Vertices and no \
+                             m_VertexPositions"
+                        ),
+                    ));
+                }
+                CornerStore::Vertices
+            };
+            (points(vertices, counts, budget)?, stored)
+        }
+    };
+    if read.len() != corners {
+        return Err(malformed(
+            WHAT,
+            format!("a hull of {corners} corners has {} positions", read.len()),
+        ));
+    }
+    let bounds = required(hull, "m_Bounds")?;
+    let [low, high] = ["m_vMinBounds", "m_vMaxBounds"].map(|key| {
+        let numbers: Vec<f64> = required(bounds, key)?
+            .as_array()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(Value::as_f64)
+            .collect();
+        match numbers[..] {
+            [x, y, z] if [x, y, z].iter().all(|v| v.is_finite()) => Ok([x, y, z]),
+            _ => Err(malformed(WHAT, format!("{key} is not three numbers"))),
+        }
+    });
+    let (low, high) = (low?, high?);
+    for corner in &read {
+        let inside = (0..3).all(|axis| {
+            let slack = 1e-3 * (high[axis] - low[axis]).abs().max(1.0);
+            let at = f64::from(corner[axis]);
+            low[axis] - slack <= at && at <= high[axis] + slack
+        });
+        if !inside {
+            return Err(malformed(
+                WHAT,
+                format!("a hull's corner {corner:?} outside its bounds {low:?}..{high:?}"),
+            ));
+        }
+    }
+    Ok((read, stored))
+}
+
+/// How many elements of `stride` bytes a list holds: a blob's or a byte array's bytes over the
+/// stride, or the items of an array of structs (as data decoded from older blocks has them).
+fn elements(value: &Value, stride: usize, key: &str) -> Result<usize> {
+    let bytes = match value {
+        Value::Blob(blob) => blob.len(),
+        Value::Array(items)
+            if items.iter().all(|i| i.as_object().is_some()) && !items.is_empty() =>
+        {
+            return Ok(items.len());
+        }
+        Value::Array(items) => items.len(),
+        _ => {
+            return Err(malformed(
+                WHAT,
+                format!("{key} is neither a list nor bytes"),
+            ));
+        }
+    };
+    match bytes % stride {
+        0 => Ok(bytes / stride),
+        _ => Err(malformed(WHAT, format!("{bytes} bytes of {key}"))),
     }
 }
 
@@ -445,11 +562,50 @@ mod tests {
         mesh_of(attribute, corners, words(triangles))
     }
 
-    fn hull(positions: Value) -> Value {
+    /// A hull's own block: `corners` corners by its edges and faces (one face, so `2 (corners -
+    /// 1)` half-edges), wide bounds, and `stores` (key and value) holding them.
+    fn hull_body(corners: usize, stores: Vec<(&str, Value)>) -> Value {
+        let vector = |v: f64| Value::Array(vec![Value::Float(v); 3]);
+        let mut members = vec![
+            (
+                "m_Edges",
+                Value::Blob(vec![0; 8 * corners.saturating_sub(1)]),
+            ),
+            ("m_Faces", Value::Blob(vec![0])),
+            (
+                "m_Bounds",
+                object(vec![
+                    ("m_vMinBounds", vector(-1e6)),
+                    ("m_vMaxBounds", vector(1e6)),
+                ]),
+            ),
+        ];
+        members.extend(stores);
+        object(members)
+    }
+
+    /// A hull of the given corner store, its corner count read off the store.
+    fn hull_with(stores: Vec<(&str, Value)>) -> Value {
+        let corners = match &stores.last().expect("a store").1 {
+            Value::Blob(bytes) => bytes.len() / 12,
+            Value::Array(items) if items.first().is_some_and(|i| i.as_array().is_some()) => {
+                items.len()
+            }
+            Value::Array(items) => items.len() / 12,
+            _ => 1,
+        };
         object(vec![
             ("m_nCollisionAttributeIndex", Value::UInt(0)),
-            ("m_Hull", object(vec![("m_VertexPositions", positions)])),
+            ("m_Hull", hull_body(corners.max(1), stores)),
         ])
+    }
+
+    fn hull(positions: Value) -> Value {
+        hull_with(vec![("m_VertexPositions", positions)])
+    }
+
+    fn vector(v: [f64; 3]) -> Value {
+        Value::Array(v.iter().map(|&c| Value::Float(c)).collect())
     }
 
     fn read(root: &Value) -> Result<Physics> {
@@ -582,12 +738,17 @@ mod tests {
         }
         let bare_hull = object(vec![
             ("m_nCollisionAttributeIndex", Value::UInt(0)),
-            ("m_Hull", object(vec![])),
+            ("m_Hull", hull_body(1, vec![])),
         ]);
-        refused(
-            &physics(vec![], vec![bare_hull]),
-            "no m_VertexPositions or m_Vertices",
-        );
+        refused(&physics(vec![], vec![bare_hull]), "no m_Vertices");
+        let body = hull_body(1, vec![("m_VertexPositions", floats(&[1.0; 3]))]);
+        for key in ["m_Edges", "m_Faces", "m_Bounds"] {
+            let hull = object(vec![
+                ("m_nCollisionAttributeIndex", Value::UInt(0)),
+                ("m_Hull", without(&body, key)),
+            ]);
+            refused(&physics(vec![], vec![hull]), &format!("no {key}"));
+        }
         let bare_attribute = object(vec![("m_InteractAsStrings", strings(&[]))]);
         let root = object(vec![
             ("m_collisionAttributes", Value::Array(vec![bare_attribute])),
@@ -624,7 +785,7 @@ mod tests {
     fn vertices_and_triangles_beyond_the_limits_are_refused_before_they_are_made() {
         let vertices = Value::Blob(vec![0; (MAX_VERTICES + 1) * 12]);
         refused(
-            &physics(vec![], vec![hull(vertices)]),
+            &physics(vec![mesh_of(0, vertices, words(&[]))], vec![]),
             "more than 4194304 vertices",
         );
         let triangles = Value::Blob(vec![0; (MAX_TRIANGLES + 1) * 12]);
@@ -691,42 +852,154 @@ mod tests {
 
     #[test]
     fn an_older_hull_keeps_its_corners_in_its_vertices() {
-        let older = object(vec![
-            ("m_nCollisionAttributeIndex", Value::UInt(0)),
-            (
-                "m_Hull",
-                object(vec![("m_Vertices", floats(&[1.0, 2.0, 3.0]))]),
-            ),
-        ]);
+        let older = hull_with(vec![(
+            "m_Vertices",
+            floats(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        )]);
         let read = read(&physics(vec![], vec![older])).unwrap();
-        assert_eq!(read.hulls[0].vertices, [[1.0, 2.0, 3.0]]);
+        assert_eq!(read.hulls[0].vertices, [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]);
+        assert_eq!(read.hulls[0].stored, CornerStore::Vertices);
+        let newer = hull_with(vec![
+            ("m_Vertices", Value::Blob(vec![0])),
+            ("m_VertexPositions", floats(&[4.0, 5.0, 6.0])),
+        ]);
+        let read = super::tests::read(&physics(vec![], vec![newer])).unwrap();
+        assert_eq!(read.hulls[0].vertices, [[4.0, 5.0, 6.0]]);
+        assert_eq!(read.hulls[0].stored, CornerStore::Positions);
+    }
+
+    #[test]
+    fn a_newer_hull_without_positions_is_refused_not_read_as_corners() {
+        // Twelve corners keep twelve bytes in m_Vertices, a multiple of twelve: as corners they
+        // would read as one, which the edges and faces refuse.
         let newer = object(vec![
             ("m_nCollisionAttributeIndex", Value::UInt(0)),
             (
                 "m_Hull",
+                hull_body(12, vec![("m_Vertices", Value::Blob(vec![0; 12]))]),
+            ),
+        ]);
+        refused(
+            &physics(vec![], vec![newer]),
+            "a hull of 12 corners keeps 12 bytes of m_Vertices and no m_VertexPositions",
+        );
+    }
+
+    #[test]
+    fn a_wrong_kind_of_positions_is_refused_and_never_falls_back() {
+        let wrong = hull_with(vec![
+            ("m_Vertices", floats(&[1.0, 2.0, 3.0])),
+            ("m_VertexPositions", Value::Int(7)),
+        ]);
+        refused(
+            &physics(vec![], vec![wrong]),
+            "geometry that is neither a blob nor bytes",
+        );
+        let wrong = object(vec![
+            ("m_nCollisionAttributeIndex", Value::UInt(0)),
+            ("m_Hull", hull_body(1, vec![("m_Vertices", Value::Int(7))])),
+        ]);
+        refused(
+            &physics(vec![], vec![wrong]),
+            "m_Vertices is neither a list nor bytes",
+        );
+    }
+
+    #[test]
+    fn a_hull_whose_corners_disagree_with_its_edges_faces_or_bounds_is_refused() {
+        let more = object(vec![
+            ("m_nCollisionAttributeIndex", Value::UInt(0)),
+            (
+                "m_Hull",
+                hull_body(2, vec![("m_VertexPositions", floats(&[1.0; 3]))]),
+            ),
+        ]);
+        refused(
+            &physics(vec![], vec![more]),
+            "a hull of 2 corners has 1 positions",
+        );
+        let odd = object(vec![
+            ("m_nCollisionAttributeIndex", Value::UInt(0)),
+            (
+                "m_Hull",
                 object(vec![
-                    ("m_Vertices", Value::Blob(vec![0])),
-                    ("m_VertexPositions", floats(&[4.0, 5.0, 6.0])),
+                    ("m_Edges", Value::Blob(vec![0; 4])),
+                    ("m_Faces", Value::Blob(vec![0])),
+                    ("m_VertexPositions", floats(&[1.0; 3])),
                 ]),
             ),
         ]);
-        let read = super::tests::read(&physics(vec![], vec![newer])).unwrap();
-        assert_eq!(read.hulls[0].vertices, [[4.0, 5.0, 6.0]]);
+        refused(
+            &physics(vec![], vec![odd]),
+            "a hull of 1 half-edges and 1 faces",
+        );
+        let far = hull(floats(&[1.0, 2.0, 3e6]));
+        refused(&physics(vec![], vec![far]), "outside its bounds");
     }
 
     #[test]
     fn corners_stored_as_vectors_are_read_and_checked() {
-        let vector = |v: [f64; 3]| Value::Array(v.iter().map(|&c| Value::Float(c)).collect());
         let corners = Value::Array(vec![vector([1.0, 2.0, 3.0]), vector([4.0, 5.0, 6.0])]);
-        let read = read(&physics(vec![], vec![hull(corners)])).unwrap();
+        let read = read(&physics(
+            vec![],
+            vec![hull_with(vec![("m_Vertices", corners)])],
+        ))
+        .unwrap();
         assert_eq!(read.hulls[0].vertices, [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]);
-        let short = Value::Array(vec![Value::Array(vec![Value::Float(1.0)])]);
+        assert_eq!(read.hulls[0].stored, CornerStore::VertexVectors);
+        let numbers = |n: usize| Value::Array(vec![Value::Float(1.0); n]);
+        for bad in [numbers(1), numbers(2), numbers(4)] {
+            let corners = Value::Array(vec![bad]);
+            refused(
+                &physics(vec![], vec![hull_with(vec![("m_Vertices", corners)])]),
+                "a vertex that is not three numbers",
+            );
+        }
+        let text = Value::Array(vec![Value::Array(vec![
+            Value::Float(1.0),
+            Value::String("2".into()),
+            Value::Float(3.0),
+        ])]);
         refused(
-            &physics(vec![], vec![hull(short)]),
+            &physics(vec![], vec![hull_with(vec![("m_Vertices", text)])]),
+            "a vertex at [Some(1.0), None, Some(3.0)]",
+        );
+        for bad in [f64::INFINITY, f64::NAN, 1e300] {
+            let corners = Value::Array(vec![vector([1.0, bad, 3.0])]);
+            refused(
+                &physics(vec![], vec![hull_with(vec![("m_Vertices", corners)])]),
+                "a vertex at",
+            );
+        }
+        let mixed = Value::Array(vec![vector([1.0, 2.0, 3.0]), Value::Float(4.0)]);
+        refused(
+            &physics(vec![], vec![hull_with(vec![("m_Vertices", mixed)])]),
             "a vertex that is not three numbers",
         );
-        let infinite = Value::Array(vec![vector([1.0, f64::INFINITY, 3.0])]);
-        refused(&physics(vec![], vec![hull(infinite)]), "a vertex at");
+    }
+
+    #[test]
+    fn corners_of_either_older_store_count_toward_the_vertex_limit_and_the_budget() {
+        let filled = mesh_of(0, Value::Blob(vec![0; MAX_VERTICES * 12]), words(&[]));
+        for store in [
+            floats(&[1.0; 3]),
+            Value::Array(vec![vector([1.0, 2.0, 3.0])]),
+        ] {
+            let hull = hull_with(vec![("m_Vertices", store)]);
+            refused(
+                &physics(vec![filled.clone()], vec![hull]),
+                "more than 4194304 vertices",
+            );
+        }
+        let charged = |store: Value| {
+            let mut budget = Budget::default();
+            let root = physics(vec![], vec![hull_with(vec![("m_Vertices", store)])]);
+            Physics::from_document_root(&root, &mut budget).unwrap();
+            budget.spent()
+        };
+        let one = charged(Value::Array(vec![vector([1.0, 2.0, 3.0])]));
+        let two = charged(Value::Array(vec![vector([1.0, 2.0, 3.0]); 2]));
+        assert_eq!(two - one, size_of::<[f32; 3]>());
     }
 
     #[test]

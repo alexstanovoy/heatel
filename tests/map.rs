@@ -1,6 +1,6 @@
 //! The main Dota map's navigation grid and ground collision, read from a local install.
 
-use heatel::physics::Physics;
+use heatel::physics::{CornerStore, Physics};
 use heatel::world::GridNav;
 use heatel::{Budget, DirSource, Resource, Vpk, find_game_dir};
 
@@ -58,8 +58,8 @@ fn the_maps_ground_and_water_are_collision_meshes() {
 }
 
 /// Every collision block of the pinned packages reads: the main package's models and every map's
-/// own models and worlds, the shipped addons' maps included. Counts what it read, so a key the game's data leaves out shows as a
-/// refusal here, naming the file.
+/// own models and worlds, the shipped addons' maps included, none refused; what it read is pinned
+/// by count, so that a reader which silently reads less fails.
 #[test]
 #[ignore = "needs a local Dota 2 install"]
 fn every_collision_block_of_the_install_reads() {
@@ -86,38 +86,87 @@ fn every_collision_block_of_the_install_reads() {
             packages.push((DirSource::new(&maps), name));
         }
     }
-    let (mut blocks, mut meshes, mut hulls, mut unread) = (0usize, 0usize, 0usize, 0usize);
+    let mut counts = Counts::default();
     let mut refused = Vec::new();
     for (source, name) in &packages {
         let package = Vpk::open(source, name).unwrap();
         let models: Vec<_> = package.entries().filter(|e| e.ext() == "vmdl_c").collect();
         for entry in models {
             let bytes = package.read(source, entry).unwrap();
-            let Ok(resource) = Resource::parse(&bytes) else {
-                continue;
+            let resource = match Resource::parse(&bytes) {
+                Ok(resource) => resource,
+                Err(e) => {
+                    refused.push(format!("{name}: {}: {e}", entry.path()));
+                    continue;
+                }
             };
             if resource.block(b"PHYS").is_none() {
+                counts.without_collision += 1;
                 continue;
             }
             match Physics::read(&resource, &mut Budget::default()) {
-                Ok(physics) => {
-                    blocks += 1;
-                    meshes += physics.meshes.len();
-                    hulls += physics.hulls.len();
-                    unread += physics.unread;
-                }
+                Ok(physics) => counts.add(&physics),
                 Err(e) => refused.push(format!("{name}: {}: {e}", entry.path())),
             }
         }
     }
-    println!(
-        "{blocks} collision blocks: {meshes} meshes, {hulls} hulls, {unread} spheres and capsules"
-    );
+    println!("{} packages: {counts:?}", packages.len());
     assert!(
         refused.is_empty(),
         "{} refused:\n{}",
         refused.len(),
         refused.join("\n")
     );
-    assert!(blocks > 1000, "{blocks} collision blocks");
+    // The pinned packages' counts: a reader that silently reads less fails here.
+    assert_eq!(packages.len(), PINNED.packages, "packages");
+    assert_eq!(counts, PINNED.counts);
 }
+
+/// What the sweep counts.
+#[derive(Debug, Default, PartialEq)]
+struct Counts {
+    blocks: usize,
+    without_collision: usize,
+    meshes: usize,
+    hulls: usize,
+    /// Hulls whose corners an older block kept in `m_Vertices`, as floats or as arrays.
+    older_hulls: usize,
+    vector_hulls: usize,
+    spheres_and_capsules: usize,
+}
+
+impl Counts {
+    fn add(&mut self, physics: &Physics) {
+        self.blocks += 1;
+        self.meshes += physics.meshes.len();
+        self.hulls += physics.hulls.len();
+        for hull in &physics.hulls {
+            match hull.stored {
+                CornerStore::Positions => {}
+                CornerStore::Vertices => self.older_hulls += 1,
+                CornerStore::VertexVectors => self.vector_hulls += 1,
+                _ => panic!("a corner store this test does not know"),
+            }
+        }
+        self.spheres_and_capsules += physics.unread;
+    }
+}
+
+struct Pinned {
+    packages: usize,
+    counts: Counts,
+}
+
+/// The packages `HEATEL_DOTA_PATH` pins (Dota 2 client 6975, with its hero demo addon).
+const PINNED: Pinned = Pinned {
+    packages: 41,
+    counts: Counts {
+        blocks: 4507,
+        without_collision: 40027,
+        meshes: 29,
+        hulls: 1258,
+        older_hulls: 365,
+        vector_hulls: 1,
+        spheres_and_capsules: 1752,
+    },
+};

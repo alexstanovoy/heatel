@@ -230,6 +230,13 @@ def models(pak):
     systems."""
     paths = sorted((p for p in pak.files if p.endswith(".vmdl_c")), key=pak.size)
     small = [p for p in paths if 8 << 10 <= pak.size(p) <= 256 << 10]
+    # The map target's older collision layouts: models whose PHYS hulls keep their corners in
+    # m_Vertices (blobs, or arrays of three numbers in blocks decoded from older data).
+    phys = [p for p in paths if pak.size(p) <= 64 << 10 and p.startswith(("maps/", "models/heroes/"))]
+    for path in spread(phys, 600):
+        data = pak.read(path)
+        if data is not None and "PHYS" in kinds(data):
+            write("map", path.replace("/", "_"), data)
     animated = 0
     for path in spread(small, 400):
         data = pak.read(path)
