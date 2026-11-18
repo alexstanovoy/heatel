@@ -9,45 +9,10 @@ needs.
 read; mostly they are an [`Error`] that names what was met, see [Limits](#limits). A few
 helpers read Dota 2's own scripts and maps and mean nothing elsewhere, see [Dota 2 data](#dota-2-data).
 
-**State:** version 0.1 on crates.io; the API may still change before 1.0. It needs Rust 1.88 or newer
+**State:** crates.io has version 0.1. This repository's main branch is the unreleased 0.2.0
+([changelog](https://github.com/alexstanovoy/heatel/blob/main/CHANGELOG.md)); what only it has is marked "on main, not
+yet released" below. The API may still change before 1.0. It needs Rust 1.88 or newer
 ([details](#minimum-rust-version)).
-
-## Source 2 formats
-
-| File | heatel reads it as | and writes |
-|---|---|---|
-| `*.vpk` packages | [`Vpk`]: the directory tree, archives, CRCs | the stored files |
-| any compiled `*_c` file | [`Resource`]: its blocks, references, `DATA` | |
-| KV3 blocks (binary and text), NTRO data | [`kv3::Value`] | JSON (feature `serde`) |
-| KV1 text, localization | [`keyvalues::Kv`], [`keyvalues::localization_table`] | |
-| `vtex_c` textures | [`Texture`]: every level, block formats as stored | PNG, KTX2 |
-| `vsnd_c` sounds | [`Sound`], a voice line's [`Lipsync`] (phonemes, baked morph curves) | the WAV or MP3 inside |
-| a mesh's `MRPH` morph set and `_vmorf.vtex` atlas, phoneme tables, `vcd_c` scenes | [`MorphSet`] (flexes, controllers, rules), [`PhonemeTable`], [`Scene`] | glTF morph targets |
-| `vmdl_c` models, `vmat_c` materials, embedded animations | [`Model`], [`Material`], [`Clip`] | `.glb` with PNG or KTX2 images |
-| a model's sequences | [`read_sequences`]: activities, frames, events | |
-| `vpcf_c` particle systems | [`System`]: emitters, initializers, operators, forces, renderers, children | JSON (feature `serde`) |
-| `vwrld_c` worlds, `vents_c` entity lumps | [`EntityLump`], [`placements`] | `.gltf` + `.bin` |
-| `vsndevts_c` sound events, `vrr_c` response rules | [`read_sound_events`], [`read_response_rules`] | |
-
-## Dota 2 data
-
-These know Dota 2's file names, scripts or entity classes, so they are of no use for another game:
-
-| Dota 2's file | heatel reads it as |
-|---|---|
-| the Steam install | [`find_game_dir`] finds its `game/dota` folder |
-| `items.txt`, `npc_abilities.txt`, the heroes' scripts, localization | [`scripts::entries`], [`tooltips`] |
-| `shops.txt` | [`shops::categories`] |
-| `portraits.txt` | [`portraits::framings`] |
-| `items_game.txt` | [`items_game::read_hero_items`]: the cosmetics a hero wears |
-| `soundmixers.txt` | [`sound::read_sound_mixer`] |
-| the map's `ent_dota_lightinfo` entities | [`world::lighting`] |
-| the map's mid-lane diagonal | [`world::Band`] cuts a world to a band along it |
-| `AE_DOTA_PLAY_SOUND_ATTACK` animation events | [`anim::EventData::AttackSound`] |
-
-**heatel ships no Valve content and is not affiliated with or endorsed by Valve Corporation. Dota 2 and Source 2 are
-trademarks of Valve Corporation.** It reads files you already have, such as your own Dota 2 install, and what you
-convert stays subject to Valve's terms for your copy of the game.
 
 ## Quick start
 
@@ -56,7 +21,9 @@ convert stays subject to Valve's terms for your copy of the game.
 heatel = "0.1"
 ```
 
-Open a Dota 2 install (its `game/dota` folder) and read from its main package:
+Open a Dota 2 install (its `game/dota` folder) and read from its main package. `find_game_dir(None)` looks in the
+usual Steam folders of a Linux home (Flatpak Steam, `~/.steam/steam`, `~/.local/share/Steam`); on another system, or
+for another folder, name the `dota 2 beta` folder: `find_game_dir(Some(path))`.
 
 ```rust,no_run
 use heatel::{DirSource, Texture, Vpk, find_game_dir};
@@ -109,6 +76,43 @@ cargo run --release --example model_to_gltf -- "<...>/dota 2 beta/game/dota" \
     models/heroes/pudge/pudge.vmdl_c out/ pudge_walkN_anim
 ```
 
+## Source 2 formats
+
+| File | heatel reads it as | and writes |
+|---|---|---|
+| `*.vpk` packages | [`Vpk`]: the directory tree, archives, CRCs | the stored files |
+| any compiled `*_c` file | [`Resource`]: its blocks, references, `DATA` | |
+| KV3 blocks (binary and text), NTRO data | [`kv3::Value`] | JSON (feature `serde`) |
+| KV1 text, localization | [`keyvalues::Kv`], [`keyvalues::localization_table`] | |
+| `vtex_c` textures | [`Texture`]: every level, block formats as stored | PNG, KTX2 |
+| `vsnd_c` sounds | [`Sound`], a voice line's [`Lipsync`] (phonemes, baked morph curves) | the WAV or MP3 inside |
+| a mesh's `MRPH` morph set and `_vmorf.vtex` atlas, phoneme tables, `vcd_c` scenes | [`MorphSet`] (flexes, controllers, rules), [`PhonemeTable`], [`Scene`] | glTF morph targets |
+| `vmdl_c` models, `vmat_c` materials, embedded animations | [`Model`], [`Material`], [`Clip`] | `.glb` with PNG or KTX2 images |
+| a model's sequences | [`read_sequences`]: activities, frames, events | |
+| `vpcf_c` particle systems | [`System`]: emitters, initializers, operators, forces, renderers, children | JSON (feature `serde`) |
+| `vwrld_c` worlds, `vents_c` entity lumps | [`EntityLump`], [`placements`] | `.gltf` + `.bin` |
+| `vsndevts_c` sound events, `vrr_c` response rules | [`read_sound_events`], [`read_response_rules`] | |
+
+## Dota 2 data
+
+These know Dota 2's file names, scripts or entity classes, so they are of no use for another game:
+
+| Dota 2's file | heatel reads it as |
+|---|---|
+| the Steam install | [`find_game_dir`] finds its `game/dota` folder, in the usual Steam folders of a Linux home or under a folder you name |
+| `items.txt`, `npc_abilities.txt`, the heroes' scripts, localization | [`scripts::entries`], [`tooltips`] |
+| `shops.txt` | [`shops::categories`] |
+| `portraits.txt` | [`portraits::framings`] |
+| `items_game.txt` | [`items_game::read_hero_items`]: the cosmetics a hero wears |
+| `soundmixers.txt` | [`sound::read_sound_mixer`] |
+| the map's `ent_dota_lightinfo` entities | [`world::lighting`] |
+| the map's mid-lane diagonal | [`world::Band`] cuts a world to a band along it |
+| `AE_DOTA_PLAY_SOUND_ATTACK` animation events | [`anim::EventData::AttackSound`] |
+
+**heatel ships no Valve content and is not affiliated with or endorsed by Valve Corporation. Dota 2 and Source 2 are
+trademarks of Valve Corporation.** It reads files you already have, such as your own Dota 2 install, and what you
+convert stays subject to Valve's terms for your copy of the game.
+
 ## In a browser
 
 Everything builds for `wasm32-unknown-unknown`. Reads go through the [`Source`] trait, which is
@@ -136,7 +140,7 @@ table for is taken as one input named after the parameter; an animation channel 
 
 It reads and converts, never writes Valve's formats. Materials are mapped by a table of each shader's texture parameters
 rather than by running Valve's compiled shaders, so base colour and normals are right and the other channels are
-approximate. Particle systems are read as definitions; simulating and drawing them is up to you. Particle snapshots read position/normal streams and root-bone skinning; other streams or skinning bindings stay named `Unsupported`. Snapshots are capped at 5000 points, eight streams, 128 strings of 256 bytes, 64 KiB metadata and 1 MiB unpacked data. Spatial float noise supports Perlin with no turbulence/modifier and one to eight octaves; other modes remain `Unsupported`.
+approximate. Particle systems are read as definitions; simulating and drawing them is up to you. On main, not yet released: particle snapshots read position/normal streams and root-bone skinning; other streams or skinning bindings stay named `Unsupported`. Snapshots are capped at 5000 points, eight streams, 128 strings of 256 bytes, 64 KiB metadata and 1 MiB unpacked data. Spatial float noise (on main, not yet released) supports Perlin with no turbulence/modifier and one to eight octaves; other modes remain `Unsupported`.
 
 ## Features
 
@@ -155,7 +159,7 @@ them), and their expectations on individual models, particle systems, sounds and
 holds. Another patch may change a value and fail one:
 
 ```sh
-cargo test --release -- --ignored
+cargo test --release --all-features -- --ignored
 ```
 
 ## Minimum Rust version
