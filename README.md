@@ -98,7 +98,7 @@ These know Dota 2's file names, scripts or entity classes, so they are of no use
 
 | Dota 2's file | heatel reads it as |
 |---|---|
-| the Steam install | [`find_game_dir`] finds its `game/dota` folder, in the usual Steam folders of a Linux home or under a folder you name |
+| the Steam install | [`find_game_dir`] finds its `game/dota` folder in every Steam library of the machine ([`locate`]), or under a folder you name |
 | `items.txt`, `npc_abilities.txt`, the heroes' scripts, localization | [`scripts::entries`], [`tooltips`] |
 | `shops.txt` | [`shops::categories`] |
 | `portraits.txt` | [`portraits::framings`] |
@@ -209,6 +209,7 @@ MIT, see the `LICENSE` file. Material derived from other projects is listed in `
 [`read_sound_events`]: https://docs.rs/heatel/latest/heatel/sound/fn.read_sound_events.html
 [`read_response_rules`]: https://docs.rs/heatel/latest/heatel/talker/fn.read_response_rules.html
 [`find_game_dir`]: https://docs.rs/heatel/latest/heatel/fn.find_game_dir.html
+[`locate`]: https://docs.rs/heatel/latest/heatel/locate/index.html
 [`scripts::entries`]: https://docs.rs/heatel/latest/heatel/scripts/fn.entries.html
 [`tooltips`]: https://docs.rs/heatel/latest/heatel/tooltips/fn.tooltips.html
 [`shops::categories`]: https://docs.rs/heatel/latest/heatel/shops/fn.categories.html

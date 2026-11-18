@@ -21,6 +21,10 @@ All notable changes to this crate are documented here. The format follows
   read within a `Budget`, every key it uses required, its limits public (`MAX_SHAPES`, ...).
 - `world::GridNav`: a Dota 2 map's navigation grid (`maps/<map>.gnv`), each cell's flags and whether it
   is walkable.
+- `locate`: Dota 2 installs in every Steam library of the machine (`libraryfolders.vdf`, bounded) on
+  Linux (native, Flatpak, Snap), macOS and Windows (Program Files, or the Steam folder a caller reads from
+  the registry), and in a folder picked at any usual level. `find_game_dir` searches them all; before it
+  tried three folders under `$HOME`, none on Windows nor beyond the first library.
 - Typed control-point remapping, root-skinned particle snapshots (`vsnap` DATA/SNAP),
   snapshot placement initializers and bounded Perlin particle float inputs.
 - `particle::Look::depth_bias` (`m_flDepthBias`), a new public field: a complete `Look` literal needs it.

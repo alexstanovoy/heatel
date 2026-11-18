@@ -25,6 +25,7 @@
 [`read_sound_events`]: sound::read_sound_events
 [`read_response_rules`]: talker::read_response_rules
 [`find_game_dir`]: find_game_dir
+[`locate`]: locate
 [`scripts::entries`]: scripts::entries
 [`tooltips`]: tooltips::tooltips
 [`shops::categories`]: shops::categories
@@ -64,7 +65,7 @@ pub mod items_game;
 pub mod keyvalues;
 pub mod kv3;
 #[cfg(any(unix, windows))]
-mod locate;
+pub mod locate;
 /// Materials (`vmat_c`): shader, parameters, textures, and their glTF form.
 pub mod material;
 pub mod meshopt;
