@@ -9,6 +9,9 @@ use crate::keyvalues::{Kv, localization_table, parse_kv, text};
 
 const LOCALIZATION: &str = "resource/localization/abilities_english.txt";
 const PREFIX: &str = "dota_tooltip_ability_";
+/// The suffix of the localization's name-form key: the neutral items carry their name only under
+/// `DOTA_Tooltip_Ability_<name>:n`, while their other texts keep the plain keys.
+const NAME_FORM: &str = ":n";
 const VARIABLE: &str = "dota_ability_variable_";
 /// The localization's search aliases of an item: `DOTA_SearchAlias_Ability_<name>`.
 const ALIAS: &str = "dota_searchalias_ability_";
@@ -75,8 +78,8 @@ pub struct Tooltip {
     pub labels: Vec<(String, String)>,
 }
 
-/// The tooltips of `wanted`'s names that the localization has a name for, by name, from the
-/// localization and the scripts (the files of [`Wanted::sources`], in that order).
+/// The tooltips of `wanted`'s names that the localization has a name for (under the plain key, else
+/// the name-form key), by name, from the localization and the scripts (the files of [`Wanted::sources`], in that order).
 pub fn tooltips(
     wanted: &Wanted,
     localization: &[u8],
@@ -97,7 +100,11 @@ pub fn tooltips(
     }
     let mut out = BTreeMap::new();
     for name in &wanted.names {
-        let Some(title) = loc.get(&format!("{PREFIX}{name}")) else {
+        let plain = format!("{PREFIX}{name}");
+        let Some(title) = loc
+            .get(&plain)
+            .or_else(|| loc.get(&format!("{plain}{NAME_FORM}")))
+        else {
             continue;
         };
         let block = found.get(name.as_str()).copied();

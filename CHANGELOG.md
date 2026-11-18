@@ -12,7 +12,7 @@ All notable changes to this crate are documented here. The format follows
   so a complete struct literal no longer compiles. `System`, `Snapshot`, `ControlPointRemap` and
   `ParticleNoise` are now `#[non_exhaustive]`: later fields and variants are not breaking. Read
   systems with `System::read`/`System::from_document` and match `Snapshot` with a wildcard arm.
-- Converter revision 12 (`OUTPUT_REV`): particle caches made by 0.1.0 must be regenerated.
+- Converter revision 13 (`OUTPUT_REV`): caches made by 0.1.0 must be regenerated (particles; tooltip texts of items named only by their `:n` form).
 
 ### Added
 
@@ -28,6 +28,9 @@ All notable changes to this crate are documented here. The format follows
 
 - A snapshot with an unsupported attribute whose name and type together were long enough no longer
   fails its own `Snapshot::validate`: the name is cut to `MAX_UNSUPPORTED_NAME` where it is made.
+- `tooltips::tooltips` named an item only by the plain localization key, so an item the localization
+  names only as `DOTA_Tooltip_Ability_<name>:n` (the neutral items and the Chasm Stone) got no tooltip
+  at all, not its labels or notes either. The `:n` key now names it when the plain key is absent.
 
 ## [0.1.0] - 2026-11-13
 
