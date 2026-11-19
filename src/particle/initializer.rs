@@ -33,6 +33,11 @@ pub enum Initializer {
         /// How far the attribute moves to it, 0..1.
         strength: FloatInput,
     },
+    /// `C_INIT_RadiusFromCPObject`: the radius starts at the bound object's model scale.
+    RadiusFromCpObject {
+        /// The control point whose object supplies the scale.
+        control_point: ControlPoint,
+    },
     /// `C_INIT_RandomColor`: a colour between two.
     RandomColor {
         /// One end.
@@ -563,6 +568,9 @@ impl Initializer {
                     set_normal: obj.bool("m_bSetNormal", false)?,
                 }
             }
+            "C_INIT_RadiusFromCPObject" => Self::RadiusFromCpObject {
+                control_point: obj.control_point("m_nControlPoint", 0)?,
+            },
             "C_INIT_InitFloat" => Self::InitFloat {
                 field: obj.field("m_nOutputField", Field::RADIUS)?,
                 value: FloatInput::read(obj, "m_InputValue", 0.0)?,

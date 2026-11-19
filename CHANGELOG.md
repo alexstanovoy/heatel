@@ -12,10 +12,11 @@ All notable changes to this crate are documented here. The format follows
   so a complete struct literal no longer compiles. `System`, `Snapshot`, `ControlPointRemap` and
   `ParticleNoise` are now `#[non_exhaustive]`: later fields and variants are not breaking. Read
   systems with `System::read`/`System::from_document` and match `Snapshot` with a wildcard arm.
-- Converter revision 13 (`OUTPUT_REV`): caches made by 0.1.0 must be regenerated (particles; tooltip texts of items named only by their `:n` form).
+- Converter revision 14 (`OUTPUT_REV`): caches made by 0.1.0 must be regenerated (particles; tooltip texts of items named only by their `:n` form).
 
 ### Added
 
+- Read `C_INIT_RadiusFromCPObject` and resolve named model attachments in the model's rest frame.
 - `physics::Physics`: a model's collision shapes (`PHYS`), its triangle meshes and convex hulls, each
   naming its collision group and interaction layers (a map's ground, its water, a trigger's volume);
   read within a `Budget`, every key it uses required, its limits public (`MAX_SHAPES`, ...).
@@ -33,6 +34,8 @@ All notable changes to this crate are documented here. The format follows
   valid UTF-8 is judged by its lossy text, and a step of only dots and spaces, which Windows strips, is refused
   like `..`), then usable on this host (a full path with no `..` step as this host reads it, and on Windows a
   drive prefix: what `libraries` and `steam_roots` add before anything is opened).
+- `C_OP_RemapDirectionToCPToVector` reads as `Operator::RemapDirectionToTransformToVector`: a vector attribute
+  (the normal) from the direction from a control point to the particle.
 - Typed control-point remapping, root-skinned particle snapshots (`vsnap` DATA/SNAP),
   snapshot placement initializers and bounded Perlin particle float inputs.
 - `particle::Look::depth_bias` (`m_flDepthBias`), a new public field: a complete `Look` literal needs it.

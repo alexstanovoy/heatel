@@ -82,6 +82,25 @@ pub struct Primitive {
 }
 
 impl Model {
+    /// Where a named attachment stands in the model's rest pose, in glTF metres.
+    pub fn attachment_position(&self, name: &str) -> Option<[f32; 3]> {
+        let attachment = self.attachments.iter().find(|point| point.name == name)?;
+        let mut position = attachment.translation;
+        let mut parent = attachment.bone;
+        for _ in 0..self.bones.len() {
+            let Some(index) = parent else {
+                break;
+            };
+            let bone = self.bones.get(index)?;
+            position = rotate(bone.rotation, position);
+            for (coordinate, translation) in position.iter_mut().zip(bone.translation) {
+                *coordinate += translation;
+            }
+            parent = bone.parent;
+        }
+        (parent.is_none() && position.iter().all(|value| value.is_finite())).then_some(position)
+    }
+
     /// Reads the model of a parsed `vmdl_c`: its embedded meshes (meshopt, zstd or `VBIB` buffers), skeleton and skins. One larger than any of the game's is an error.
     pub fn read(resource: &Resource) -> Result<Self> {
         let data = resource

@@ -12,7 +12,7 @@ use heatel::anim::{Clip, Keys, Track};
 use heatel::gltf::{GltfOptions, write_glb};
 use heatel::material::Material;
 use heatel::model::{Bone, Mesh, Primitive};
-use heatel::particle::{Operator, System};
+use heatel::particle::{Field, Operator, System};
 use heatel::tooltips::{Wanted, tooltips};
 use heatel::vertices::Vertices;
 use heatel::world::{Band, WorldOptions, export_world};
@@ -876,6 +876,68 @@ fn flagbearer_particle_operators_read_synthetic_snap_and_normal_lock() {
         panic!("default normal lock")
     };
     assert_eq!(control_point.index(), 0);
+}
+
+#[test]
+fn a_direction_remap_reads_its_control_point_field_and_defaults() {
+    let definition = particle_system(vec![
+        operator(
+            "C_OP_RemapDirectionToCPToVector",
+            vec![
+                ("m_nControlPointNumber", K::Int(2)),
+                ("m_nFieldOutput", K::Int(21)),
+                ("m_bNormalize", K::Int(1)),
+            ],
+        ),
+        operator("C_OP_RemapDirectionToCPToVector", vec![]),
+    ])
+    .expect("synthetic KV3 definitions");
+    let Operator::RemapDirectionToTransformToVector {
+        transform,
+        field,
+        scale,
+        normalize,
+        ..
+    } = &definition.operators[0].class
+    else {
+        panic!("direction remap")
+    };
+    assert_eq!(transform.control_point().expect("control point").index(), 2);
+    assert_eq!(*field, Field::NORMAL);
+    assert_eq!(*scale, 1.0);
+    assert!(*normalize);
+    let Operator::RemapDirectionToTransformToVector {
+        transform,
+        normalize,
+        ..
+    } = &definition.operators[1].class
+    else {
+        panic!("default direction remap")
+    };
+    assert_eq!(transform.control_point().expect("control point").index(), 0);
+    assert!(!*normalize);
+}
+
+#[test]
+fn radius_from_object_reads_its_point_and_refuses_an_out_of_range_point() {
+    let with_point = |point| {
+        particle_lists(vec![(
+            "m_Initializers",
+            vec![operator(
+                "C_INIT_RadiusFromCPObject",
+                vec![("m_nControlPoint", K::Int(point))],
+            )],
+        )])
+    };
+    let system = with_point(7).expect("a valid control point");
+    let heatel::particle::Initializer::RadiusFromCpObject { control_point } =
+        system.initializers[0].class
+    else {
+        panic!("radius from a control-point object");
+    };
+    assert_eq!(control_point.index(), 7);
+    let error = with_point(64).expect_err("outside the control-point table");
+    assert!(error.to_string().contains("m_nControlPoint"), "{error}");
 }
 
 #[test]

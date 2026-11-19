@@ -400,6 +400,22 @@ pub enum Operator {
         /// The least radius.
         min_radius: f32,
     },
+    /// `C_OP_RemapDirectionToCPToVector`: a vector attribute from the direction from a control
+    /// point to the particle, turned about an axis (the direction a hook's head points).
+    RemapDirectionToTransformToVector {
+        /// The control point.
+        transform: Transform,
+        /// The attribute (the normal when the file says none).
+        field: Field,
+        /// Times this.
+        scale: f32,
+        /// The turn, in degrees.
+        offset_rotation_degrees: f32,
+        /// The axis of the turn.
+        offset_axis: [f32; 3],
+        /// Of unit length.
+        normalize: bool,
+    },
     /// `C_OP_RemapCPVelocityToVector`: a vector attribute from a control point's velocity.
     RemapCpVelocityToVector {
         /// The control point.
@@ -959,6 +975,19 @@ impl Operator {
             },
             "C_OP_NormalLock" => Self::NormalLock {
                 control_point: obj.control_point("m_nControlPointNumber", 0)?,
+            },
+            "C_OP_RemapDirectionToCPToVector" => Self::RemapDirectionToTransformToVector {
+                transform: Transform::read_member(
+                    obj,
+                    "m_TransformInput",
+                    "m_nControlPointNumber",
+                    true,
+                )?,
+                field: obj.field("m_nFieldOutput", Field::NORMAL)?,
+                scale: obj.float("m_flScale", 1.0)?,
+                offset_rotation_degrees: obj.float("m_flOffsetRot", 0.0)?,
+                offset_axis: obj.vec3("m_vecOffsetAxis", [0.0; 3])?,
+                normalize: obj.bool("m_bNormalize", false)?,
             },
             "C_OP_RemapCPVelocityToVector" => Self::RemapCpVelocityToVector {
                 control_point: obj.control_point("m_nControlPoint", 0)?,
