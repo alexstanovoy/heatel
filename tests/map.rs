@@ -58,8 +58,9 @@ fn the_maps_ground_and_water_are_collision_meshes() {
 }
 
 /// Every collision block of the pinned packages reads: the main package's models and every map's
-/// own models and worlds, the shipped addons' maps included, none refused; what it read is pinned
-/// by count, so that a reader which silently reads less fails.
+/// own models and worlds, the shipped addons' maps included, none refused; the shapes it read are
+/// the shapes the documents declare, counted apart from the reader, so that a reader which silently
+/// reads less fails on any install.
 #[test]
 #[ignore = "needs a local Dota 2 install"]
 fn every_collision_block_of_the_install_reads() {
@@ -87,6 +88,7 @@ fn every_collision_block_of_the_install_reads() {
         }
     }
     let mut counts = Counts::default();
+    let mut declared = Declared::default();
     let mut refused = Vec::new();
     for (source, name) in &packages {
         let package = Vpk::open(source, name).unwrap();
@@ -105,7 +107,10 @@ fn every_collision_block_of_the_install_reads() {
                 continue;
             }
             match Physics::read(&resource, &mut Budget::default()) {
-                Ok(physics) => counts.add(&physics),
+                Ok(physics) => {
+                    counts.add(&physics);
+                    declared.add_declared(&resource);
+                }
                 Err(e) => refused.push(format!("{name}: {}: {e}", entry.path())),
             }
         }
@@ -117,9 +122,53 @@ fn every_collision_block_of_the_install_reads() {
         refused.len(),
         refused.join("\n")
     );
-    // The pinned packages' counts: a reader that silently reads less fails here.
-    assert_eq!(packages.len(), PINNED.packages, "packages");
-    assert_eq!(counts, PINNED.counts);
+    // What the reader read against what the install's own documents declare, counted without
+    // the reader: a reader that silently reads less fails here, whatever the install holds.
+    assert!(packages.len() > 1, "the main package and the map packages");
+    assert!(counts.blocks > 0);
+    assert_eq!(
+        (counts.meshes, counts.hulls, counts.spheres_and_capsules),
+        (
+            declared.meshes,
+            declared.hulls,
+            declared.spheres_and_capsules
+        ),
+        "shapes read against shapes declared"
+    );
+}
+
+/// The collision shapes the `PHYS` documents declare, counted from the generic decoding alone:
+/// the lengths of every part's shape lists.
+#[derive(Debug, Default)]
+struct Declared {
+    meshes: usize,
+    hulls: usize,
+    spheres_and_capsules: usize,
+}
+
+impl Declared {
+    fn add_declared(&mut self, resource: &Resource) {
+        let document = resource
+            .kv3(b"PHYS")
+            .expect("a PHYS block")
+            .expect("a PHYS document the reader read");
+        let parts = document
+            .root
+            .get("m_parts")
+            .and_then(|parts| parts.as_array())
+            .unwrap_or(&[]);
+        let length = |shape: &heatel::kv3::Value, key: &str| {
+            shape
+                .get(key)
+                .and_then(|list| list.as_array())
+                .map_or(0, <[_]>::len)
+        };
+        for shape in parts.iter().filter_map(|part| part.get("m_rnShape")) {
+            self.meshes += length(shape, "m_meshes");
+            self.hulls += length(shape, "m_hulls");
+            self.spheres_and_capsules += length(shape, "m_spheres") + length(shape, "m_capsules");
+        }
+    }
 }
 
 /// What the sweep counts.
@@ -151,22 +200,3 @@ impl Counts {
         self.spheres_and_capsules += physics.unread;
     }
 }
-
-struct Pinned {
-    packages: usize,
-    counts: Counts,
-}
-
-/// The packages `HEATEL_DOTA_PATH` pins (Dota 2 client 6975, with its hero demo addon).
-const PINNED: Pinned = Pinned {
-    packages: 41,
-    counts: Counts {
-        blocks: 4507,
-        without_collision: 40027,
-        meshes: 29,
-        hulls: 1258,
-        older_hulls: 365,
-        vector_hulls: 1,
-        spheres_and_capsules: 1752,
-    },
-};
