@@ -618,3 +618,63 @@ fn stem(path: &str) -> &str {
     let file = path.rsplit('/').next().unwrap_or(path);
     file.rsplit_once('.').map_or(file, |(stem, _)| stem)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kv3::Object;
+    use crate::source::SliceSource;
+
+    #[test]
+    fn world_meshes_keep_visible_draw_calls_and_omit_editor_surfaces() {
+        let mut attribute = Object::default();
+        attribute.push(
+            "m_name".to_owned(),
+            Value::String("tools.toolsmaterial".to_owned()),
+        );
+        attribute.push("m_nValue".to_owned(), Value::Int(1));
+        let mut data = Object::default();
+        data.push(
+            "m_intAttributes".to_owned(),
+            Value::Array(vec![Value::Object(attribute)]),
+        );
+        assert!(is_tool_material(&Value::Object(data)));
+        let source = SliceSource::<Vec<u8>>::default();
+        let texture_name = |name: &str| name.to_owned();
+        let mut builder = Builder::new(&source, &[], &texture_name);
+        builder
+            .material_files
+            .insert("tool.vmat".to_owned(), WorldMaterial::Tool);
+        builder.infos.push(ModelInfo {
+            meshes: vec![MeshInfo {
+                name: "surface".to_owned(),
+                draw_calls: ["tool.vmat", "visible.vmat"]
+                    .map(|material| DrawCall {
+                        vertices: 0,
+                        material: material.to_owned(),
+                        tint: None,
+                    })
+                    .into(),
+                buffers: vec![[None, None]],
+            }],
+            groups: Vec::new(),
+        });
+        let mesh = |draw_calls| MeshSpec {
+            model: 0,
+            mesh: 0,
+            name: "surface".to_owned(),
+            set: 0,
+            draw_calls,
+            tint: [1.0; 4],
+            skin_material: None,
+        };
+        assert!(builder.make_mesh(mesh(vec![0])).unwrap().is_none());
+        let kept = builder
+            .make_mesh(mesh(vec![0, 1]))
+            .unwrap()
+            .expect("a visible surface");
+        let draws = &builder.scene.meshes[kept].primitives;
+        assert_eq!(draws.len(), 1);
+        assert_eq!(draws[0].draw_call, 1);
+    }
+}
