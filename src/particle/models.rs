@@ -85,6 +85,12 @@ pub struct Models {
     pub models: Vec<(String, f32)>,
     /// A control point whose model replaces the list, if any.
     pub model_input: Option<ControlPoint>,
+    /// Equipment slot of the object bound to the input point, when named by the renderer.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub equipment_slot: Option<String>,
     /// That model as its entity has it.
     pub original_model: bool,
     /// The particle's normal does not turn the model.
@@ -233,8 +239,13 @@ impl Models {
         if override_material.is_some_and(|m| m.len() > MAX_NAME) {
             return Err(malformed(WHAT, "an override material's path is too long"));
         }
+        let equipment_slot = obj.str("m_EconSlotName")?.filter(|slot| !slot.is_empty());
+        if equipment_slot.is_some_and(|slot| slot.len() > MAX_NAME) {
+            return Err(malformed(WHAT, "an equipment slot's name is too long"));
+        }
         Ok(Self {
             models,
+            equipment_slot: equipment_slot.map(str::to_owned),
             model_input: model_input(obj, format)?,
             original_model: obj.bool("m_bOriginalModel", false)?,
             ignore_normal: obj.bool("m_bIgnoreNormal", false)?,

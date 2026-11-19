@@ -16,6 +16,8 @@ All notable changes to this crate are documented here. The format follows
 
 ### Added
 
+- Read particle speed-to-scalar remaps and model equipment slots (converter revision 17).
+
 - Read `C_INIT_RadiusFromCPObject` and resolve named model attachments in the model's rest frame.
 - `physics::Physics`: a model's collision shapes (`PHYS`), its triangle meshes and convex hulls, each
   naming its collision group and interaction layers (a map's ground, its water, a trigger's volume);

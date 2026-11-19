@@ -263,6 +263,9 @@ impl System {
                 Renderer::Models(m) => {
                     m.models.len() > MAX_MODELS
                         || m.models.iter().any(|(path, _)| path.len() > MAX_NAME)
+                        || m.equipment_slot
+                            .as_ref()
+                            .is_some_and(|slot| slot.len() > MAX_NAME)
                         || m.override_material
                             .as_ref()
                             .is_some_and(|o| o.len() > MAX_NAME)

@@ -416,6 +416,15 @@ pub enum Operator {
         /// Of unit length.
         normalize: bool,
     },
+    /// `C_OP_RemapSpeed`: a scalar attribute from a particle's speed.
+    RemapSpeed {
+        /// The output scalar.
+        field: Field,
+        /// Particle speed range, in world units per second.
+        input: [f32; 2],
+        /// The scalar values at the ends of that range.
+        output: [f32; 2],
+    },
     /// `C_OP_RemapCPVelocityToVector`: a vector attribute from a control point's velocity.
     RemapCpVelocityToVector {
         /// The control point.
@@ -988,6 +997,17 @@ impl Operator {
                 offset_rotation_degrees: obj.float("m_flOffsetRot", 0.0)?,
                 offset_axis: obj.vec3("m_vecOffsetAxis", [0.0; 3])?,
                 normalize: obj.bool("m_bNormalize", false)?,
+            },
+            "C_OP_RemapSpeed" => Self::RemapSpeed {
+                field: obj.field("m_nFieldOutput", Field::RADIUS)?,
+                input: [
+                    obj.float("m_flInputMin", 0.0)?,
+                    obj.float("m_flInputMax", 1.0)?,
+                ],
+                output: [
+                    obj.float("m_flOutputMin", 0.0)?,
+                    obj.float("m_flOutputMax", 1.0)?,
+                ],
             },
             "C_OP_RemapCPVelocityToVector" => Self::RemapCpVelocityToVector {
                 control_point: obj.control_point("m_nControlPoint", 0)?,

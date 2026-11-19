@@ -1360,3 +1360,28 @@ fn hostile_portrait_entries_are_refused_alone_and_bounded() {
         .to_string();
     assert!(why.contains("more entries than any file has"), "{why}");
 }
+
+#[test]
+fn a_speed_remap_reads_its_ranges_and_rejects_nonfinite_values() {
+    let remap = |last| {
+        operator(
+            "C_OP_RemapSpeed",
+            vec![
+                ("m_nFieldOutput", K::Int(4)),
+                ("m_flInputMax", K::Float(900.0)),
+                ("m_flOutputMin", K::Float(0.3)),
+                ("m_flOutputMax", K::Float(last)),
+            ],
+        )
+    };
+    assert!(particle_system(vec![remap(f64::INFINITY)]).is_err());
+    let system = particle_system(vec![remap(1.7)]).expect("a finite speed remap");
+    assert_eq!(
+        system.operators[0].class,
+        Operator::RemapSpeed {
+            field: Field::ROLL,
+            input: [0.0, 900.0],
+            output: [0.3, 1.7]
+        },
+    );
+}
