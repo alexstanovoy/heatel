@@ -763,3 +763,30 @@ fn renderers_read_their_depth_bias_and_default_to_none() {
     );
     assert_eq!(look(&renderers(vec![])), FloatInput::Literal(0.0));
 }
+
+/// An operator's end cap state is a name, a number from -1, or (as Dota 7.42's packages write it
+/// in chaos_knight_armageddon_ribbon) an empty name, which sets none: the default, always. A name
+/// the reader does not know is still refused, by name.
+#[test]
+fn an_empty_end_cap_state_is_the_default_and_an_unknown_one_is_refused() {
+    let end_cap = |state: K| {
+        read_system(vec![(
+            "m_Operators",
+            K::Arr(vec![operator(
+                "C_OP_Decay",
+                vec![("m_nOpEndCapState", state)],
+            )]),
+        )])
+        .map(|system| system.operators[0].timing.end_cap)
+    };
+    assert_eq!(end_cap(s("")), Ok(heatel::particle::EndCap::Always));
+    assert_eq!(
+        end_cap(s("PARTICLE_ENDCAP_ENDCAP_ON")),
+        Ok(heatel::particle::EndCap::On)
+    );
+    let refused = end_cap(s("PARTICLE_ENDCAP_SOMETIMES")).expect_err("an unknown name");
+    assert!(
+        refused.contains("m_nOpEndCapState \"PARTICLE_ENDCAP_SOMETIMES\" is not known"),
+        "{refused}"
+    );
+}

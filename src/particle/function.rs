@@ -57,9 +57,12 @@ impl Timing {
             "PARTICLE_ENDCAP_ENDCAP_OFF",
             "PARTICLE_ENDCAP_ENDCAP_ON",
         ];
-        let end_cap = match obj.get("m_nOpEndCapState").and_then(|v| v.as_i64()) {
+        let state = obj.get("m_nOpEndCapState");
+        let end_cap = match state.and_then(|v| v.as_i64()) {
             // The numeric form counts from -1 (always).
             Some(n) => [EndCap::Always, EndCap::Off, EndCap::On][(n + 1).clamp(0, 2) as usize],
+            // An empty name sets no state (Dota 7.42's packages write it): the default, always.
+            None if state.and_then(|v| v.as_str()) == Some("") => EndCap::Always,
             None => [EndCap::Always, EndCap::Off, EndCap::On]
                 [obj.choice("m_nOpEndCapState", &states, 0)?],
         };
