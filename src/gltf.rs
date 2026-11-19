@@ -91,7 +91,8 @@ pub fn write_glb(model: &Model, options: &GltfOptions) -> Result<(Vec<u8>, Vec<E
     let skinned = |mesh: &Mesh| mesh.vertices.iter().all(|v| v.skin.is_some());
     let any_skinned = meshes.iter().any(|m| skinned(m));
     let skin = (options.skeleton && any_skinned && !model.bones.is_empty())
-        .then(|| b.inverse_binds(model));
+        .then(|| b.inverse_binds(model))
+        .transpose()?;
     for mesh in meshes {
         let node = b.mesh_node(mesh, options, skin.is_some() && skinned(mesh))?;
         scene.push(node);
@@ -181,6 +182,7 @@ impl Builder {
                 "name": bone.name,
                 "translation": bone.translation,
                 "rotation": bone.rotation,
+                "scale": ([bone.scale; 3]),
             }));
         }
         for (i, bone) in model.bones.iter().enumerate() {
@@ -404,20 +406,25 @@ impl Builder {
     }
 
     /// Each bone's inverse world transform at rest, column major.
-    fn inverse_binds(&mut self, model: &Model) -> usize {
-        let mut world: Vec<([f32; 4], [f32; 3])> = Vec::with_capacity(model.bones.len());
+    fn inverse_binds(&mut self, model: &Model) -> Result<usize> {
+        let mut world: Vec<([f32; 4], [f32; 3], f32)> = Vec::with_capacity(model.bones.len());
+        let mut matrices = Vec::with_capacity(model.bones.len());
         for bone in &model.bones {
-            let pose = match bone.parent.and_then(|p| world.get(p)) {
-                Some(&(rotation, translation)) => {
-                    let moved = rotate(rotation, bone.translation);
+            let (rotation, translation, scale) = match bone.parent.and_then(|p| world.get(p)) {
+                Some(&(rotation, translation, scale)) => {
+                    let moved = rotate(rotation, bone.translation.map(|axis| axis * scale));
                     let t = [0, 1, 2].map(|i| translation[i] + moved[i]);
-                    (multiply(rotation, bone.rotation), t)
+                    (multiply(rotation, bone.rotation), t, scale * bone.scale)
                 }
-                None => (bone.rotation, bone.translation),
+                None => (bone.rotation, bone.translation, bone.scale),
             };
-            world.push(pose);
+            world.push((rotation, translation, scale));
+            let matrix = inverse_bone(rotation, translation, scale);
+            if !matrix.iter().all(|value| value.is_finite()) {
+                return Err(bad("a bone's inverse bind transform is not finite"));
+            }
+            matrices.push(matrix);
         }
-        let matrices: Vec<[f32; 16]> = world.iter().map(|&(r, t)| inverse_rigid(r, t)).collect();
         let view = self.view(
             &matrices
                 .iter()
@@ -426,7 +433,7 @@ impl Builder {
                 .collect::<Vec<_>>(),
             None,
         );
-        self.accessor(view, FLOAT, matrices.len(), "MAT4")
+        Ok(self.accessor(view, FLOAT, matrices.len(), "MAT4"))
     }
 
     /// The material `path` drawn with the draw call's `tint`, made on first use; none when
@@ -515,7 +522,10 @@ fn check(model: &Model, options: &GltfOptions) -> Result<()> {
         if bone.parent.is_some_and(|p| p >= i) {
             return Err(bad(format!("bone {i} has parent {:?}", bone.parent)));
         }
-        if !finite(&[bone.translation]) || !finite(&[bone.rotation]) {
+        if !finite(&[bone.translation])
+            || !finite(&[bone.rotation])
+            || !crate::model::valid_bone_scale(bone.scale)
+        {
             return Err(bad(format!("bone {i} is not finite")));
         }
         size += bone.name.len() + 64 + JSON_ITEM;
@@ -721,16 +731,16 @@ fn mesh_bounds(mesh: &Mesh) -> Option<([f32; 3], [f32; 3])> {
 }
 
 /// The inverse of rotation `r` then translation `t`, as a column-major 4×4 matrix.
-fn inverse_rigid(r: [f32; 4], t: [f32; 3]) -> [f32; 16] {
+fn inverse_bone(r: [f32; 4], t: [f32; 3], scale: f32) -> [f32; 16] {
     let inverse = [-r[0], -r[1], -r[2], r[3]];
     let columns =
         [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|axis| rotate(inverse, axis));
     let moved = rotate(inverse, t);
     let mut m = [0.0; 16];
     for (c, column) in columns.iter().enumerate() {
-        m[c * 4..c * 4 + 3].copy_from_slice(column);
+        m[c * 4..c * 4 + 3].copy_from_slice(&column.map(|axis| axis / scale));
     }
-    m[12..15].copy_from_slice(&moved.map(|v| -v));
+    m[12..15].copy_from_slice(&moved.map(|v| -v / scale));
     m[15] = 1.0;
     m
 }

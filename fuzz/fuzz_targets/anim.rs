@@ -31,6 +31,7 @@ fuzz_target!(|data: &[u8]| {
                 parent: i.checked_sub(1),
                 translation: [0.0; 3],
                 rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: 1.0,
             })
             .collect(),
         meshes: Vec::new(),

@@ -52,6 +52,8 @@ pub struct Bone {
     pub translation: [f32; 3],
     /// Rotation from its parent, `[x, y, z, w]`.
     pub rotation: [f32; 4],
+    /// Uniform rest scale relative to the parent.
+    pub scale: f32,
 }
 
 /// A render mesh: vertex buffers and the draw calls over them.
@@ -92,7 +94,13 @@ impl Model {
                 break;
             };
             let bone = self.bones.get(index)?;
-            position = rotate(bone.rotation, position);
+            if !valid_bone_scale(bone.scale) {
+                return None;
+            }
+            position = rotate(
+                unit_rotation(bone.rotation)?,
+                position.map(|axis| axis * bone.scale),
+            );
             for (coordinate, translation) in position.iter_mut().zip(bone.translation) {
                 *coordinate += translation;
             }
@@ -229,6 +237,7 @@ pub(crate) struct SourceBone {
     pub parent: Option<usize>,
     pub position: [f32; 3],
     pub rotation: [f32; 4],
+    pub scale: f32,
 }
 
 /// The model skeleton of DATA's `m_modelSkeleton`, in bone order. A parent index that does not
@@ -238,6 +247,13 @@ pub(crate) fn source_skeleton(data: &Value) -> Result<Vec<SourceBone>> {
     let get = |key| array(skeleton.and_then(|s| s.get(key)));
     let (names, parents) = (get("m_boneName"), get("m_nParent"));
     let (positions, rotations) = (get("m_bonePosParent"), get("m_boneRotParent"));
+    let scales = get("m_boneScaleParent");
+    if !scales.is_empty() && scales.len() != names.len() {
+        return Err(malformed(
+            "model",
+            "the rest scales and bone names have different lengths",
+        ));
+    }
     let mut bones = Vec::with_capacity(names.len());
     for (i, name) in names.iter().enumerate() {
         let parent = parents
@@ -245,11 +261,19 @@ pub(crate) fn source_skeleton(data: &Value) -> Result<Vec<SourceBone>> {
             .and_then(Value::as_i64)
             .and_then(|p| usize::try_from(p).ok())
             .filter(|&p| p < i);
+        let scale = scales
+            .get(i)
+            .map_or(Some(1.0), |value| value.as_f64().map(|value| value as f32))
+            .filter(|scale| valid_bone_scale(*scale))
+            .ok_or_else(|| malformed("model", format!("bone {i} has an invalid rest scale")))?;
+        let rotation =
+            unit_rotation(floats::<4>(rotations.get(i))?).unwrap_or([0.0, 0.0, 0.0, 1.0]);
         bones.push(SourceBone {
             name: name.as_str().unwrap_or_default().to_owned(),
             parent,
             position: floats::<3>(positions.get(i))?,
-            rotation: floats::<4>(rotations.get(i))?,
+            rotation,
+            scale,
         });
     }
     Ok(bones)
@@ -277,6 +301,7 @@ fn skeleton(data: &Value) -> Result<Vec<Bone>> {
                 parent: bone.parent,
                 translation,
                 rotation,
+                scale: bone.scale,
             }
         })
         .collect())
@@ -300,6 +325,20 @@ pub(crate) fn floats<const N: usize>(value: Option<&Value>) -> Result<[f32; N]> 
 /// A number as glTF may hold it: NaN and infinities (only a damaged file has them) are 0.
 pub(crate) fn finite(v: f32) -> f32 {
     if v.is_finite() { v } else { 0.0 }
+}
+
+pub(crate) fn valid_bone_scale(scale: f32) -> bool {
+    scale.is_finite() && scale != 0.0 && scale.recip().is_finite()
+}
+
+fn unit_rotation(rotation: [f32; 4]) -> Option<[f32; 4]> {
+    let length = rotation
+        .into_iter()
+        .map(|value| f64::from(value).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    (length.is_finite() && length > 0.0)
+        .then(|| rotation.map(|value| (f64::from(value) / length) as f32))
 }
 
 /// Rotates `v` by the unit quaternion `q` (x, y, z, w).
@@ -573,5 +612,106 @@ mod tests {
     #[test]
     fn a_skin_the_model_lacks_is_an_error() {
         assert!(model().use_material_group("9").is_err());
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+
+    fn model(rotation: [f32; 4], parent: Option<usize>) -> Model {
+        Model {
+            bones: vec![
+                Bone {
+                    name: "root".into(),
+                    parent,
+                    translation: [4.0, 0.0, 0.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: 1.0,
+                },
+                Bone {
+                    name: "child".into(),
+                    parent: Some(0),
+                    translation: [0.0, 3.0, 0.0],
+                    rotation,
+                    scale: 1.0,
+                },
+            ],
+            meshes: Vec::new(),
+            material_groups: Vec::new(),
+            attachments: vec![Attachment {
+                name: "socket".into(),
+                bone: Some(1),
+                translation: [1.0, 0.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+            }],
+        }
+    }
+
+    #[test]
+    fn an_attachment_walks_the_bones_without_scaling_by_quaternion_length() {
+        let model = model([0.0, 0.0, 2.0, 2.0], None);
+        let position = model.attachment_position("socket").unwrap();
+        for (actual, expected) in position.into_iter().zip([4.0, 4.0, 0.0]) {
+            assert!((actual - expected).abs() < 1e-5, "{position:?}");
+        }
+        assert!(model.attachment_position("absent").is_none());
+    }
+
+    #[test]
+    fn a_rest_attachment_inherits_the_authored_bone_scale() {
+        use crate::kv3::Object;
+        let object = |fields: Vec<(&str, Value)>| {
+            let mut object = Object::default();
+            for (key, value) in fields {
+                object.push(key.into(), value);
+            }
+            Value::Object(object)
+        };
+        let floats =
+            |values: &[f64]| Value::Array(values.iter().copied().map(Value::Float).collect());
+        let data = object(vec![(
+            "m_modelSkeleton",
+            object(vec![
+                (
+                    "m_boneName",
+                    Value::Array(vec![Value::String("root".into())]),
+                ),
+                ("m_nParent", Value::Array(vec![Value::Int(-1)])),
+                (
+                    "m_bonePosParent",
+                    Value::Array(vec![floats(&[0.0, 0.0, 0.0])]),
+                ),
+                (
+                    "m_boneRotParent",
+                    Value::Array(vec![floats(&[0.0, 0.0, 0.0, 1.0])]),
+                ),
+                ("m_boneScaleParent", floats(&[2.5])),
+            ]),
+        )]);
+        let mut model = model([0.0, 0.0, 0.0, 1.0], None);
+        model.bones = skeleton(&data).unwrap();
+        model.attachments[0].bone = Some(0);
+        let position = model.attachment_position("socket").unwrap();
+        let length = position
+            .into_iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        assert!(
+            (length - 2.5).abs() < 1e-5,
+            "world socket distance {length}"
+        );
+    }
+
+    #[test]
+    fn invalid_attachment_chains_refuse_a_world_position() {
+        for bad in [
+            model([0.0, 0.0, 0.0, 1.0], Some(1)),
+            model([0.0, 0.0, 0.0, 1.0], Some(2)),
+            model([0.0, 0.0, f32::INFINITY, 1.0], None),
+        ] {
+            assert_eq!(bad.attachment_position("socket"), None);
+        }
     }
 }

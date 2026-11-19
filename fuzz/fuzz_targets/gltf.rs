@@ -7,9 +7,9 @@ use std::collections::HashMap;
 
 use heatel::Model;
 use heatel::anim::{Clip, Keys, Track};
+use heatel::face::Target;
 use heatel::gltf::{GltfOptions, write_glb};
 use heatel::material::Material;
-use heatel::face::Target;
 use heatel::model::{Bone, Mesh, Primitive};
 use heatel::vertices::{Attribute, Skin, Vertices};
 use libfuzzer_sys::arbitrary::{Arbitrary, Result, Unstructured};
@@ -96,6 +96,7 @@ fn model(u: &mut Unstructured) -> Result<Model> {
                 parent: Option::<()>::arbitrary(u)?.map(|()| index(u)).transpose()?,
                 translation: <[f32; 3]>::arbitrary(u)?,
                 rotation: <[f32; 4]>::arbitrary(u)?,
+                scale: f32::arbitrary(u)?,
             })
         })?,
         meshes: list(u, 3, |u| {

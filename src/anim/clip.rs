@@ -400,7 +400,7 @@ fn decode(
         .map(|b| BonePose {
             position: b.position,
             rotation: b.rotation,
-            scale: 1.0,
+            scale: b.scale,
         })
         .collect();
     let mut writers: Vec<TrackWriter> = bones.iter().map(|_| TrackWriter::default()).collect();
@@ -431,7 +431,7 @@ fn decode(
                 to_gltf(bone.position, bone.rotation, bone.parent.is_none());
             writer.rotation.keys.push(0.0, rotation);
             writer.translation.keys.push(0.0, translation);
-            writer.scale.keys.push(0.0, [1.0; 3]);
+            writer.scale.keys.push(0.0, [bone.scale; 3]);
         }
     }
     // The time of the last frame, which a run held to the end still reaches.

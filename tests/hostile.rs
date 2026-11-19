@@ -174,6 +174,7 @@ fn bone(parent: Option<usize>, translation: [f32; 3]) -> Bone {
         parent,
         translation,
         rotation: [0.0, 0.0, 0.0, 1.0],
+        scale: 1.0,
     }
 }
 
@@ -1384,4 +1385,55 @@ fn a_speed_remap_reads_its_ranges_and_rejects_nonfinite_values() {
             output: [0.3, 1.7]
         },
     );
+}
+
+#[test]
+fn direction_from_control_point_checks_the_transform_and_rotation_inputs() {
+    let class = "C_OP_RemapDirectionToCPToVector";
+    for (field, value) in [
+        ("m_nControlPointNumber", K::Int(64)),
+        ("m_nFieldOutput", K::Int(1000)),
+        ("m_flOffsetRot", K::Float(f64::NAN)),
+        (
+            "m_vecOffsetAxis",
+            K::Arr(vec![K::Float(0.0), K::Float(f64::INFINITY), K::Float(0.0)]),
+        ),
+        (
+            "m_TransformInput",
+            K::Obj(vec![("m_nControlPoint", K::Int(64))]),
+        ),
+    ] {
+        assert!(
+            particle_system(vec![operator(class, vec![(field, value)])]).is_err(),
+            "{field}"
+        );
+    }
+    let nested = K::Obj(vec![
+        ("m_nControlPoint", K::Int(12)),
+        ("unused", K::Int(5000)),
+    ]);
+    let system = particle_system(vec![operator(
+        class,
+        vec![
+            ("m_TransformInput", nested),
+            ("m_flOffsetRot", K::Float(45.0)),
+            (
+                "m_vecOffsetAxis",
+                K::Arr(vec![K::Float(0.0), K::Float(0.0), K::Float(1.0)]),
+            ),
+        ],
+    )])
+    .unwrap();
+    let Operator::RemapDirectionToTransformToVector {
+        transform,
+        offset_rotation_degrees,
+        offset_axis,
+        ..
+    } = &system.operators[0].class
+    else {
+        panic!("supported direction remap");
+    };
+    assert_eq!(transform.control_point().unwrap().index(), 12);
+    assert_eq!(*offset_rotation_degrees, 45.0);
+    assert_eq!(*offset_axis, [0.0, 0.0, 1.0]);
 }
