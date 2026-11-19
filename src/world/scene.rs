@@ -76,7 +76,7 @@ pub(super) struct SceneMaterial {
 }
 
 /// A mesh to make: draw calls of a model's mesh, tinted, maybe with a skin's material.
-struct MeshSpec {
+struct MeshSpec<'a> {
     model: usize,
     mesh: usize,
     name: String,
@@ -84,6 +84,13 @@ struct MeshSpec {
     draw_calls: Vec<usize>,
     tint: [f32; 4],
     skin: Option<usize>,
+    overrides: &'a [DrawMaterialOverride<'a>],
+}
+
+struct DrawMaterialOverride<'a> {
+    mesh: usize,
+    draw_call: usize,
+    material: &'a str,
 }
 
 /// A model's meshes, kept without vertex data.
@@ -217,7 +224,8 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
     }
 
     fn world_node(&mut self, node: &Value) -> Result<()> {
-        for object in array(node.get("m_sceneObjects")) {
+        let overrides = world_material_overrides(node)?;
+        for (object_index, object) in array(node.get("m_sceneObjects")).iter().enumerate() {
             let Some(model) = object.get("m_renderableModel").and_then(Value::as_str) else {
                 continue;
             };
@@ -229,7 +237,13 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
             if tint == [0.0; 4] {
                 tint = [1.0; 4];
             }
-            self.place_model(model, &affine, linear_tint(tint), object.get("m_skin").and_then(Value::as_str))?;
+            self.place_model(
+                model,
+                &affine,
+                linear_tint(tint),
+                object.get("m_skin").and_then(Value::as_str),
+                overrides.get(&object_index).map_or(&[], Vec::as_slice),
+            )?;
         }
         for object in array(node.get("m_aggregateSceneObjects")) {
             let Some(model) = object.get("m_renderableModel").and_then(Value::as_str) else {
@@ -243,7 +257,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                 .first()
                 .is_some_and(|f| f.get("m_nDrawCallIndex").is_none())
             {
-                self.place_model(model, &IDENTITY, [1.0; 4], None)?;
+                self.place_model(model, &IDENTITY, [1.0; 4], None, &[])?;
             } else {
                 self.fragments(model, object, fragments)?;
             }
@@ -300,6 +314,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                 draw_calls: vec![draw_call],
                 tint,
                 skin: None,
+                overrides: &[],
             })?;
             if let Some(mesh) = mesh {
                 self.push_node(name.clone(), mesh, &affine)?;
@@ -324,7 +339,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
             };
             let skin = text("skin").filter(|s| !matches!(*s, "0" | "default"));
             let affine = place::entity_affine(&values);
-            self.place_model(model, &affine, place::entity_tint(&values), skin)?;
+            self.place_model(model, &affine, place::entity_tint(&values), skin, &[])?;
         }
         Ok(())
     }
@@ -361,6 +376,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
         affine: &Affine,
         tint: [f32; 4],
         skin: Option<&str>,
+        overrides: &[DrawMaterialOverride<'_>],
     ) -> Result<()> {
         let groups = &self.infos[model].groups;
         let skin = skin
@@ -377,7 +393,8 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                 name = format!("{name}.{}", self.infos[model].groups[skin].0);
             }
             let key = (name.clone(), tint.map(f32::to_bits));
-            let mesh = match self.mesh_index.get(&key) {
+            let shared = !overrides.iter().any(|row| row.mesh == m);
+            let mesh = match shared.then(|| self.mesh_index.get(&key)).flatten() {
                 Some(&mesh) => mesh,
                 None => {
                     let draw_calls = (0..info.draw_calls.len()).collect();
@@ -390,8 +407,11 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                         draw_calls,
                         tint,
                         skin,
+                        overrides,
                     })?;
-                    self.mesh_index.insert(key, mesh);
+                    if shared {
+                        self.mesh_index.insert(key, mesh);
+                    }
                     mesh
                 }
             };
@@ -402,7 +422,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
         Ok(())
     }
 
-    fn make_mesh(&mut self, spec: MeshSpec) -> Result<Option<usize>> {
+    fn make_mesh(&mut self, spec: MeshSpec<'_>) -> Result<Option<usize>> {
         let MeshSpec {
             model,
             mesh,
@@ -411,12 +431,19 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
             draw_calls,
             tint,
             skin,
+            overrides,
         } = spec;
         let mut primitives = Vec::with_capacity(draw_calls.len());
         let mut bounds: Option<Bounds> = None;
         for d in draw_calls {
             let call = &self.infos[model].meshes[mesh].draw_calls[d];
-            let path = self.infos[model].material(&call.material, skin);
+            let path = overrides
+                .iter()
+                .find(|row| row.mesh == mesh && row.draw_call == d)
+                .map_or_else(
+                    || self.infos[model].material(&call.material, skin),
+                    |row| row.material.to_owned(),
+                );
             let tint = match call.tint {
                 Some(t) => [0, 1, 2, 3].map(|i| tint[i] * t[i]),
                 None => tint,
@@ -618,6 +645,32 @@ fn linear_tint([red, green, blue, alpha]: [f32; 4]) -> [f32; 4] {
     [red, green, blue, alpha]
 }
 
+/// Material substitutions belong to a particular placement and draw.
+fn world_material_overrides(node: &Value) -> Result<HashMap<usize, Vec<DrawMaterialOverride<'_>>>> {
+    let rows = array(node.get("m_materialOverrides"));
+    check_count(rows.len(), "material overrides")?;
+    let mut by_object = HashMap::<usize, Vec<DrawMaterialOverride<'_>>>::new();
+    for row in rows {
+        let index = |key| {
+            row.get(key)
+                .and_then(Value::as_u64)
+                .and_then(|number| usize::try_from(number).ok())
+                .ok_or_else(|| malformed("world", format!("material override has no valid {key}")))
+        };
+        let material = row
+            .get("m_pMaterial")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| malformed("world", "material override has no material"))?;
+        by_object.entry(index("m_nSceneObjectIndex")?).or_default().push(DrawMaterialOverride {
+            mesh: index("m_nSubSceneObject")?,
+            draw_call: index("m_nDrawCallIndex")?,
+            material,
+        });
+    }
+    Ok(by_object)
+}
+
 /// The compiled file of resource `path` (`x.vmdl` is `x.vmdl_c`).
 fn compiled(path: &str) -> String {
     if path.ends_with("_c") {
@@ -681,6 +734,7 @@ mod tests {
             draw_calls,
             tint: [1.0; 4],
             skin: None,
+            overrides: &[],
         };
         assert!(builder.make_mesh(mesh(vec![0])).unwrap().is_none());
         let kept = builder
