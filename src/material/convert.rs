@@ -51,10 +51,40 @@ impl Images {
     }
 }
 
-/// `material` drawn with `tint` (linear colour and opacity), its images named by `texture_uri`.
+/// `material` drawn with `tint`, its images named by `texture_uri`.
 pub(crate) fn convert(
     material: &Material,
     tint: [f32; 4],
+    images: &mut Images,
+    texture_uri: &dyn Fn(&str) -> String,
+) -> Result<GltfMaterial> {
+    convert_with_color(material, base_color(material, tint), images, texture_uri)
+}
+
+/// The world combines its placement and draw-call tints in linear space.
+pub(crate) fn convert_world(
+    material: &Material,
+    tint: [f32; 4],
+    images: &mut Images,
+    texture_uri: &dyn Fn(&str) -> String,
+) -> Result<GltfMaterial> {
+    let mut color = tint;
+    if let Some(amount) = material.float("g_flModelTintAmount") {
+        color = color.map(|component| 1.0 + (component - 1.0) * amount);
+    }
+    if let Some([red, green, blue, _]) = material.vector("g_vColorTint") {
+        let tint = srgb_to_linear([red, green, blue]);
+        for (component, tint) in color.iter_mut().zip(tint) {
+            *component *= tint;
+        }
+        color[3] = 1.0;
+    }
+    convert_with_color(material, clamp_color(color), images, texture_uri)
+}
+
+fn convert_with_color(
+    material: &Material,
+    base_color: [f32; 4],
     images: &mut Images,
     texture_uri: &dyn Fn(&str) -> String,
 ) -> Result<GltfMaterial> {
@@ -70,7 +100,7 @@ pub(crate) fn convert(
         .any(|(_, r)| r.iter().any(|r| r.slot == Slot::SpecularFactor));
     let mut out = GltfMaterial {
         name: material.name.clone(),
-        base_color: base_color(material, tint),
+        base_color,
         metallic: material
             .float("g_flMetalness")
             .filter(|m| m.is_finite())
@@ -116,8 +146,12 @@ fn base_color(material: &Material, tint: [f32; 4]) -> [f32; 4] {
         color[3] = 1.0;
     }
     let [r, g, b] = srgb_to_linear([color[0], color[1], color[2]]);
+    clamp_color([r, g, b, color[3]])
+}
+
+fn clamp_color(color: [f32; 4]) -> [f32; 4] {
     // A number that is not finite (only a damaged file has one) leaves the colour white.
-    [r, g, b, color[3]].map(|c| {
+    color.map(|c| {
         if c.is_finite() {
             c.clamp(0.0, 1.0)
         } else {

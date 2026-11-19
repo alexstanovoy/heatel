@@ -13,16 +13,16 @@ use crate::budget::Budget;
 use crate::error::{Error, Result, malformed};
 use crate::export::read_from;
 use crate::kv3::Value;
-use crate::material::{GltfMaterial, Images, Material, convert};
+use crate::material::{GltfMaterial, Images, Material, convert_world, srgb_to_linear};
 use crate::model::Model;
 use crate::resource::Resource;
 use crate::source::Source;
 use crate::vertices::Vertices;
 use crate::vpk::Vpk;
 
-/// How far an overlay is lifted off what it lies on, along its normals (Source2Viewer meant
-/// one centimetre but applied it to geometry already in metres).
-pub(super) const OVERLAY_LIFT: f32 = 0.01 / 0.0254;
+/// The lift along an overlay's normals keeps it from fighting the terrain for depth.
+/// Positions in the mesh are already in metres.
+pub(super) const OVERLAY_LIFT: f32 = 0.01;
 /// Most nodes, meshes and materials a world may have.
 const MAX_ITEMS: usize = 1 << 20;
 /// Most bytes the scene's names and materials may take; Dota's map takes ~2 MB.
@@ -134,7 +134,7 @@ pub(super) struct Builder<'a, S: Source + ?Sized> {
     scene: Scene,
     infos: Vec<ModelInfo>,
     model_index: HashMap<String, Option<usize>>,
-    mesh_index: HashMap<String, Option<usize>>,
+    mesh_index: HashMap<(String, [u32; 4]), Option<usize>>,
     material_index: HashMap<MaterialKey, usize>,
     /// Materials read so far by path, each read once whatever tints it is drawn with.
     material_files: HashMap<String, WorldMaterial>,
@@ -229,7 +229,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
             if tint == [0.0; 4] {
                 tint = [1.0; 4];
             }
-            self.place_model(model, &affine, tint, object.get("m_skin").and_then(Value::as_str))?;
+            self.place_model(model, &affine, linear_tint(tint), object.get("m_skin").and_then(Value::as_str))?;
         }
         for object in array(node.get("m_aggregateSceneObjects")) {
             let Some(model) = object.get("m_renderableModel").and_then(Value::as_str) else {
@@ -282,7 +282,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
             let tint = match fragment.get("m_vTintColor") {
                 Some(t) => {
                     let [r, g, b, _] = vector4(Some(t));
-                    [r / 255.0, g / 255.0, b / 255.0, 1.0]
+                    linear_tint([r / 255.0, g / 255.0, b / 255.0, 1.0])
                 }
                 None => [1.0; 4],
             };
@@ -354,7 +354,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
     }
 
     /// A node per mesh of `model` (`<stem>.<mesh>`, with `.<skin>` when skinned), placed by
-    /// `affine`; each mesh made on its name's first placement, with `tint`.
+    /// `affine`; placements with the same model, skin and tint share a mesh.
     fn place_model(
         &mut self,
         model: usize,
@@ -376,7 +376,8 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
             if let Some(skin) = skin {
                 name = format!("{name}.{}", self.infos[model].groups[skin].0);
             }
-            let mesh = match self.mesh_index.get(&name) {
+            let key = (name.clone(), tint.map(f32::to_bits));
+            let mesh = match self.mesh_index.get(&key) {
                 Some(&mesh) => mesh,
                 None => {
                     let draw_calls = (0..info.draw_calls.len()).collect();
@@ -390,7 +391,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                         tint,
                         skin,
                     })?;
-                    self.mesh_index.insert(name.clone(), mesh);
+                    self.mesh_index.insert(key, mesh);
                     mesh
                 }
             };
@@ -479,7 +480,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
         if let Some(&known) = self.material_index.get(&key) {
             return Ok(known);
         }
-        let gltf = convert(file, tint, &mut self.scene.images, self.texture_uri)?;
+        let gltf = convert_world(file, tint, &mut self.scene.images, self.texture_uri)?;
         let index = self.scene.materials.len();
         check_count(index, "materials")?;
         self.budget.bytes(file.json_size())?;
@@ -612,6 +613,11 @@ fn vector4(value: Option<&Value>) -> [f32; 4] {
     std::array::from_fn(|i| items.get(i).and_then(Value::as_f64).unwrap_or(0.0) as f32)
 }
 
+fn linear_tint([red, green, blue, alpha]: [f32; 4]) -> [f32; 4] {
+    let [red, green, blue] = srgb_to_linear([red, green, blue]);
+    [red, green, blue, alpha]
+}
+
 /// The compiled file of resource `path` (`x.vmdl` is `x.vmdl_c`).
 fn compiled(path: &str) -> String {
     if path.ends_with("_c") {
@@ -698,5 +704,15 @@ mod tests {
         assert_eq!(model.material("base", Some(1)), "dark_base");
         assert_eq!(model.material("trim", Some(1)), "dark_trim");
         assert_eq!(model.material("overlay", Some(1)), "overlay");
+    }
+
+    #[test]
+    fn an_overlay_is_lifted_one_centimetre_above_its_surface() {
+        let vertices = Vertices {
+            positions: vec![[15.0, 0.0, 25.0]],
+            normals: Some(vec![[0.0, 1.0, 0.0]]),
+            ..Vertices::default()
+        };
+        assert_eq!(overlay_positions(&vertices), [[15.0, 0.01, 25.0]]);
     }
 }
