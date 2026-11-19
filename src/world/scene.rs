@@ -105,6 +105,13 @@ struct DrawCall {
     tint: Option<[f32; 4]>,
 }
 
+#[derive(Clone)]
+enum WorldMaterial {
+    Visible(Rc<Material>),
+    Tool,
+    Missing,
+}
+
 /// A material path and a tint's bits.
 type MaterialKey = (String, [u32; 4]);
 
@@ -116,10 +123,10 @@ pub(super) struct Builder<'a, S: Source + ?Sized> {
     scene: Scene,
     infos: Vec<ModelInfo>,
     model_index: HashMap<String, Option<usize>>,
-    mesh_index: HashMap<String, usize>,
-    material_index: HashMap<MaterialKey, Option<(usize, bool)>>,
+    mesh_index: HashMap<String, Option<usize>>,
+    material_index: HashMap<MaterialKey, usize>,
     /// Materials read so far by path, each read once whatever tints it is drawn with.
-    material_files: HashMap<String, Option<Rc<Material>>>,
+    material_files: HashMap<String, WorldMaterial>,
     sets: usize,
     /// What the names and materials take.
     budget: Budget,
@@ -283,7 +290,9 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                 tint,
                 skin_material: None,
             })?;
-            self.push_node(name.clone(), mesh, &affine)?;
+            if let Some(mesh) = mesh {
+                self.push_node(name.clone(), mesh, &affine)?;
+            }
         }
         Ok(())
     }
@@ -375,12 +384,14 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                     mesh
                 }
             };
-            self.push_node(name, mesh, affine)?;
+            if let Some(mesh) = mesh {
+                self.push_node(name, mesh, affine)?;
+            }
         }
         Ok(())
     }
 
-    fn make_mesh(&mut self, spec: MeshSpec) -> Result<usize> {
+    fn make_mesh(&mut self, spec: MeshSpec) -> Result<Option<usize>> {
         let MeshSpec {
             model,
             mesh,
@@ -402,9 +413,14 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                 None => tint,
             };
             let vertices = call.vertices;
-            let (material, overlay) = match self.material(&path, tint)? {
-                Some((m, overlay)) => (Some(m), overlay),
-                None => (None, false),
+            let material = self.material_file(&path)?;
+            let (material, overlay) = match material {
+                WorldMaterial::Tool => continue,
+                WorldMaterial::Visible(file) => {
+                    let overlay = is_overlay(&file);
+                    (Some(self.material(&file, tint)?), overlay)
+                }
+                WorldMaterial::Missing => (None, false),
             };
             let buffer = self.infos[model].meshes[mesh]
                 .buffers
@@ -417,6 +433,9 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                 overlay,
             });
         }
+        if primitives.is_empty() {
+            return Ok(None);
+        }
         check_count(self.scene.meshes.len(), "meshes")?;
         self.budget.bytes(name.len() + size_of::<SceneMesh>())?;
         self.scene.meshes.push(SceneMesh {
@@ -427,7 +446,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
             primitives,
             bounds,
         });
-        Ok(self.scene.meshes.len() - 1)
+        Ok(Some(self.scene.meshes.len() - 1))
     }
 
     fn push_node(&mut self, name: String, mesh: usize, affine: &Affine) -> Result<()> {
@@ -446,44 +465,46 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
         self.sets - 1
     }
 
-    /// The material `path` drawn with `tint`, and whether it is an overlay; made once per path
-    /// and tint. `None` when no package has it.
-    fn material(&mut self, path: &str, tint: [f32; 4]) -> Result<Option<(usize, bool)>> {
-        let key = (path.to_owned(), tint.map(f32::to_bits));
+    /// The render material drawn with `tint`, made once per path and tint.
+    fn material(&mut self, file: &Material, tint: [f32; 4]) -> Result<usize> {
+        let key = (file.path.clone(), tint.map(f32::to_bits));
         if let Some(&known) = self.material_index.get(&key) {
             return Ok(known);
         }
-        let made = match self.material_file(path)? {
-            Some(material) => {
-                let gltf = convert(&material, tint, &mut self.scene.images, self.texture_uri)?;
-                check_count(self.scene.materials.len(), "materials")?;
-                self.budget.bytes(material.json_size())?;
-                self.scene.materials.push(SceneMaterial {
-                    gltf,
-                    textures: material.textures.iter().map(|(_, t)| t.clone()).collect(),
-                    shader: material.shader.clone(),
-                });
-                Some((self.scene.materials.len() - 1, is_overlay(&material)))
-            }
-            None => None,
-        };
-        self.material_index.insert(key, made);
-        Ok(made)
+        let gltf = convert(file, tint, &mut self.scene.images, self.texture_uri)?;
+        let index = self.scene.materials.len();
+        check_count(index, "materials")?;
+        self.budget.bytes(file.json_size())?;
+        self.scene.materials.push(SceneMaterial {
+            gltf,
+            textures: file.textures.iter().map(|(_, t)| t.clone()).collect(),
+            shader: file.shader.clone(),
+        });
+        self.material_index.insert(key, index);
+        Ok(index)
     }
 
-    /// The material file `path` (without `_c`), read once; `None` when no package has it.
-    fn material_file(&mut self, path: &str) -> Result<Option<Rc<Material>>> {
+    /// The material file `path` (without `_c`), read once.
+    fn material_file(&mut self, path: &str) -> Result<WorldMaterial> {
         if let Some(known) = self.material_files.get(path) {
             return Ok(known.clone());
         }
         let material = match self.data(&compiled(path))? {
-            Some(data) => Some(Rc::new(Material::from_vmat(path, &data)?)),
-            None => None,
+            Some(data) if is_tool_material(&data) => WorldMaterial::Tool,
+            Some(data) => WorldMaterial::Visible(Rc::new(Material::from_vmat(path, &data)?)),
+            None => WorldMaterial::Missing,
         };
         self.material_files
             .insert(path.to_owned(), material.clone());
         Ok(material)
     }
+}
+
+/// The editor marks navigation surfaces, triggers and other tool geometry with this attribute.
+fn is_tool_material(data: &Value) -> bool {
+    array(data.get("m_intAttributes")).iter().any(|attribute| {
+        attribute.get("m_name").and_then(Value::as_str) == Some("tools.toolsmaterial")
+    })
 }
 
 /// What the scene needs of a model.
