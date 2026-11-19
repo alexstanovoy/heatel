@@ -5,8 +5,9 @@
 //! Positions are in the model's frame, in the units the block stores them in (the map's own for a
 //! map's world). Every key the reader uses is required: a block without one is an error naming
 //! it, except that a hull's corners are `m_VertexPositions` or, in an older block, `m_Vertices`
-//! (see [`CornerStore`]). The one optional part is the spheres and capsules ([`OPTIONAL_SHAPES`]): absent, there
-//! are none; present, they are counted toward [`MAX_SHAPES`], not read.
+//! (see [`CornerStore`](crate::physics::CornerStore)). The one optional part is the spheres and capsules
+//! ([`OPTIONAL_SHAPES`](crate::physics::OPTIONAL_SHAPES)): absent, there are none; present, they are counted toward
+//! [`MAX_SHAPES`](crate::physics::MAX_SHAPES), not read.
 
 use crate::budget::Budget;
 use crate::error::{Result, malformed};

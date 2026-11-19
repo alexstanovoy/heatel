@@ -9,7 +9,7 @@ use crate::error::{Result, malformed};
 const MAGIC: u32 = 0xFADE_BEAD;
 /// The most cells a side may have, and the furthest the first cell may lie from the origin.
 pub const MAX_SIDE: u32 = 4096;
-/// The longest cell edge, in world units: a grid of [`MAX_SIDE`] such cells spans far more than
+/// The longest cell edge, in world units: a grid of `MAX_SIDE` such cells spans far more than
 /// any map.
 pub const MAX_EDGE: f32 = 4096.0;
 /// The bytes before the cells.
@@ -47,7 +47,7 @@ impl GridNav {
     ///
     /// When the bytes are not a navigation grid (another magic), the cell edge is not a finite
     /// number in `(0, MAX_EDGE]` or the centre not finite (NaN and infinities are refused), a side
-    /// is zero or longer than [`MAX_SIDE`], the first cell lies further than [`MAX_SIDE`] from the
+    /// is zero or longer than `MAX_SIDE`, the first cell lies further than `MAX_SIDE` from the
     /// origin, or the cells do not fill the grid exactly.
     pub fn read(bytes: &[u8]) -> Result<Self> {
         let mut c = Cursor::new(bytes, "gnv");
