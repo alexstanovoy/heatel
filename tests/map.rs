@@ -1,5 +1,6 @@
 //! The main Dota map's navigation grid and ground collision, read from a local install.
 
+use heatel::kv3::Value;
 use heatel::physics::{CornerStore, Physics};
 use heatel::world::GridNav;
 use heatel::{Budget, DirSource, Resource, Vpk, find_game_dir};
@@ -88,7 +89,6 @@ fn every_collision_block_of_the_install_reads() {
         }
     }
     let mut counts = Counts::default();
-    let mut declared = Declared::default();
     let mut refused = Vec::new();
     for (source, name) in &packages {
         let package = Vpk::open(source, name).unwrap();
@@ -108,8 +108,16 @@ fn every_collision_block_of_the_install_reads() {
             }
             match Physics::read(&resource, &mut Budget::default()) {
                 Ok(physics) => {
-                    counts.add(&physics);
-                    declared.add_declared(&resource);
+                    let document = resource.kv3(b"PHYS").unwrap().expect("a PHYS block");
+                    let actual = Shapes::read(&physics);
+                    let declared = Shapes::declared(&document.root);
+                    assert_eq!(actual, declared, "{name}: {}", entry.path());
+                    counts.blocks += 1;
+                    counts.shapes.meshes += actual.meshes;
+                    counts.shapes.hulls += actual.hulls;
+                    counts.shapes.older_hulls += actual.older_hulls;
+                    counts.shapes.vector_hulls += actual.vector_hulls;
+                    counts.shapes.spheres_and_capsules += actual.spheres_and_capsules;
                 }
                 Err(e) => refused.push(format!("{name}: {}: {e}", entry.path())),
             }
@@ -126,77 +134,75 @@ fn every_collision_block_of_the_install_reads() {
     // the reader: a reader that silently reads less fails here, whatever the install holds.
     assert!(packages.len() > 1, "the main package and the map packages");
     assert!(counts.blocks > 0);
-    assert_eq!(
-        (counts.meshes, counts.hulls, counts.spheres_and_capsules),
-        (
-            declared.meshes,
-            declared.hulls,
-            declared.spheres_and_capsules
-        ),
-        "shapes read against shapes declared"
-    );
 }
 
-/// The collision shapes the `PHYS` documents declare, counted from the generic decoding alone:
-/// the lengths of every part's shape lists.
 #[derive(Debug, Default)]
-struct Declared {
-    meshes: usize,
-    hulls: usize,
-    spheres_and_capsules: usize,
-}
-
-impl Declared {
-    fn add_declared(&mut self, resource: &Resource) {
-        let document = resource
-            .kv3(b"PHYS")
-            .expect("a PHYS block")
-            .expect("a PHYS document the reader read");
-        let parts = document
-            .root
-            .get("m_parts")
-            .and_then(|parts| parts.as_array())
-            .unwrap_or(&[]);
-        let length = |shape: &heatel::kv3::Value, key: &str| {
-            shape
-                .get(key)
-                .and_then(|list| list.as_array())
-                .map_or(0, <[_]>::len)
-        };
-        for shape in parts.iter().filter_map(|part| part.get("m_rnShape")) {
-            self.meshes += length(shape, "m_meshes");
-            self.hulls += length(shape, "m_hulls");
-            self.spheres_and_capsules += length(shape, "m_spheres") + length(shape, "m_capsules");
-        }
-    }
-}
-
-/// What the sweep counts.
-#[derive(Debug, Default, PartialEq)]
 struct Counts {
     blocks: usize,
     without_collision: usize,
+    shapes: Shapes,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Shapes {
     meshes: usize,
     hulls: usize,
-    /// Hulls whose corners an older block kept in `m_Vertices`, as floats or as arrays.
     older_hulls: usize,
     vector_hulls: usize,
     spheres_and_capsules: usize,
 }
 
-impl Counts {
-    fn add(&mut self, physics: &Physics) {
-        self.blocks += 1;
-        self.meshes += physics.meshes.len();
-        self.hulls += physics.hulls.len();
+impl Shapes {
+    fn declared(root: &Value) -> Self {
+        let mut shapes = Self::default();
+        for part in root
+            .get("m_parts")
+            .and_then(Value::as_array)
+            .expect("parts")
+        {
+            let shape = part.get("m_rnShape").expect("part shape");
+            let list = |key| shape.get(key).map(|value| value.as_array().expect(key));
+            shapes.meshes += list("m_meshes").expect("meshes").len();
+            for hull in list("m_hulls").expect("hulls") {
+                shapes.hulls += 1;
+                let body = hull.get("m_Hull").expect("hull body");
+                if body.get("m_VertexPositions").is_some() {
+                    continue;
+                }
+                let vertices = body.get("m_Vertices").expect("legacy hull corners");
+                if vertices
+                    .as_array()
+                    .and_then(|items| items.first())
+                    .and_then(Value::as_array)
+                    .is_some()
+                {
+                    shapes.vector_hulls += 1;
+                } else {
+                    shapes.older_hulls += 1;
+                }
+            }
+            for key in ["m_spheres", "m_capsules"] {
+                shapes.spheres_and_capsules += list(key).map_or(0, <[_]>::len);
+            }
+        }
+        shapes
+    }
+
+    fn read(physics: &Physics) -> Self {
+        let mut shapes = Self {
+            meshes: physics.meshes.len(),
+            hulls: physics.hulls.len(),
+            spheres_and_capsules: physics.unread,
+            ..Self::default()
+        };
         for hull in &physics.hulls {
             match hull.stored {
                 CornerStore::Positions => {}
-                CornerStore::Vertices => self.older_hulls += 1,
-                CornerStore::VertexVectors => self.vector_hulls += 1,
+                CornerStore::Vertices => shapes.older_hulls += 1,
+                CornerStore::VertexVectors => shapes.vector_hulls += 1,
                 _ => panic!("a corner store this test does not know"),
             }
         }
-        self.spheres_and_capsules += physics.unread;
+        shapes
     }
 }

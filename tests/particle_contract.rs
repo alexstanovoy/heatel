@@ -790,3 +790,21 @@ fn an_empty_end_cap_state_is_the_default_and_an_unknown_one_is_refused() {
         "{refused}"
     );
 }
+
+#[test]
+fn numeric_end_cap_limits_are_clamped_without_overflow() {
+    for (number, expected) in [
+        (i64::MIN, heatel::particle::EndCap::Always),
+        (i64::MAX, heatel::particle::EndCap::On),
+    ] {
+        let system = read_system(vec![(
+            "m_Operators",
+            K::Arr(vec![operator(
+                "C_OP_Decay",
+                vec![("m_nOpEndCapState", K::Int(number))],
+            )]),
+        )])
+        .expect("numeric end-cap limits are clamped");
+        assert_eq!(system.operators[0].timing.end_cap, expected);
+    }
+}

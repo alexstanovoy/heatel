@@ -294,24 +294,30 @@ fn hull_corners(
         ));
     }
     let bounds = required(hull, "m_Bounds")?;
-    let [low, high] = ["m_vMinBounds", "m_vMaxBounds"].map(|key| {
-        let numbers: Vec<f64> = required(bounds, key)?
-            .as_array()
-            .unwrap_or_default()
-            .iter()
-            .filter_map(Value::as_f64)
-            .collect();
-        match numbers[..] {
-            [x, y, z] if [x, y, z].iter().all(|v| v.is_finite()) => Ok([x, y, z]),
-            _ => Err(malformed(WHAT, format!("{key} is not three numbers"))),
+    let bound = |key| {
+        let axes = required(bounds, key)?.as_array().unwrap_or_default();
+        if let [x, y, z] = axes
+            && let [Some(x), Some(y), Some(z)] = [x, y, z].map(Value::as_f64)
+            && [x, y, z].into_iter().all(f64::is_finite)
+        {
+            return Ok([x, y, z]);
         }
-    });
-    let (low, high) = (low?, high?);
+        Err(malformed(WHAT, format!("{key} is not three numbers")))
+    };
+    let low = bound("m_vMinBounds")?;
+    let high = bound("m_vMaxBounds")?;
+    if (0..3).any(|axis| low[axis] > high[axis]) {
+        return Err(malformed(
+            WHAT,
+            "a hull's minimum bound exceeds its maximum",
+        ));
+    }
+    let slack =
+        std::array::from_fn::<_, 3, _>(|axis| (1e-3 * high[axis] - 1e-3 * low[axis]).max(1e-3));
     for corner in &read {
         let inside = (0..3).all(|axis| {
-            let slack = 1e-3 * (high[axis] - low[axis]).abs().max(1.0);
             let at = f64::from(corner[axis]);
-            low[axis] - slack <= at && at <= high[axis] + slack
+            low[axis] - slack[axis] <= at && at <= high[axis] + slack[axis]
         });
         if !inside {
             return Err(malformed(
@@ -936,6 +942,48 @@ mod tests {
         );
         let far = hull(floats(&[1.0, 2.0, 3e6]));
         refused(&physics(vec![], vec![far]), "outside its bounds");
+    }
+
+    #[test]
+    fn a_hull_bound_requires_exactly_three_finite_coordinates() {
+        let with_bounds = |low, high| {
+            physics(
+                vec![],
+                vec![object(vec![
+                    ("m_nCollisionAttributeIndex", Value::UInt(0)),
+                    (
+                        "m_Hull",
+                        object(vec![
+                            ("m_Edges", Value::Blob(vec![])),
+                            ("m_Faces", Value::Blob(vec![0])),
+                            ("m_VertexPositions", floats(&[0.0; 3])),
+                            (
+                                "m_Bounds",
+                                object(vec![("m_vMinBounds", low), ("m_vMaxBounds", high)]),
+                            ),
+                        ]),
+                    ),
+                ])],
+            )
+        };
+        for low in [
+            Value::Array(vec![
+                Value::Null,
+                Value::Float(-1.0),
+                Value::Float(-1.0),
+                Value::Float(-1.0),
+            ]),
+            vector([f64::NEG_INFINITY, -1.0, -1.0]),
+        ] {
+            refused(
+                &with_bounds(low, vector([1.0; 3])),
+                "m_vMinBounds is not three numbers",
+            );
+        }
+        refused(
+            &with_bounds(vector([1.0; 3]), vector([0.0; 3])),
+            "a hull's minimum bound exceeds its maximum",
+        );
     }
 
     #[test]
