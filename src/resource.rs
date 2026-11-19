@@ -125,17 +125,24 @@ impl<'a> Resource<'a> {
             .unwrap_or_default()
     }
 
-    /// The first block of `kind` decoded as KV3, or `None` when it is absent or not KV3 (an
-    /// old resource describes its `DATA` with `NTRO` instead).
+    /// The first block of `kind`. `None` means the block is absent. A present block returns
+    /// either its decoded KV3 document or the reason it could not be decoded.
+    /// For a `DATA` block that can use either KV3 or NTRO, use [`Resource::data`].
     pub fn kv3(&self, kind: &[u8; 4]) -> Option<Result<kv3::Document>> {
-        let bytes = self.block(kind)?;
-        kv3::is_kv3(bytes).then(|| kv3::decode(bytes))
+        self.kv3_in(kind, &mut Budget::named("KV3"))
     }
 
     /// [`Resource::kv3`], decoded within `budget`.
     pub fn kv3_in(&self, kind: &[u8; 4], budget: &mut Budget) -> Option<Result<kv3::Document>> {
         let bytes = self.block(kind)?;
-        kv3::is_kv3(bytes).then(|| kv3::decode_in(bytes, budget))
+        Some(if kv3::is_kv3(bytes) {
+            kv3::decode_in(bytes, budget)
+        } else {
+            Err(malformed(
+                "resource KV3",
+                format!("{} block has an unsupported encoding", kind_name(kind)),
+            ))
+        })
     }
 
     /// The `DATA` block as a tree: KV3, or the struct an `NTRO` block describes in older

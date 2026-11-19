@@ -24,31 +24,30 @@ impl Content {
     /// What the texture compiler was told to do with the image, read from the resource's edit
     /// info: the old `REDI` block lists its special dependencies as plain strings, the new
     /// `RED2` as a KV3 list.
-    pub(super) fn of(resource: &Resource<'_>) -> Self {
+    pub(super) fn of(resource: &Resource<'_>) -> Result<Self> {
+        let legacy = resource.block(b"REDI");
+        let edit = resource.kv3(b"RED2").transpose()?;
+        let dependencies = edit
+            .as_ref()
+            .and_then(|doc| doc.root.get("m_SpecialDependencies"))
+            .and_then(|values| values.as_array())
+            .unwrap_or_default();
         let says = |text: &str| {
-            let in_redi = resource
-                .block(b"REDI")
-                .is_some_and(|redi| redi.windows(text.len()).any(|w| w == text.as_bytes()));
-            in_redi
-                || resource
-                    .kv3(b"RED2")
-                    .and_then(Result::ok)
-                    .and_then(|doc| {
-                        doc.root
-                            .get("m_SpecialDependencies")?
-                            .as_array()?
-                            .iter()
-                            .find_map(|d| (d.get("m_String")?.as_str()? == text).then_some(()))
-                    })
-                    .is_some()
+            legacy.is_some_and(|bytes| {
+                bytes
+                    .windows(text.len())
+                    .any(|word| word == text.as_bytes())
+            }) || dependencies.iter().any(|dependency| {
+                dependency.get("m_String").and_then(|value| value.as_str()) == Some(text)
+            })
         };
-        if says(YCOCG) {
+        Ok(if says(YCOCG) {
             Self::YCoCg
         } else if says(NORMALS) {
             Self::Normal
         } else {
             Self::Colour
-        }
+        })
     }
 
     /// The RGBA8 pixels of a DXT5 level `width` x `height`, read as `self`.

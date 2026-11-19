@@ -102,14 +102,15 @@ impl Physics {
     ///
     /// # Errors
     ///
-    /// When the block is malformed or lacks a key the reader uses, a triangle names a vertex its
+    /// When the block is present but cannot be decoded, lacks a key the reader uses, a triangle names a vertex its
     /// mesh lacks, a vertex is not finite (NaN and infinities are refused), a shape names a
     /// collision attribute the block lacks, the shapes exceed [`MAX_SHAPES`], [`MAX_VERTICES`],
     /// [`MAX_TRIANGLES`], [`MAX_ATTRIBUTES`] or [`MAX_LAYERS`], or `budget` runs out.
     pub fn read(resource: &Resource, budget: &mut Budget) -> Result<Self> {
         match resource.kv3_in(b"PHYS", budget) {
             None => Ok(Self::default()),
-            Some(document) => Self::from_document_root(&document?.root, budget),
+            Some(Ok(document)) => Self::from_document_root(&document.root, budget),
+            Some(Err(error)) => Err(error),
         }
     }
 

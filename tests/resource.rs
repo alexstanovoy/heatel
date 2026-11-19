@@ -3,7 +3,8 @@
 //! allocation of the declared count, the stack), and KV3 claiming more than its bytes can hold.
 //! Each is an error now.
 
-use heatel::{Resource, kv3};
+use heatel::physics::Physics;
+use heatel::{Budget, Resource, kv3};
 
 fn words(values: &[u32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()
@@ -33,6 +34,30 @@ fn resource(blocks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
         out.extend_from_slice(block);
     }
     out
+}
+
+#[test]
+fn a_present_collision_block_with_an_unknown_encoding_is_an_error() {
+    let file = resource(&[(b"PHYS", b"not a KV3 block".to_vec())]);
+    let resource = Resource::parse(&file).expect("the block table is valid");
+    let error = Physics::read(&resource, &mut Budget::default()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "resource KV3: PHYS block has an unsupported encoding"
+    );
+
+    let error = resource
+        .kv3(b"PHYS")
+        .expect("the PHYS block is present")
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "resource KV3: PHYS block has an unsupported encoding"
+    );
+    assert!(
+        resource.kv3(b"CTRL").is_none(),
+        "a missing block remains absent"
+    );
 }
 
 /// A struct of an NTRO block: its fields are a range of the block's fields, which may overlap

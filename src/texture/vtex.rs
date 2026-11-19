@@ -72,7 +72,7 @@ impl Texture {
                     px.swap(0, 2);
                 }
             }
-            Stored::Plain(PixelFormat::Bc3) => texture.decode_content(Content::of(&resource))?,
+            Stored::Plain(PixelFormat::Bc3) => texture.decode_content(Content::of(&resource)?)?,
             _ => {}
         }
         Ok(texture)
