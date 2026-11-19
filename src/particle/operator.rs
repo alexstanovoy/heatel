@@ -48,6 +48,19 @@ pub enum Operator {
     },
     /// `C_OP_PositionLock`: particles follow a transform's moves.
     PositionLock(Box<PositionLock>),
+    /// `C_OP_MovementRigidAttachToCP`: maps a vector offset into a control point's frame.
+    RigidAttachToControlPoint {
+        /// The origin and basis the offset attaches to.
+        control_point: ControlPoint,
+        /// An optional component of another control point's position that scales the offset.
+        scale: Option<(ControlPoint, u8)>,
+        /// The field that holds the offset.
+        input: Field,
+        /// The field that receives the resulting position.
+        output: Field,
+        /// Whether the offset turns with the attachment's basis.
+        local: bool,
+    },
     /// `C_OP_FadeInSimple`: an attribute fades in over a share of the lifetime.
     FadeInSimple {
         /// The share.
@@ -820,6 +833,21 @@ impl Operator {
                 max_constraint_passes: obj.int_clamped("m_nMaxConstraintPasses", 3, 0, 64)? as u8,
             },
             "C_OP_PositionLock" => Self::PositionLock(Box::new(position_lock(obj)?)),
+            "C_OP_MovementRigidAttachToCP" => {
+                let scale_point =
+                    obj.int_in("m_nScaleControlPoint", -1, -1, i64::from(MAX_CONTROL_POINT))?;
+                let scale_axis = obj.int_in("m_nScaleCPField", 0, 0, 2)? as u8;
+                Self::RigidAttachToControlPoint {
+                    control_point: obj.control_point("m_nControlPointNumber", 0)?,
+                    scale: u8::try_from(scale_point)
+                        .ok()
+                        .and_then(ControlPoint::new)
+                        .map(|point| (point, scale_axis)),
+                    input: obj.field("m_nFieldInput", Field::POSITION_PREVIOUS)?,
+                    output: obj.field("m_nFieldOutput", Field::POSITION)?,
+                    local: obj.bool("m_bOffsetLocal", true)?,
+                }
+            }
             "C_OP_SpinUpdate" => Self::SpinUpdate,
             "C_OP_Spin" => Self::Spin {
                 rate_degrees: obj.int_in("m_nSpinRateDegrees", 0, -(1 << 20), 1 << 20)? as i32,

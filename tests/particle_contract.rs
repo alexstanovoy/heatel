@@ -20,6 +20,49 @@ fn system(fields: Vec<(&'static str, K)>) -> System {
 fn operator(class: &str, fields: Vec<(&'static str, K)>) -> K {
     K::Obj([("_class", s(class))].into_iter().chain(fields).collect())
 }
+
+fn rigid_attachment(fields: Vec<(&'static str, K)>) -> Result<System, String> {
+    read_system(vec![(
+        "m_Operators",
+        K::Arr(vec![operator("C_OP_MovementRigidAttachToCP", fields)]),
+    )])
+}
+
+#[test]
+fn rigid_attachment_defaults_to_translating_the_previous_position_in_cp0s_basis() {
+    use heatel::particle::{ControlPoint, Field, Operator};
+    let system = rigid_attachment(Vec::new()).expect("the rigid attachment");
+    assert_eq!(
+        system.operators[0].class,
+        Operator::RigidAttachToControlPoint {
+            control_point: ControlPoint::new(0).unwrap(),
+            scale: None,
+            input: Field::POSITION_PREVIOUS,
+            output: Field::POSITION,
+            local: true,
+        }
+    );
+}
+
+#[test]
+fn rigid_attachment_rejects_invalid_properties_with_the_field_named() {
+    for (field, value, detail) in [
+        ("m_nControlPointNumber", K::Int(64), "64 is outside -1..=63"),
+        ("m_nScaleControlPoint", K::Int(-2), "-2 is outside -1..=63"),
+        ("m_nScaleCPField", K::Int(3), "3 is outside 0..=2"),
+        ("m_nFieldInput", K::Int(-1), "field -1 is not known"),
+        ("m_nFieldOutput", K::Int(49), "field 49 is not known"),
+        ("m_nControlPointNumber", s("wrong"), "is not an integer"),
+        ("m_nScaleControlPoint", s("wrong"), "is not an integer"),
+        ("m_nScaleCPField", s("wrong"), "is not an integer"),
+        ("m_nFieldInput", s("wrong"), "is not a particle field"),
+        ("m_nFieldOutput", s("wrong"), "is not a particle field"),
+        ("m_bOffsetLocal", s("wrong"), "is not a boolean"),
+    ] {
+        let error = rigid_attachment(vec![(field, value)]).expect_err("the bad property");
+        assert_eq!(error, format!("vpcf: {field} {detail}"));
+    }
+}
 fn distance(fields: Vec<(&'static str, K)>) -> heatel::particle::Distance {
     let system = system(vec![(
         "m_Constraints",
