@@ -83,13 +83,24 @@ struct MeshSpec {
     set: usize,
     draw_calls: Vec<usize>,
     tint: [f32; 4],
-    skin_material: Option<String>,
+    skin: Option<usize>,
 }
 
 /// A model's meshes, kept without vertex data.
 struct ModelInfo {
     meshes: Vec<MeshInfo>,
     groups: Vec<(String, Vec<String>)>,
+}
+
+impl ModelInfo {
+    /// A skin replaces each default material with the material in the same slot.
+    fn material(&self, original: &str, skin: Option<usize>) -> String {
+        let replacement = skin.and_then(|skin| {
+            let slot = self.groups.first()?.1.iter().position(|path| path == original)?;
+            self.groups.get(skin)?.1.get(slot)
+        });
+        replacement.map_or_else(|| original.to_owned(), Clone::clone)
+    }
 }
 
 struct MeshInfo {
@@ -218,7 +229,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
             if tint == [0.0; 4] {
                 tint = [1.0; 4];
             }
-            self.place_model(model, &affine, tint, None)?;
+            self.place_model(model, &affine, tint, object.get("m_skin").and_then(Value::as_str))?;
         }
         for object in array(node.get("m_aggregateSceneObjects")) {
             let Some(model) = object.get("m_renderableModel").and_then(Value::as_str) else {
@@ -288,7 +299,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                 set,
                 draw_calls: vec![draw_call],
                 tint,
-                skin_material: None,
+                skin: None,
             })?;
             if let Some(mesh) = mesh {
                 self.push_node(name.clone(), mesh, &affine)?;
@@ -351,11 +362,10 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
         tint: [f32; 4],
         skin: Option<&str>,
     ) -> Result<()> {
-        let skin_material = skin.and_then(|skin| {
-            let groups = &self.infos[model].groups;
-            let group = groups.iter().find(|(name, _)| name == skin)?;
-            group.1.first().cloned()
-        });
+        let groups = &self.infos[model].groups;
+        let skin = skin
+            .and_then(|skin| groups.iter().position(|(name, _)| name == skin))
+            .filter(|&index| index != 0);
         let stem = stem(&self.scene.models[model]).to_owned();
         for m in 0..self.infos[model].meshes.len() {
             let info = &self.infos[model].meshes[m];
@@ -364,7 +374,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
             }
             let mut name = format!("{stem}.{}", info.name);
             if let Some(skin) = skin {
-                name = format!("{name}.{skin}");
+                name = format!("{name}.{}", self.infos[model].groups[skin].0);
             }
             let mesh = match self.mesh_index.get(&name) {
                 Some(&mesh) => mesh,
@@ -378,7 +388,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                         set,
                         draw_calls,
                         tint,
-                        skin_material: skin_material.clone(),
+                        skin,
                     })?;
                     self.mesh_index.insert(name.clone(), mesh);
                     mesh
@@ -399,15 +409,13 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
             set,
             draw_calls,
             tint,
-            skin_material,
+            skin,
         } = spec;
         let mut primitives = Vec::with_capacity(draw_calls.len());
         let mut bounds: Option<Bounds> = None;
         for d in draw_calls {
             let call = &self.infos[model].meshes[mesh].draw_calls[d];
-            let path = skin_material
-                .clone()
-                .unwrap_or_else(|| call.material.clone());
+            let path = self.infos[model].material(&call.material, skin);
             let tint = match call.tint {
                 Some(t) => [0, 1, 2, 3].map(|i| tint[i] * t[i]),
                 None => tint,
@@ -666,7 +674,7 @@ mod tests {
             set: 0,
             draw_calls,
             tint: [1.0; 4],
-            skin_material: None,
+            skin: None,
         };
         assert!(builder.make_mesh(mesh(vec![0])).unwrap().is_none());
         let kept = builder
@@ -676,5 +684,19 @@ mod tests {
         let draws = &builder.scene.meshes[kept].primitives;
         assert_eq!(draws.len(), 1);
         assert_eq!(draws[0].draw_call, 1);
+    }
+
+    #[test]
+    fn a_world_skin_keeps_the_material_slots_of_a_multi_material_mesh() {
+        let model = ModelInfo {
+            meshes: Vec::new(),
+            groups: vec![
+                ("0".into(), vec!["base".into(), "trim".into()]),
+                ("1".into(), vec!["dark_base".into(), "dark_trim".into()]),
+            ],
+        };
+        assert_eq!(model.material("base", Some(1)), "dark_base");
+        assert_eq!(model.material("trim", Some(1)), "dark_trim");
+        assert_eq!(model.material("overlay", Some(1)), "overlay");
     }
 }
