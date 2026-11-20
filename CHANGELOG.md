@@ -48,6 +48,13 @@ All notable changes to this crate are documented here. The format follows
 
 ### Fixed
 
+- World props use their placement's skin, retaining each draw's material slot.
+- World placements honor indexed per-draw and whole-model material overrides.
+- Model and world tints are decoded and blended in linear space. Distinct placement tints
+  produce distinct material bindings.
+- World overlays are lifted one centimetre in mesh space. A short normal array is rejected.
+  These world and material changes update the converter revision to 28.
+
 - A snapshot with an unsupported attribute whose name and type together were long enough no longer
   fails its own `Snapshot::validate`: the name is cut to `MAX_UNSUPPORTED_NAME` where it is made.
 - `tooltips::tooltips` named an item only by the plain localization key, so an item the localization

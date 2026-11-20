@@ -189,7 +189,7 @@ impl Writer {
             if self.work > MAX_WORK {
                 return Err(malformed("world", "too much geometry to write"));
             }
-            let lifted = p.overlay.then(|| overlay_positions(vertices));
+            let lifted = p.overlay.then(|| overlay_positions(vertices)).transpose()?;
             let set = (mesh.set, call.vertices);
             let mut out = self.primitive(vertices, lifted, &call.indices, set)?;
             if let Some(material) = p.material {

@@ -58,10 +58,10 @@ pub(crate) fn convert(
     images: &mut Images,
     texture_uri: &dyn Fn(&str) -> String,
 ) -> Result<GltfMaterial> {
-    convert_with_color(material, base_color(material, tint), images, texture_uri)
+    convert_world(material, linear_tint(tint), images, texture_uri)
 }
 
-/// The world combines its placement and draw-call tints in linear space.
+/// Convert a material with its model and placement tint already in linear space.
 pub(crate) fn convert_world(
     material: &Material,
     tint: [f32; 4],
@@ -135,18 +135,10 @@ fn convert_with_color(
     Ok(out)
 }
 
-/// The tint, faded by `g_flModelTintAmount`, times `g_vColorTint`, made linear.
-fn base_color(material: &Material, tint: [f32; 4]) -> [f32; 4] {
-    let mut color = tint;
-    if let Some(amount) = material.float("g_flModelTintAmount") {
-        color = color.map(|c| 1.0 + (c - 1.0) * amount);
-    }
-    if let Some(v) = material.vector("g_vColorTint") {
-        color = [0, 1, 2, 3].map(|i| color[i] * v[i]);
-        color[3] = 1.0;
-    }
-    let [r, g, b] = srgb_to_linear([color[0], color[1], color[2]]);
-    clamp_color([r, g, b, color[3]])
+/// Decode an authored tint's RGB. Alpha is already a linear coverage factor.
+pub(crate) fn linear_tint([red, green, blue, alpha]: [f32; 4]) -> [f32; 4] {
+    let [red, green, blue] = srgb_to_linear([red, green, blue]);
+    [red, green, blue, alpha]
 }
 
 fn clamp_color(color: [f32; 4]) -> [f32; 4] {
@@ -368,4 +360,26 @@ pub(crate) fn extensions_used(materials: &[Json]) -> Vec<String> {
     used.sort();
     used.dedup();
     used
+}
+
+#[cfg(test)]
+mod tint_tests {
+    use super::*;
+    use crate::kv3::{Object, Value};
+
+    #[test]
+    fn model_tint_weight_blends_the_linear_color_on_both_paths() {
+        let mut material =
+            Material::from_vmat("surface.vmat", &Value::Object(Object::default())).unwrap();
+        material.floats.push(("g_flModelTintAmount".into(), 0.5));
+        let stored = [0.5, 0.5, 0.5, 1.0];
+        let linear = [0.214_041, 0.214_041, 0.214_041, 1.0];
+        let mut images = Images::default();
+        let model = convert(&material, stored, &mut images, &str::to_owned).unwrap();
+        let world = convert_world(&material, linear, &mut images, &str::to_owned).unwrap();
+        for channel in 0..3 {
+            assert!((model.base_color[channel] - 0.607_021).abs() < 0.000_01);
+            assert!((model.base_color[channel] - world.base_color[channel]).abs() < 0.000_01);
+        }
+    }
 }

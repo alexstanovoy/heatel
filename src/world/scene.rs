@@ -1,10 +1,11 @@
 //! The whole world as Source2Viewer 20 exported it (`ExportToFile(VWorld)`): every node of the
 //! world nodes' scene objects, their aggregates' fragments and the entities' models, in its
-//! order; each mesh made once per name, by its first placement's tint; materials made once
-//! per path and tint; images once per texture. Vertex data is not kept: the meshes record
+//! order; meshes with identical model, skin and tint share geometry when neither placement
+//! overrides a draw. Materials are made once per path and tint; images once per texture. Vertex data is not kept: the meshes record
 //! where it comes from and its bounds.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::rc::Rc;
 
 use super::entities::EntityLump;
@@ -13,7 +14,7 @@ use crate::budget::Budget;
 use crate::error::{Error, Result, malformed};
 use crate::export::read_from;
 use crate::kv3::Value;
-use crate::material::{GltfMaterial, Images, Material, convert_world, srgb_to_linear};
+use crate::material::{GltfMaterial, Images, Material, convert_world, linear_tint};
 use crate::model::Model;
 use crate::resource::Resource;
 use crate::source::Source;
@@ -81,16 +82,27 @@ struct MeshSpec<'a> {
     mesh: usize,
     name: String,
     set: usize,
-    draw_calls: Vec<usize>,
+    draw_calls: Range<usize>,
     tint: [f32; 4],
     skin: Option<usize>,
-    overrides: &'a [DrawMaterialOverride<'a>],
+    overrides: Option<&'a PlacementOverrides<'a>>,
 }
 
-struct DrawMaterialOverride<'a> {
-    mesh: usize,
-    draw_call: usize,
-    material: &'a str,
+#[derive(Default)]
+struct PlacementOverrides<'a> {
+    whole: Option<&'a str>,
+    meshes: HashMap<usize, HashMap<usize, &'a str>>,
+}
+
+impl<'a> PlacementOverrides<'a> {
+    fn affects(&self, mesh: usize) -> bool {
+        self.whole.is_some() || self.meshes.contains_key(&mesh)
+    }
+
+    fn material(&self, mesh: usize, draw: usize) -> Option<&'a str> {
+        self.whole
+            .or_else(|| self.meshes.get(&mesh)?.get(&draw).copied())
+    }
 }
 
 /// A model's meshes, kept without vertex data.
@@ -229,6 +241,8 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
     }
 
     fn world_node(&mut self, node: &Value) -> Result<()> {
+        self.budget
+            .slots::<(usize, usize, &str)>(array(node.get("m_materialOverrides")).len())?;
         let overrides = world_material_overrides(node)?;
         for (object_index, object) in array(node.get("m_sceneObjects")).iter().enumerate() {
             let Some(model) = object.get("m_renderableModel").and_then(Value::as_str) else {
@@ -247,7 +261,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                 &affine,
                 linear_tint(tint),
                 object.get("m_skin").and_then(Value::as_str),
-                overrides.get(&object_index).map_or(&[], Vec::as_slice),
+                overrides.get(&object_index),
             )?;
         }
         for object in array(node.get("m_aggregateSceneObjects")) {
@@ -262,7 +276,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                 .first()
                 .is_some_and(|f| f.get("m_nDrawCallIndex").is_none())
             {
-                self.place_model(model, &IDENTITY, [1.0; 4], None, &[])?;
+                self.place_model(model, &IDENTITY, [1.0; 4], None, None)?;
             } else {
                 self.fragments(model, object, fragments)?;
             }
@@ -316,10 +330,10 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                 mesh: 0,
                 name: format!("{name}_fragment{}", id + 1),
                 set,
-                draw_calls: vec![draw_call],
+                draw_calls: draw_call..draw_call + 1,
                 tint,
                 skin: None,
-                overrides: &[],
+                overrides: None,
             })?;
             if let Some(mesh) = mesh {
                 self.push_node(name.clone(), mesh, &affine)?;
@@ -344,7 +358,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
             };
             let skin = text("skin").filter(|s| !matches!(*s, "0" | "default"));
             let affine = place::entity_affine(&values);
-            self.place_model(model, &affine, place::entity_tint(&values), skin, &[])?;
+            self.place_model(model, &affine, place::entity_tint(&values), skin, None)?;
         }
         Ok(())
     }
@@ -363,7 +377,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
             Some(bytes) => {
                 let model = Model::read(&Resource::parse(&bytes)?)
                     .map_err(|e| malformed("world", format!("{path}: {e}")))?;
-                self.infos.push(info(&model));
+                self.infos.push(info(&model)?);
                 self.scene.models.push(path.to_owned());
                 Some(self.infos.len() - 1)
             }
@@ -381,13 +395,14 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
         affine: &Affine,
         tint: [f32; 4],
         skin: Option<&str>,
-        overrides: &[DrawMaterialOverride<'_>],
+        overrides: Option<&PlacementOverrides<'_>>,
     ) -> Result<()> {
         let groups = &self.infos[model].groups;
         let skin = skin
             .and_then(|skin| groups.iter().position(|(name, _)| name == skin))
             .filter(|&index| index != 0);
         let stem = stem(&self.scene.models[model]).to_owned();
+        self.budget.bytes(self.infos[model].meshes.len())?;
         for m in 0..self.infos[model].meshes.len() {
             let info = &self.infos[model].meshes[m];
             if info.draw_calls.is_empty() {
@@ -398,11 +413,11 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                 name = format!("{name}.{}", self.infos[model].groups[skin].0);
             }
             let key = (name.clone(), tint.map(f32::to_bits));
-            let shared = !overrides.iter().any(|row| row.mesh == m);
+            let shared = overrides.is_none_or(|overrides| !overrides.affects(m));
             let mesh = match shared.then(|| self.mesh_index.get(&key)).flatten() {
                 Some(&mesh) => mesh,
                 None => {
-                    let draw_calls = (0..info.draw_calls.len()).collect();
+                    let draw_calls = 0..info.draw_calls.len();
                     let set = self.new_set();
                     let mesh = self.make_mesh(MeshSpec {
                         model,
@@ -438,19 +453,23 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
             skin,
             overrides,
         } = spec;
+        // Charge even filtered draws. Unique placements can revisit the same source mesh.
+        self.budget.slots::<ScenePrimitive>(draw_calls.len())?;
         let mut primitives = Vec::with_capacity(draw_calls.len());
         let mut bounds: Option<Bounds> = None;
         for d in draw_calls {
             let call = &self.infos[model].meshes[mesh].draw_calls[d];
             let path = overrides
-                .iter()
-                .find(|row| row.mesh == mesh && row.draw_call == d)
+                .and_then(|overrides| overrides.material(mesh, d))
                 .map_or_else(
                     || self.infos[model].material(&call.material, skin),
-                    |row| row.material.to_owned(),
+                    str::to_owned,
                 );
             let tint = match call.tint {
-                Some(t) => [0, 1, 2, 3].map(|i| tint[i] * t[i]),
+                Some(stored) => {
+                    let draw = linear_tint(stored);
+                    std::array::from_fn(|i| tint[i] * draw[i])
+                }
                 None => tint,
             };
             let vertices = call.vertices;
@@ -549,43 +568,51 @@ fn is_tool_material(data: &Value) -> bool {
 }
 
 /// What the scene needs of a model.
-fn info(model: &Model) -> ModelInfo {
+fn info(model: &Model) -> Result<ModelInfo> {
     let meshes = model
         .meshes
         .iter()
-        .map(|mesh| MeshInfo {
-            name: mesh.name.clone(),
-            draw_calls: mesh
-                .primitives
-                .iter()
-                .map(|p| DrawCall {
-                    vertices: p.vertices,
-                    material: p.material.clone(),
-                    tint: p.tint,
-                })
-                .collect(),
-            buffers: mesh
-                .vertices
-                .iter()
-                .map(|v| {
-                    let lifted = overlay_positions(v);
-                    [bounds_of(&v.positions), bounds_of(&lifted)]
-                })
-                .collect(),
+        .map(|mesh| {
+            Ok(MeshInfo {
+                name: mesh.name.clone(),
+                draw_calls: mesh
+                    .primitives
+                    .iter()
+                    .map(|p| DrawCall {
+                        vertices: p.vertices,
+                        material: p.material.clone(),
+                        tint: p.tint,
+                    })
+                    .collect(),
+                buffers: mesh
+                    .vertices
+                    .iter()
+                    .map(|v| {
+                        let lifted = overlay_positions(v)?;
+                        Ok([bounds_of(&v.positions), bounds_of(&lifted)])
+                    })
+                    .collect::<Result<_>>()?,
+            })
         })
-        .collect();
-    ModelInfo {
+        .collect::<Result<_>>()?;
+    Ok(ModelInfo {
         meshes,
         groups: model.material_groups.clone(),
-    }
+    })
 }
 
 /// The positions of `vertices` lifted along their normals, as an overlay's are.
-pub(super) fn overlay_positions(vertices: &Vertices) -> Vec<[f32; 3]> {
+pub(super) fn overlay_positions(vertices: &Vertices) -> Result<Vec<[f32; 3]>> {
     let Some(normals) = &vertices.normals else {
-        return vertices.positions.clone();
+        return Ok(vertices.positions.clone());
     };
-    vertices
+    if normals.len() != vertices.positions.len() {
+        return Err(malformed(
+            "world",
+            "overlay normals and positions have different counts",
+        ));
+    }
+    Ok(vertices
         .positions
         .iter()
         .zip(normals)
@@ -595,7 +622,7 @@ pub(super) fn overlay_positions(vertices: &Vertices) -> Vec<[f32; 3]> {
                 if v.is_finite() { v } else { 0.0 }
             })
         })
-        .collect()
+        .collect())
 }
 
 /// Whether the material is drawn over other geometry (decals, path borders).
@@ -645,21 +672,16 @@ fn vector4(value: Option<&Value>) -> [f32; 4] {
     std::array::from_fn(|i| items.get(i).and_then(Value::as_f64).unwrap_or(0.0) as f32)
 }
 
-fn linear_tint([red, green, blue, alpha]: [f32; 4]) -> [f32; 4] {
-    let [red, green, blue] = srgb_to_linear([red, green, blue]);
-    [red, green, blue, alpha]
-}
-
-/// Material substitutions belong to a particular placement and draw.
-fn world_material_overrides(node: &Value) -> Result<HashMap<usize, Vec<DrawMaterialOverride<'_>>>> {
+/// The scene object index addresses the regular placements, separately from aggregates.
+fn world_material_overrides(node: &Value) -> Result<HashMap<usize, PlacementOverrides<'_>>> {
     let rows = array(node.get("m_materialOverrides"));
     check_count(rows.len(), "material overrides")?;
-    let mut by_object = HashMap::<usize, Vec<DrawMaterialOverride<'_>>>::new();
+    let mut by_object = HashMap::<usize, PlacementOverrides<'_>>::new();
     for row in rows {
         let index = |key| {
             row.get(key)
                 .and_then(Value::as_u64)
-                .and_then(|number| usize::try_from(number).ok())
+                .and_then(|number| u32::try_from(number).ok())
                 .ok_or_else(|| malformed("world", format!("material override has no valid {key}")))
         };
         let material = row
@@ -667,14 +689,19 @@ fn world_material_overrides(node: &Value) -> Result<HashMap<usize, Vec<DrawMater
             .and_then(Value::as_str)
             .filter(|path| !path.is_empty())
             .ok_or_else(|| malformed("world", "material override has no material"))?;
-        by_object
-            .entry(index("m_nSceneObjectIndex")?)
-            .or_default()
-            .push(DrawMaterialOverride {
-                mesh: index("m_nSubSceneObject")?,
-                draw_call: index("m_nDrawCallIndex")?,
-                material,
-            });
+        let object = index("m_nSceneObjectIndex")? as usize;
+        let mesh = index("m_nSubSceneObject")? as usize;
+        let draw = index("m_nDrawCallIndex")?;
+        let overrides = by_object.entry(object).or_default();
+        if draw == u32::MAX {
+            overrides.whole.get_or_insert(material);
+        } else {
+            overrides
+                .meshes
+                .entry(mesh)
+                .or_default()
+                .insert(draw as usize, material);
+        }
     }
     Ok(by_object)
 }
@@ -742,11 +769,11 @@ mod tests {
             draw_calls,
             tint: [1.0; 4],
             skin: None,
-            overrides: &[],
+            overrides: None,
         };
-        assert!(builder.make_mesh(mesh(vec![0])).unwrap().is_none());
+        assert!(builder.make_mesh(mesh(0..1)).unwrap().is_none());
         let kept = builder
-            .make_mesh(mesh(vec![0, 1]))
+            .make_mesh(mesh(0..2))
             .unwrap()
             .expect("a visible surface");
         let draws = &builder.scene.meshes[kept].primitives;
@@ -775,6 +802,161 @@ mod tests {
             normals: Some(vec![[0.0, 1.0, 0.0]]),
             ..Vertices::default()
         };
-        assert_eq!(overlay_positions(&vertices), [[15.0, 0.01, 25.0]]);
+        assert_eq!(overlay_positions(&vertices).unwrap(), [[15.0, 0.01, 25.0]]);
+    }
+
+    fn override_row(entries: &[(&str, Value)]) -> Value {
+        let mut object = Object::default();
+        for (key, value) in entries {
+            object.push((*key).to_owned(), value.clone());
+        }
+        Value::Object(object)
+    }
+
+    fn override_table(rows: Vec<Value>) -> Value {
+        override_row(&[("m_materialOverrides", Value::Array(rows))])
+    }
+
+    #[test]
+    fn override_rows_require_nonnegative_indices_and_a_material() {
+        let valid = [
+            ("m_nSceneObjectIndex", Value::UInt(0)),
+            ("m_nSubSceneObject", Value::UInt(0)),
+            ("m_nDrawCallIndex", Value::UInt(0)),
+            ("m_pMaterial", Value::String("custom.vmat".into())),
+        ];
+        for omitted in 0..valid.len() {
+            let mut fields = valid.to_vec();
+            fields.remove(omitted);
+            assert!(
+                world_material_overrides(&override_table(vec![override_row(&fields)])).is_err()
+            );
+        }
+        for invalid in [Value::Int(-1), Value::String("".into())] {
+            let mut fields = valid.clone();
+            let index = if matches!(invalid, Value::Int(_)) {
+                2
+            } else {
+                3
+            };
+            fields[index].1 = invalid;
+            assert!(
+                world_material_overrides(&override_table(vec![override_row(&fields)])).is_err()
+            );
+        }
+        assert!(
+            world_material_overrides(&override_table(vec![Value::Null; MAX_ITEMS + 1])).is_err()
+        );
+    }
+
+    #[test]
+    fn large_override_tables_charge_for_filtered_draws_before_exporting_them() {
+        const DRAWS: usize = 16_384;
+        let table = override_table(
+            (0..DRAWS)
+                .map(|draw| {
+                    override_row(&[
+                        ("m_nSceneObjectIndex", Value::UInt(0)),
+                        ("m_nSubSceneObject", Value::UInt(0)),
+                        ("m_nDrawCallIndex", Value::UInt(draw as u64)),
+                        ("m_pMaterial", Value::String("tool.vmat".into())),
+                    ])
+                })
+                .collect(),
+        );
+        let overrides = world_material_overrides(&table).unwrap();
+        let indexed = &overrides[&0];
+        for draw in (0..DRAWS).rev() {
+            assert_eq!(indexed.material(0, draw), Some("tool.vmat"));
+        }
+        assert_eq!(indexed.material(0, DRAWS), None);
+        assert_eq!(indexed.material(1, 0), None);
+        let source = SliceSource::<Vec<u8>>::default();
+        let mut builder = Builder::new(&source, &[], &str::to_owned);
+        builder.budget = Budget::new(128);
+        builder
+            .material_files
+            .insert("tool.vmat".into(), WorldMaterial::Tool);
+        builder.infos.push(ModelInfo {
+            meshes: vec![MeshInfo {
+                name: "large".into(),
+                draw_calls: (0..DRAWS)
+                    .map(|_| DrawCall {
+                        vertices: 0,
+                        material: "tool.vmat".into(),
+                        tint: None,
+                    })
+                    .collect(),
+                buffers: vec![[None, None]],
+            }],
+            groups: Vec::new(),
+        });
+        let result = builder.make_mesh(MeshSpec {
+            model: 0,
+            mesh: 0,
+            name: "large".into(),
+            set: 0,
+            draw_calls: 0..DRAWS,
+            tint: [1.0; 4],
+            skin: None,
+            overrides: overrides.get(&0),
+        });
+        assert!(result.unwrap_err().to_string().contains("more than it may"));
+    }
+
+    #[test]
+    fn world_draw_and_placement_tints_multiply_in_linear_space() {
+        let source = SliceSource::<Vec<u8>>::default();
+        let mut builder = Builder::new(&source, &[], &str::to_owned);
+        let material =
+            Material::from_vmat("surface.vmat", &Value::Object(Object::default())).unwrap();
+        builder.material_files.insert(
+            "surface.vmat".into(),
+            WorldMaterial::Visible(Rc::new(material)),
+        );
+        builder.infos.push(ModelInfo {
+            meshes: vec![MeshInfo {
+                name: "surface".into(),
+                draw_calls: vec![DrawCall {
+                    vertices: 0,
+                    material: "surface.vmat".into(),
+                    tint: Some([0.5, 0.5, 0.5, 0.5]),
+                }],
+                buffers: vec![[None, None]],
+            }],
+            groups: Vec::new(),
+        });
+        builder
+            .make_mesh(MeshSpec {
+                model: 0,
+                mesh: 0,
+                name: "surface".into(),
+                set: 0,
+                draw_calls: 0..1,
+                tint: linear_tint([0.5, 0.5, 0.5, 0.5]),
+                skin: None,
+                overrides: None,
+            })
+            .unwrap();
+        let color = builder.scene.materials[0].gltf.base_color;
+        for channel in &color[..3] {
+            assert!((*channel - 0.045_814).abs() < 0.000_01, "{color:?}");
+        }
+        assert_eq!(color[3], 0.25);
+    }
+
+    #[test]
+    fn a_short_normal_array_cannot_drop_an_overlay_vertex() {
+        let vertices = Vertices {
+            positions: vec![[0.0; 3]; 2],
+            normals: Some(vec![[0.0, 1.0, 0.0]]),
+            ..Vertices::default()
+        };
+        assert!(
+            overlay_positions(&vertices)
+                .unwrap_err()
+                .to_string()
+                .contains("different counts")
+        );
     }
 }

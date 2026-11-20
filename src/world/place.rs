@@ -2,7 +2,7 @@
 //! entity's origin, angles and scales) as glTF node matrices, and entities' tints.
 
 use crate::kv3::Value;
-use crate::material::srgb_to_linear;
+use crate::material::linear_tint;
 use crate::vertices::SCALE;
 
 /// A placement in Source's frame: rotation-scale rows with the translation as fourth column
@@ -107,8 +107,8 @@ pub(super) fn entity_tint(entity: &Value) -> [f32; 4] {
     if amount > 1.0 {
         amount /= 255.0;
     }
-    let [r, g, b] = srgb_to_linear(color);
-    [r, g, b, amount]
+    let [red, green, blue] = color;
+    linear_tint([red, green, blue, amount])
 }
 
 /// Three numbers of key `key`: an array, or a string of three numbers separated by spaces.
