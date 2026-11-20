@@ -103,7 +103,12 @@ impl ModelInfo {
     /// A skin replaces each default material with the material in the same slot.
     fn material(&self, original: &str, skin: Option<usize>) -> String {
         let replacement = skin.and_then(|skin| {
-            let slot = self.groups.first()?.1.iter().position(|path| path == original)?;
+            let slot = self
+                .groups
+                .first()?
+                .1
+                .iter()
+                .position(|path| path == original)?;
             self.groups.get(skin)?.1.get(slot)
         });
         replacement.map_or_else(|| original.to_owned(), Clone::clone)
@@ -662,11 +667,14 @@ fn world_material_overrides(node: &Value) -> Result<HashMap<usize, Vec<DrawMater
             .and_then(Value::as_str)
             .filter(|path| !path.is_empty())
             .ok_or_else(|| malformed("world", "material override has no material"))?;
-        by_object.entry(index("m_nSceneObjectIndex")?).or_default().push(DrawMaterialOverride {
-            mesh: index("m_nSubSceneObject")?,
-            draw_call: index("m_nDrawCallIndex")?,
-            material,
-        });
+        by_object
+            .entry(index("m_nSceneObjectIndex")?)
+            .or_default()
+            .push(DrawMaterialOverride {
+                mesh: index("m_nSubSceneObject")?,
+                draw_call: index("m_nDrawCallIndex")?,
+                material,
+            });
     }
     Ok(by_object)
 }
