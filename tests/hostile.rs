@@ -674,7 +674,12 @@ fn world(nodes: usize, placed: usize, mesh: &str) -> Vec<(&'static str, Vec<u8>)
 }
 
 /// The world exported, and how often each file was read.
-fn export<'a>(files: &[(&'a str, Vec<u8>)]) -> (heatel::Result<()>, HashMap<&'a str, usize>) {
+fn export<'a>(
+    files: &[(&'a str, Vec<u8>)],
+) -> (
+    heatel::Result<heatel::world::ExportedWorld>,
+    HashMap<&'a str, usize>,
+) {
     let (bytes, starts) = package(files);
     let mut src = SliceSource::default();
     src.insert("maps/w.vpk", bytes);
@@ -704,7 +709,7 @@ fn export<'a>(files: &[(&'a str, Vec<u8>)]) -> (heatel::Result<()>, HashMap<&'a 
         .iter()
         .map(|(at, path)| (*path, reads.get(at).copied().unwrap_or(0)))
         .collect();
-    (result.map(drop), reads)
+    (result, reads)
 }
 
 /// A world that lists its node a thousand times read and placed it a thousand times, and read
@@ -715,6 +720,47 @@ fn a_world_reads_each_of_its_files_once() {
     result.unwrap();
     assert_eq!(reads["maps/w/node.vwnod_c"], 1);
     assert_eq!(reads["materials/m.vmat_c"], 1);
+}
+
+#[test]
+fn a_damaged_model_does_not_discard_other_world_geometry() {
+    let mut files = world(1, 1, "healthy");
+    let node = files
+        .iter_mut()
+        .find(|(path, _)| *path == "maps/w/node.vwnod_c")
+        .unwrap();
+    node.1 = data_file(&K::Obj(vec![(
+        "m_sceneObjects",
+        K::Arr(
+            ["models/broken.vmdl", "models/m.vmdl", "models/broken.vmdl"]
+                .map(|path| K::Obj(vec![("m_renderableModel", s(path))]))
+                .into(),
+        ),
+    )]));
+    files.push(("models/broken.vmdl_c", vec![0, 1, 2]));
+    let (output, reads) = export(&files);
+    let output = output.expect("the world retains its healthy model");
+    let json: serde_json::Value = serde_json::from_slice(&output.gltf).unwrap();
+    assert!(
+        json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["name"] == "m.healthy")
+    );
+    assert_eq!(
+        reads["models/broken.vmdl_c"], 1,
+        "a repeated bad model is read once"
+    );
+    let [warning] = output.skipped_models.as_slice() else {
+        panic!("one diagnostic per model")
+    };
+    assert_eq!(warning.path, "models/broken.vmdl");
+    assert!(
+        warning.reason.contains("resource header"),
+        "{}",
+        warning.reason
+    );
 }
 
 /// Every placement of a model names a node after its mesh: a long mesh name placed again and

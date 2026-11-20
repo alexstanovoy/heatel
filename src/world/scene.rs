@@ -9,6 +9,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use super::entities::EntityLump;
+use super::export::SkippedModel;
 use super::place::{self, Affine, IDENTITY};
 use crate::budget::Budget;
 use crate::error::{Error, Result, malformed};
@@ -39,6 +40,7 @@ pub(super) struct Scene {
     pub nodes: Vec<SceneNode>,
     pub materials: Vec<SceneMaterial>,
     pub images: Images,
+    pub skipped_models: Vec<SkippedModel>,
 }
 
 pub(super) struct SceneNode {
@@ -183,6 +185,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                 nodes: Vec::new(),
                 materials: Vec::new(),
                 images: Images::default(),
+                skipped_models: Vec::new(),
             },
             infos: Vec::new(),
             model_index: HashMap::new(),
@@ -368,20 +371,27 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
         if let Some(&known) = self.model_index.get(path) {
             return Ok(known);
         }
-        let bytes = match read_from(self.src, self.packages, &compiled(path)) {
-            Ok(bytes) => Some(bytes),
-            Err(Error::NotFound(_)) => None,
-            Err(e) => return Err(e),
-        };
-        let index = match bytes {
-            Some(bytes) => {
-                let model = Model::read(&Resource::parse(&bytes)?)
-                    .map_err(|e| malformed("world", format!("{path}: {e}")))?;
-                self.infos.push(info(&model)?);
+        self.budget.bytes(path.len())?;
+        let decoded = read_from(self.src, self.packages, &compiled(path))
+            .and_then(|bytes| Model::read(&Resource::parse(&bytes)?))
+            .and_then(|model| info(&model));
+        let index = match decoded {
+            Ok(info) => {
+                self.infos.push(info);
                 self.scene.models.push(path.to_owned());
                 Some(self.infos.len() - 1)
             }
-            None => None,
+            Err(Error::NotFound(_)) => None,
+            Err(error) => {
+                let reason = error.to_string();
+                self.budget.slots::<SkippedModel>(1)?;
+                self.budget.bytes(path.len() + reason.len())?;
+                self.scene.skipped_models.push(SkippedModel {
+                    path: path.to_owned(),
+                    reason,
+                });
+                None
+            }
         };
         self.model_index.insert(path.to_owned(), index);
         Ok(index)

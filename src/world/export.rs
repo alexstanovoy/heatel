@@ -36,6 +36,16 @@ pub struct WorldOptions<'a> {
     pub generator: &'a str,
 }
 
+/// A model omitted from a world export because it could not be read.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct SkippedModel {
+    /// The model path, without the compiled suffix.
+    pub path: String,
+    /// Why the model could not be exported.
+    pub reason: String,
+}
+
 /// A world cut to a band, ready to write.
 #[derive(Clone, Debug)]
 pub struct ExportedWorld {
@@ -49,6 +59,8 @@ pub struct ExportedWorld {
     /// sorted by their compiled paths, each once: the materials blend or animate them, so the
     /// document carries one layer and these are the textures to write whole.
     pub layers: Vec<String>,
+    /// Malformed models omitted from the world, each reported once.
+    pub skipped_models: Vec<SkippedModel>,
 }
 
 /// Exports the world at `path` (`maps/.../world.vwrld_c`) from `packages` (the map's package
@@ -103,5 +115,6 @@ pub fn export_world(
             .map(|&i| scene.images.list[i].clone())
             .collect(),
         layers,
+        skipped_models: scene.skipped_models,
     })
 }

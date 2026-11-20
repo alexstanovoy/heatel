@@ -48,6 +48,9 @@ All notable changes to this crate are documented here. The format follows
 
 ### Fixed
 
+- World exports keep healthy models when an individual model is malformed and report each omitted model.
+- Enabled self-illumination exports the material’s linear emissive tint and strength (converter revision 29).
+
 - World props use their placement's skin, retaining each draw's material slot.
 - World placements honor indexed per-draw and whole-model material overrides.
 - Model and world tints are decoded and blended in linear space. Distinct placement tints

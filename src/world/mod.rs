@@ -12,7 +12,7 @@ mod scene;
 
 pub use crop::Band;
 pub use entities::EntityLump;
-pub use export::{ExportedWorld, WorldOptions, export_world};
+pub use export::{ExportedWorld, SkippedModel, WorldOptions, export_world};
 pub use gridnav::GridNav;
 pub use light::{Light, Lighting, Shade, lighting};
 pub use placements::{Placement, placements};

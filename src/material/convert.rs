@@ -30,6 +30,7 @@ pub(crate) struct GltfMaterial {
     pub metallic_roughness_texture: Option<usize>,
     pub occlusion_texture: Option<usize>,
     pub emissive_texture: Option<usize>,
+    pub emissive: Option<[f32; 3]>,
     pub specular_texture: Option<usize>,
     pub extras: Json,
 }
@@ -128,10 +129,20 @@ fn convert_with_color(
         metallic_roughness_texture: None,
         occlusion_texture: None,
         emissive_texture: None,
+        emissive: None,
         specular_texture: None,
         extras: material.extras.clone(),
     };
     tie_textures(&mut out, remaps, images, texture_uri)?;
+    if out.emissive_texture.is_some() && material.int("F_SELF_ILLUM") > 0 {
+        let [r, g, b, _] = clamp_color(material.vector("g_vSelfIllumTint").unwrap_or([1.0; 4]));
+        let scale = material
+            .float("g_flSelfIllumScale")
+            .filter(|scale| scale.is_finite())
+            .unwrap_or(1.0)
+            .max(0.0);
+        out.emissive = Some(srgb_to_linear([r, g, b]).map(|channel| channel * scale));
+    }
     Ok(out)
 }
 
@@ -329,6 +340,16 @@ impl GltfMaterial {
             out["doubleSided"] = json!(true);
         }
         let mut extensions = Map::new();
+        if let Some(color) = self.emissive {
+            let strength = color.into_iter().fold(1.0, f32::max);
+            out["emissiveFactor"] = json!(color.map(|channel| channel / strength));
+            if strength > 1.0 {
+                extensions.insert(
+                    "KHR_materials_emissive_strength".into(),
+                    json!({ "emissiveStrength": strength }),
+                );
+            }
+        }
         if let Some(color) = self.specular {
             let mut specular = Map::new();
             if color != [1.0; 3] {
@@ -366,6 +387,39 @@ pub(crate) fn extensions_used(materials: &[Json]) -> Vec<String> {
 mod tint_tests {
     use super::*;
     use crate::kv3::{Object, Value};
+
+    #[test]
+    fn enabled_self_illumination_exports_its_authored_factor() {
+        let mut material =
+            Material::from_vmat("glow.vmat", &Value::Object(Object::default())).unwrap();
+        material.shader = "hero.vfx".into();
+        material
+            .textures
+            .push(("g_tMasks1".into(), "masks.vtex".into()));
+        material.ints.push(("F_SELF_ILLUM".into(), 1));
+        material
+            .vectors
+            .push(("g_vSelfIllumTint".into(), [0.5, 1.0, 0.0, 1.0]));
+        material.floats.push(("g_flSelfIllumScale".into(), 0.5));
+        let mut images = Images::default();
+        let gltf = convert(&material, [1.0; 4], &mut images, &str::to_owned).unwrap();
+        let json = gltf.to_json(|index| index);
+        assert!(json.get("emissiveTexture").is_some());
+        let factor = json["emissiveFactor"]
+            .as_array()
+            .expect("the authored factor");
+        for (component, expected) in factor.iter().zip([0.107_020_5, 0.5, 0.0]) {
+            assert!((component.as_f64().unwrap() - expected).abs() < 0.000_01);
+        }
+        material.ints.clear();
+        let disabled = convert(&material, [1.0; 4], &mut images, &str::to_owned).unwrap();
+        assert!(
+            disabled
+                .to_json(|index| index)
+                .get("emissiveFactor")
+                .is_none()
+        );
+    }
 
     #[test]
     fn model_tint_weight_blends_the_linear_color_on_both_paths() {
