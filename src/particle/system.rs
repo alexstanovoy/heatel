@@ -46,19 +46,17 @@ const MAX_PATH: usize = 256;
 /// out, and every value the file leaves out at the schema's default.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(try_from = "RawSystem"))]
 #[non_exhaustive]
 pub struct System {
     /// The behaviour version (`m_nBehaviorVersion`): below 6 an initializer that writes only
     /// what earlier ones wrote is skipped, from `first_multiple_override` on it runs.
     pub behavior_version: i32,
     /// Optional authored snapshot resource path.
-    #[cfg_attr(feature = "serde", serde(default))]
     pub snapshot_file: Option<String>,
     /// Decoded snapshot supplied by the resource loader.
-    #[cfg_attr(feature = "serde", serde(default))]
     pub snapshot: Option<super::Snapshot>,
     /// Control point to which the snapshot resource is bound.
-    #[cfg_attr(feature = "serde", serde(default))]
     pub snapshot_control_point: super::ControlPoint,
     /// See `behavior_version` (-1 none).
     pub first_multiple_override: i32,
@@ -70,14 +68,11 @@ pub struct System {
     pub max_time_step: f32,
     /// Seconds a system goes undrawn before it sleeps: no longer simulated until it is
     /// drawn again (`m_flNoDrawTimeToGoToSleep`).
-    #[cfg_attr(feature = "serde", serde(default = "default_sleep"))]
     pub sleep_after: f32,
     /// The box its particles' bounds are padded by, about each of them, for whether it is in
     /// view (`m_BoundingBoxMin`, `m_BoundingBoxMax`).
-    #[cfg_attr(feature = "serde", serde(default = "default_bounds"))]
     pub bounds: [[f32; 3]; 2],
     /// An unbounded system contributes nothing to its parent's bounds (`m_bInfiniteBounds`).
-    #[cfg_attr(feature = "serde", serde(default))]
     pub infinite_bounds: bool,
     /// What a particle starts with before the initializers.
     pub constants: Constants,
@@ -99,6 +94,71 @@ pub struct System {
     pub renderers: Vec<Function<Renderer>>,
     /// Child systems.
     pub children: Vec<Child>,
+}
+
+#[cfg(feature = "serde")]
+#[derive(Deserialize)]
+struct RawSystem {
+    behavior_version: i32,
+    #[serde(default)]
+    snapshot_file: Option<String>,
+    #[serde(default)]
+    snapshot: Option<super::Snapshot>,
+    #[serde(default)]
+    snapshot_control_point: super::ControlPoint,
+    first_multiple_override: i32,
+    max_particles: u32,
+    initial_particles: u32,
+    max_time_step: f32,
+    #[serde(default = "default_sleep")]
+    sleep_after: f32,
+    #[serde(default = "default_bounds")]
+    bounds: [[f32; 3]; 2],
+    #[serde(default)]
+    infinite_bounds: bool,
+    constants: Constants,
+    group: i32,
+    pre_emission: Vec<Function<PreEmission>>,
+    emitters: Vec<Function<Emitter>>,
+    initializers: Vec<Function<Initializer>>,
+    operators: Vec<Function<Operator>>,
+    forces: Vec<Function<Force>>,
+    constraints: Vec<Function<Constraint>>,
+    renderers: Vec<Function<Renderer>>,
+    children: Vec<Child>,
+}
+
+#[cfg(feature = "serde")]
+impl TryFrom<RawSystem> for System {
+    type Error = crate::error::Error;
+
+    fn try_from(raw: RawSystem) -> Result<Self> {
+        let system = Self {
+            behavior_version: raw.behavior_version,
+            snapshot_file: raw.snapshot_file,
+            snapshot: raw.snapshot,
+            snapshot_control_point: raw.snapshot_control_point,
+            first_multiple_override: raw.first_multiple_override,
+            max_particles: raw.max_particles,
+            initial_particles: raw.initial_particles,
+            max_time_step: raw.max_time_step,
+            sleep_after: raw.sleep_after,
+            bounds: raw.bounds,
+            infinite_bounds: raw.infinite_bounds,
+            constants: raw.constants,
+            group: raw.group,
+            pre_emission: raw.pre_emission,
+            emitters: raw.emitters,
+            initializers: raw.initializers,
+            operators: raw.operators,
+            forces: raw.forces,
+            constraints: raw.constraints,
+            renderers: raw.renderers,
+            children: raw.children,
+        };
+        system.validate()?;
+        Ok(system)
+    }
 }
 
 /// What a particle starts with (`m_ConstantColor` and the like).
@@ -278,9 +338,30 @@ impl System {
         }
         self.validate_sets()?;
         if self.children.len() > MAX_CHILDREN
-            || self.children.iter().any(|c| c.path.len() > MAX_PATH)
+            || self
+                .children
+                .iter()
+                .any(|c| c.path.len() > MAX_PATH || !(c.delay >= 0.0 && c.delay.is_finite()))
         {
-            return Err(malformed(WHAT, "too many children or too long a path"));
+            return Err(malformed(
+                WHAT,
+                "too many children, too long a path, or invalid delay",
+            ));
+        }
+        let c = &self.constants;
+        let constants_finite = c.color.iter().all(|v| v.is_finite())
+            && c.normal.iter().all(|v| v.is_finite())
+            && [
+                c.radius,
+                c.lifetime,
+                c.rotation,
+                c.rotation_speed,
+                c.sequence,
+            ]
+            .into_iter()
+            .all(f32::is_finite);
+        if !constants_finite {
+            return Err(malformed(WHAT, "a constant that is no number"));
         }
         if !(1..=MAX_PARTICLES).contains(&self.max_particles)
             || self.initial_particles > self.max_particles

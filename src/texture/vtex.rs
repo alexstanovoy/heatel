@@ -5,6 +5,7 @@ use super::format::{PixelFormat, Stored};
 use super::ktx2::{self, Encoding};
 use super::rgba;
 use super::sheet::{self, Sheet};
+use crate::budget::Budget;
 use crate::bytes::Cursor;
 use crate::error::{Result, malformed};
 use crate::resource::Resource;
@@ -42,6 +43,11 @@ impl Texture {
     /// blocks (the smallest first in the file), LZ4-compressed levels expanded. Cube maps,
     /// volumes and arrays are errors, so are JPEG-coded textures.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
+        Self::parse_in(bytes, &mut Budget::named(WHAT))
+    }
+
+    /// Like [`parse`](Self::parse), charging PNG decode buffers to `budget` before allocating.
+    pub fn parse_in(bytes: &[u8], budget: &mut Budget) -> Result<Self> {
         let resource = Resource::parse(bytes)?;
         let data = resource
             .block(b"DATA")
@@ -51,7 +57,7 @@ impl Texture {
         let sizes = header.level_sizes()?;
         let raw = resource.trailing();
         let mips = if matches!(stored, Stored::Png) {
-            vec![decode_png(raw, width, height)?]
+            vec![decode_png(raw, width, height, budget)?]
         } else {
             header.read_levels(raw, &sizes)?
         };
@@ -163,7 +169,7 @@ impl Texture {
         };
         let (bw, bh, _) = self.format.block();
         let (x0, y0) = (fx0 / bw * bw, fy0 / bh * bh);
-        if x1 <= x0 || y1 <= y0 {
+        if x1 <= fx0 || y1 <= fy0 {
             return Self {
                 sheet: None,
                 ..self.clone()
@@ -578,8 +584,9 @@ fn rgba8_size(width: u32, height: u32) -> Result<usize> {
 }
 
 /// The RGBA8 pixels of a PNG-coded level, which must be the texture's size.
-fn decode_png(png: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+fn decode_png(png: &[u8], width: u32, height: u32, budget: &mut Budget) -> Result<Vec<u8>> {
     let png_err = |e: png::DecodingError| malformed(WHAT, format!("png: {e}"));
+    rgba8_size(width, height)?;
     let mut decoder = png::Decoder::new(IoCursor::new(png));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info().map_err(png_err)?;
@@ -593,12 +600,17 @@ fn decode_png(png: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
             ),
         ));
     }
-    let mut pixels = vec![
-        0;
-        reader
-            .output_buffer_size()
-            .ok_or_else(|| malformed(WHAT, "png size"))?
-    ];
+    let size = reader
+        .output_buffer_size()
+        .ok_or_else(|| malformed(WHAT, "png size"))?;
+    if size > MAX_BYTES {
+        return Err(malformed(
+            WHAT,
+            format!("png decodes to {size} bytes, more than {MAX_BYTES}"),
+        ));
+    }
+    budget.charge(size)?;
+    let mut pixels = vec![0; size];
     let frame = reader.next_frame(&mut pixels).map_err(png_err)?;
     pixels.truncate(frame.buffer_size());
     let (colors, texels) = (frame.color_type, width as usize * height as usize);

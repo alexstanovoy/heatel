@@ -13,6 +13,8 @@ use crate::resource::Resource;
 /// Most bone-frames one call decodes (each becomes up to three keyframes); the largest
 /// model we know (a destruction animation) takes 41 k.
 const MAX_BONE_FRAMES: usize = 1 << 21;
+/// Most frames one clip may claim, even on a skeleton with no bones.
+const MAX_FRAMES: usize = 1 << 20;
 /// Most element reads, frame-block visits and segment bones one call goes through.
 const MAX_WORK: usize = 1 << 28;
 /// Most bone entries the decode key's channels may take (four channels of 150 bones here).
@@ -383,9 +385,15 @@ fn decode(
         .and_then(Value::as_u64)
         .and_then(|f| usize::try_from(f).ok())
         .ok_or_else(|| malformed("animation", "no frame count"))?;
+    if frames > MAX_FRAMES {
+        return Err(malformed(
+            "animation",
+            format!("{frames} frames, more than {MAX_FRAMES}"),
+        ));
+    }
     Budget::spend(
         &mut budget.bone_frames,
-        frames.max(1).saturating_mul(bones.len()),
+        frames.max(1).saturating_mul(bones.len().max(1)),
         "frames",
     )?;
     let fps = frame_rate(desc)?;
@@ -405,7 +413,7 @@ fn decode(
         .collect();
     let mut writers: Vec<TrackWriter> = bones.iter().map(|_| TrackWriter::default()).collect();
     for frame in 0..frames {
-        Budget::spend(&mut budget.work, blocks.len(), "frame blocks")?;
+        Budget::spend(&mut budget.work, blocks.len().max(1), "frame blocks")?;
         for block in blocks.iter().filter(|b| (b.start..=b.end).contains(&frame)) {
             for &i in &block.segments {
                 if let Some(segment) = segments.get(i, budget)? {

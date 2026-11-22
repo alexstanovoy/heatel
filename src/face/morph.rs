@@ -8,6 +8,7 @@
 //! atlas. The first bundle of a rectangle holds the position delta (and a speed), the second the
 //! normal delta (and a wrinkle weight).
 
+use crate::budget::Budget;
 use crate::error::{Result, malformed};
 use crate::kv3::Value;
 use crate::model::{array, finite, rotate};
@@ -177,7 +178,10 @@ impl MorphSet {
         if datas.len() > MAX_FLEXES {
             return Err(malformed(WHAT, format!("{} flexes", datas.len())));
         }
-        let rects = datas.iter().map(rects).collect::<Result<_>>()?;
+        let rects = datas
+            .iter()
+            .map(|data| rects(data, width, height))
+            .collect::<Result<_>>()?;
         Ok(Self {
             width,
             height,
@@ -189,25 +193,48 @@ impl MorphSet {
     }
 
     /// The deltas of every flex that moves a vertex of a buffer of `vertices`, out of the atlas
-    /// (`width x height` RGBA8 texels), in flex order.
+    /// (`width x height` RGBA8 texels), in flex order, bounded by a default [`Budget`].
     ///
     /// # Errors
     ///
-    /// An atlas of the wrong length, more vertices than the grid has texels, and a rectangle
-    /// past the grid or the atlas.
+    /// An atlas of the wrong length, more vertices than the grid has texels, a rectangle past
+    /// the grid or the atlas, or targets that exceed the default budget.
     pub fn targets(
         &self,
         atlas: &[u8],
         size: (usize, usize),
         vertices: usize,
     ) -> Result<Vec<Target>> {
+        self.targets_in(atlas, size, vertices, &mut Budget::named(WHAT))
+    }
+
+    /// Like [`targets`](Self::targets), charging the target buffers to `budget` before
+    /// allocating them.
+    pub fn targets_in(
+        &self,
+        atlas: &[u8],
+        size: (usize, usize),
+        vertices: usize,
+        budget: &mut Budget,
+    ) -> Result<Vec<Target>> {
         let (aw, ah) = size;
-        if atlas.len() != aw * ah * 4 {
+        let expected = aw.checked_mul(ah).and_then(|texels| texels.checked_mul(4));
+        if expected != Some(atlas.len()) {
             return Err(malformed(WHAT, "an atlas of the wrong size"));
         }
         if vertices > self.width * self.height {
             return Err(malformed(WHAT, "more vertices than the grid has texels"));
         }
+        let per_target = vertices
+            .checked_mul(2 * size_of::<[f32; 3]>())
+            .and_then(|bytes| bytes.checked_add(size_of::<Target>()))
+            .ok_or_else(|| malformed(WHAT, "morph targets overflow"))?;
+        let total = self
+            .rects
+            .len()
+            .checked_mul(per_target)
+            .ok_or_else(|| malformed(WHAT, "morph targets overflow"))?;
+        budget.charge(total)?;
         let mut out = Vec::new();
         for (desc, rects) in self.rects.iter().enumerate() {
             let mut target = Target {
@@ -236,7 +263,9 @@ impl MorphSet {
     ) -> Result<()> {
         let texels = |f: f32, of: usize| (f * of as f32).round().max(0.0) as usize;
         let (rw, rh) = (texels(rect.width, aw), texels(rect.height, ah));
-        if rect.x + rw > self.width || rect.y + rh > self.height {
+        if rect.x.checked_add(rw).is_none_or(|end| end > self.width)
+            || rect.y.checked_add(rh).is_none_or(|end| end > self.height)
+        {
             return Err(malformed(WHAT, "a rectangle past the grid"));
         }
         for (source, kind) in rect.sources.iter().zip(&self.bundles) {
@@ -246,7 +275,9 @@ impl MorphSet {
                 Bundle::Other => continue,
             };
             let (su, sv) = (texels(source.u, aw), texels(source.v, ah));
-            if su + rw > aw || sv + rh > ah {
+            if su.checked_add(rw).is_none_or(|end| end > aw)
+                || sv.checked_add(rh).is_none_or(|end| end > ah)
+            {
                 return Err(malformed(WHAT, "a rectangle past the atlas"));
             }
             for row in 0..rh {
@@ -272,7 +303,7 @@ impl MorphSet {
 }
 
 /// A flex's rectangles (`m_morphRectDatas`).
-fn rects(data: &Value) -> Result<Vec<Rect>> {
+fn rects(data: &Value, grid_width: usize, grid_height: usize) -> Result<Vec<Rect>> {
     let list = array(data.get("m_morphRectDatas"));
     if list.len() > MAX_RECTS {
         return Err(malformed(
@@ -290,6 +321,9 @@ fn rects(data: &Value) -> Result<Vec<Rect>> {
             let ((Some(x), Some(y)), (Some(width), Some(height))) = (at, size) else {
                 return Err(malformed(WHAT, "a rectangle without its place or size"));
             };
+            if x > grid_width || y > grid_height {
+                return Err(malformed(WHAT, "a rectangle past the grid"));
+            }
             let sources = array(r.get("m_bundleDatas"))
                 .iter()
                 .map(|b| {

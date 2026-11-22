@@ -13,6 +13,10 @@ const SIGNATURE: u32 = 0x55AA_1234;
 const IN_DIR_FILE: u16 = 0x7FFF;
 const TERMINATOR: u16 = 0xFFFF;
 const RECORD_LEN: usize = 18;
+/// Largest directory tree `Vpk::open` will read (`pak01_dir.vpk` is ~21 MiB).
+const MAX_TREE_LEN: usize = 256 << 20;
+/// Largest single entry `Vpk::read` will allocate (preload + archive bytes).
+const MAX_ENTRY_LEN: usize = 512 << 20;
 
 /// A VPK (v1 or v2) package's directory: `pak01_dir.vpk` with its `pak01_NNN.vpk` parts, or a
 /// single-file package such as `maps/dota.vpk`.
@@ -75,6 +79,12 @@ impl Vpk {
                 ));
             }
         };
+        if tree_len > MAX_TREE_LEN {
+            return Err(malformed(
+                "VPK header",
+                format!("{dir_path}: directory tree of {tree_len} bytes exceeds {MAX_TREE_LEN}"),
+            ));
+        }
         let tree = src.read_at(dir_path, header_len, tree_len)?;
         let part_prefix = dir_path.strip_suffix("_dir.vpk").map(str::to_owned);
         let hasher = RandomState::default();
@@ -147,13 +157,27 @@ impl Vpk {
     /// The entry's bytes (preload, then the archive part's), its CRC checked.
     pub fn read(&self, src: &(impl Source + ?Sized), entry: Entry<'_>) -> Result<Vec<u8>> {
         let len = entry.archive_len() as usize;
+        let preload = entry.preload();
+        if len
+            .checked_add(preload.len())
+            .is_none_or(|total| total > MAX_ENTRY_LEN)
+        {
+            return Err(malformed(
+                "VPK entry",
+                format!(
+                    "{}:{}: size {} exceeds {MAX_ENTRY_LEN}",
+                    self.dir_path,
+                    entry.path(),
+                    entry.size()
+                ),
+            ));
+        }
         let tail = if len == 0 {
             Vec::new()
         } else {
             let (part, offset) = self.location(entry)?;
             src.read_at(&part, offset, len)?
         };
-        let preload = entry.preload();
         let data = if preload.is_empty() {
             tail
         } else {

@@ -275,7 +275,10 @@ impl<'a> Reader<'a> {
         }
         for _ in 0..MAX_BASES {
             for field in &current.fields {
-                let value = self.field(field, at + field.offset as usize, depth)?;
+                let field_at = at
+                    .checked_add(field.offset as usize)
+                    .ok_or_else(|| malformed("NTRO", "field offset overflow"))?;
+                let value = self.field(field, field_at, depth)?;
                 object.push(self.budget.copy(&field.name)?, value);
             }
             match self.by_id.get(&current.base) {
@@ -311,16 +314,18 @@ impl<'a> Reader<'a> {
         self.node(depth)?;
         let mut c = self::at(self.file, at)?;
         let offset = c.i32()?;
-        let target = at.checked_add_signed(offset as isize);
+        let target = at
+            .checked_add_signed(offset as isize)
+            .filter(|&target| target <= self.file.len());
         match kind {
             RESOURCE_POINTER if offset == 0 => Ok(Value::Null),
             RESOURCE_POINTER => {
-                let target = target.ok_or_else(|| malformed("NTRO", "pointer before the file"))?;
+                let target = target.ok_or_else(|| malformed("NTRO", "pointer outside the file"))?;
                 self.indirection(field, level + 1, target, depth + 1)
             }
             RESOURCE_ARRAY => {
                 let count = c.u32()? as usize;
-                let target = target.ok_or_else(|| malformed("NTRO", "array before the file"))?;
+                let target = target.ok_or_else(|| malformed("NTRO", "array outside the file"))?;
                 self.elements(field, level + 1, count, target, depth + 1)
             }
             _ => Err(malformed("NTRO", format!("indirection {kind}"))),

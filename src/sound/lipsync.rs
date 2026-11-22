@@ -246,7 +246,9 @@ impl MorphCurves {
         let ease = |key: &str| {
             data.get(key)
                 .and_then(Value::as_f64)
-                .map_or(0.0, |e| (e as f32).clamp(0.0, 60.0))
+                .map(|e| e as f32)
+                .filter(|e| e.is_finite())
+                .map_or(0.0, |e| e.clamp(0.0, 60.0))
         };
         Ok((!times.is_empty() && !names.is_empty()).then(|| Self {
             names,
