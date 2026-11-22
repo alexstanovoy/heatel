@@ -8,6 +8,7 @@ pub enum K {
     UInt(u64),
     Float(f64),
     Str(String),
+    Blob(Vec<u8>),
     Arr(Vec<K>),
     Obj(Vec<(&'static str, K)>),
 }
@@ -62,6 +63,10 @@ fn value(input: &K, ids: &HashMap<&str, i32>, out: &mut Vec<u8>) {
         K::UInt(value) => out.extend([4].into_iter().chain(value.to_le_bytes())),
         K::Float(value) => out.extend([5].into_iter().chain(value.to_le_bytes())),
         K::Str(value) => out.extend([6].into_iter().chain(ids[value.as_str()].to_le_bytes())),
+        K::Blob(bytes) => {
+            out.extend([7].into_iter().chain((bytes.len() as i32).to_le_bytes()));
+            out.extend_from_slice(bytes);
+        }
         K::Arr(items) => {
             out.extend([8].into_iter().chain((items.len() as i32).to_le_bytes()));
             items.iter().for_each(|item| value(item, ids, out));

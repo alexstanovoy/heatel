@@ -185,6 +185,7 @@ pub enum Mapping {
 /// output clamped to `domain_min[1]..=domain_max[1]`.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(remote = "Self"))]
 pub struct Curve {
     /// The keys.
     pub keys: Vec<[f32; 4]>,
@@ -196,9 +197,26 @@ pub struct Curve {
     pub looped: bool,
 }
 
+#[cfg(feature = "serde")]
+impl Serialize for Curve {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        Self::serialize(self, s)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> Deserialize<'de> for Curve {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let curve = Self::deserialize(d)?;
+        curve.validate().map_err(serde::de::Error::custom)?;
+        Ok(curve)
+    }
+}
+
 /// A vector input.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(remote = "Self"))]
 #[non_exhaustive]
 pub enum VectorInput {
     /// A constant (a literal colour is 0..1).
@@ -275,6 +293,176 @@ pub enum VectorInput {
         /// Its `m_vLiteralValue`.
         literal: [f32; 3],
     },
+}
+
+#[cfg(feature = "serde")]
+impl Serialize for VectorInput {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        Self::serialize(self, s)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> Deserialize<'de> for VectorInput {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let input = Self::deserialize(d)?;
+        input.validate().map_err(serde::de::Error::custom)?;
+        Ok(input)
+    }
+}
+
+fn check_finite(values: &[f32]) -> Result<()> {
+    if values.iter().all(|v| v.is_finite()) {
+        Ok(())
+    } else {
+        Err(malformed(WHAT, "a particle input number is not finite"))
+    }
+}
+
+impl Curve {
+    pub(super) fn validate(&self) -> Result<()> {
+        if self.keys.len() > MAX_KEYS {
+            return Err(malformed(
+                WHAT,
+                format!("{} curve keys, more than {MAX_KEYS}", self.keys.len()),
+            ));
+        }
+        check_finite(&self.domain_min)?;
+        check_finite(&self.domain_max)?;
+        for key in &self.keys {
+            check_finite(key)?;
+        }
+        Ok(())
+    }
+}
+
+impl Mapping {
+    pub(super) fn validate(&self) -> Result<()> {
+        match self {
+            Self::Direct | Self::Round(_) => Ok(()),
+            Self::Mult(v) | Self::Min(v) | Self::Max(v) | Self::Mod(v) => check_finite(&[*v]),
+            Self::Remap {
+                input,
+                output,
+                bias,
+                ..
+            } => {
+                check_finite(input)?;
+                check_finite(output)?;
+                if let Some(b) = bias {
+                    check_finite(&[b.parameter])?;
+                }
+                Ok(())
+            }
+            Self::Curve(c) => c.validate(),
+            Self::Notched {
+                range,
+                inside,
+                outside,
+            } => {
+                check_finite(range)?;
+                check_finite(&[*inside, *outside])
+            }
+        }
+    }
+}
+
+impl FloatInput {
+    pub(super) fn validate(&self) -> Result<()> {
+        match self {
+            Self::Literal(v) | Self::Unsupported { literal: v, .. } => check_finite(&[*v]),
+            Self::Random { min, max, bias, .. } => {
+                check_finite(&[*min, *max])?;
+                if let Some(b) = bias {
+                    check_finite(&[b.parameter])?;
+                }
+                Ok(())
+            }
+            Self::CollectionAge(m)
+            | Self::EndCapAge(m)
+            | Self::ParticleAge(m)
+            | Self::ParticleAgeNormalized(m)
+            | Self::ParticleFloat { mapping: m, .. }
+            | Self::ParticleSpeed(m)
+            | Self::ParticleNumber { mapping: m, .. }
+            | Self::ParticleNumberNormalized(m) => m.validate(),
+            Self::ControlPointComponent {
+                component, mapping, ..
+            } => {
+                if *component > 2 {
+                    return Err(malformed(WHAT, "control point component outside 0..=2"));
+                }
+                mapping.validate()
+            }
+            Self::ParticleNoise(n) => {
+                if !(1..=8).contains(&n.octaves) {
+                    return Err(malformed(WHAT, "noise octaves outside 1..=8"));
+                }
+                check_finite(&n.output)?;
+                check_finite(&n.offset_rate)?;
+                check_finite(&[n.scale, n.offset])?;
+                n.mapping.validate()
+            }
+        }
+    }
+}
+
+impl VectorInput {
+    pub(super) fn validate(&self) -> Result<()> {
+        match self {
+            Self::Literal(v) | Self::Unsupported { literal: v, .. } => check_finite(v),
+            Self::Random { min, max } => {
+                check_finite(min)?;
+                check_finite(max)
+            }
+            Self::RandomOffset {
+                min, max, scale, ..
+            } => {
+                check_finite(min)?;
+                check_finite(max)?;
+                check_finite(scale)
+            }
+            Self::ParticleVector { scale, .. } | Self::ControlPointValue { scale, .. } => {
+                check_finite(scale)
+            }
+            Self::ParticleVelocity | Self::ControlPointDelta { .. } => Ok(()),
+            Self::FloatInterp {
+                input,
+                range,
+                output,
+                ..
+            } => {
+                input.validate()?;
+                check_finite(range)?;
+                check_finite(&output[0])?;
+                check_finite(&output[1])
+            }
+            Self::Gradient {
+                input,
+                range,
+                stops,
+            } => {
+                if stops.len() > MAX_KEYS {
+                    return Err(malformed(
+                        WHAT,
+                        format!("{} gradient stops, more than {MAX_KEYS}", stops.len()),
+                    ));
+                }
+                input.validate()?;
+                check_finite(range)?;
+                for stop in stops {
+                    check_finite(stop)?;
+                }
+                Ok(())
+            }
+            Self::Components(parts) => {
+                for part in parts.iter() {
+                    part.validate()?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 const MAP_TYPES: [&str; 10] = [

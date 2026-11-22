@@ -64,7 +64,10 @@ pub fn lighting(entities: &[Value]) -> Result<Lighting> {
                 *s += v * w / total;
             }
         }
-        Ok(sum)
+        sum.iter()
+            .all(|v| v.is_finite())
+            .then_some(sum)
+            .ok_or_else(|| malformed("lighting", key))
     };
     let shade = |color: &str, scale: &str, time: &str| -> Result<Shade> {
         let c = blend(&format!("{color}_{time}"), 3)?;

@@ -243,7 +243,7 @@ impl MorphSet {
                 normals: vec![[0.0; 3]; vertices],
             };
             for rect in rects {
-                self.place(rect, atlas, size, &mut target)?;
+                self.place(rect, atlas, size, &mut target, budget)?;
             }
             let moves = |list: &[[f32; 3]]| list.iter().flatten().any(|d| d.abs() > NOTHING);
             if moves(&target.positions) || moves(&target.normals) {
@@ -260,6 +260,7 @@ impl MorphSet {
         atlas: &[u8],
         (aw, ah): (usize, usize),
         target: &mut Target,
+        budget: &mut Budget,
     ) -> Result<()> {
         let texels = |f: f32, of: usize| (f * of as f32).round().max(0.0) as usize;
         let (rw, rh) = (texels(rect.width, aw), texels(rect.height, ah));
@@ -280,6 +281,7 @@ impl MorphSet {
             {
                 return Err(malformed(WHAT, "a rectangle past the atlas"));
             }
+            budget.charge(rw.saturating_mul(rh).saturating_mul(size_of::<[f32; 3]>()))?;
             for row in 0..rh {
                 for col in 0..rw {
                     let vertex = (rect.y + row) * self.width + rect.x + col;
@@ -324,6 +326,7 @@ fn rects(data: &Value, grid_width: usize, grid_height: usize) -> Result<Vec<Rect
             if x > grid_width || y > grid_height {
                 return Err(malformed(WHAT, "a rectangle past the grid"));
             }
+            let fraction = |f: f32| (0.0..=1.0).contains(&f);
             let sources = array(r.get("m_bundleDatas"))
                 .iter()
                 .map(|b| {
@@ -332,6 +335,9 @@ fn rects(data: &Value, grid_width: usize, grid_height: usize) -> Result<Vec<Rect
                     else {
                         return Err(malformed(WHAT, "a bundle without its place"));
                     };
+                    if !fraction(u) || !fraction(v) {
+                        return Err(malformed(WHAT, "a bundle outside the atlas"));
+                    }
                     Ok(Source {
                         u,
                         v,
@@ -340,7 +346,6 @@ fn rects(data: &Value, grid_width: usize, grid_height: usize) -> Result<Vec<Rect
                     })
                 })
                 .collect::<Result<_>>()?;
-            let fraction = |f: f32| (0.0..=1.0).contains(&f);
             if !fraction(width) || !fraction(height) {
                 return Err(malformed(WHAT, "a rectangle larger than the atlas"));
             }

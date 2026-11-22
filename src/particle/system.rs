@@ -12,10 +12,9 @@ use super::emitter::Emitter;
 use super::format::format_number;
 use super::function::{Function, Timing};
 use super::initializer::Initializer;
-use super::models::MAX_MODELS;
 use super::operator::{Force, Operator};
 use super::pre_emission::PreEmission;
-use super::read::{MAX_FUNCTIONS, MAX_LAYERS, MAX_NAME, Obj, WHAT};
+use super::read::{MAX_FUNCTIONS, MAX_NAME, Obj, WHAT};
 use super::renderer::Renderer;
 
 /// Most particles a system holds at once, whatever its definition asks for.
@@ -46,17 +45,20 @@ const MAX_PATH: usize = 256;
 /// out, and every value the file leaves out at the schema's default.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "serde", serde(try_from = "RawSystem"))]
+#[cfg_attr(feature = "serde", serde(remote = "Self"))]
 #[non_exhaustive]
 pub struct System {
     /// The behaviour version (`m_nBehaviorVersion`): below 6 an initializer that writes only
     /// what earlier ones wrote is skipped, from `first_multiple_override` on it runs.
     pub behavior_version: i32,
     /// Optional authored snapshot resource path.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub snapshot_file: Option<String>,
     /// Decoded snapshot supplied by the resource loader.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub snapshot: Option<super::Snapshot>,
     /// Control point to which the snapshot resource is bound.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub snapshot_control_point: super::ControlPoint,
     /// See `behavior_version` (-1 none).
     pub first_multiple_override: i32,
@@ -68,11 +70,14 @@ pub struct System {
     pub max_time_step: f32,
     /// Seconds a system goes undrawn before it sleeps: no longer simulated until it is
     /// drawn again (`m_flNoDrawTimeToGoToSleep`).
+    #[cfg_attr(feature = "serde", serde(default = "default_sleep"))]
     pub sleep_after: f32,
     /// The box its particles' bounds are padded by, about each of them, for whether it is in
     /// view (`m_BoundingBoxMin`, `m_BoundingBoxMax`).
+    #[cfg_attr(feature = "serde", serde(default = "default_bounds"))]
     pub bounds: [[f32; 3]; 2],
     /// An unbounded system contributes nothing to its parent's bounds (`m_bInfiniteBounds`).
+    #[cfg_attr(feature = "serde", serde(default))]
     pub infinite_bounds: bool,
     /// What a particle starts with before the initializers.
     pub constants: Constants,
@@ -97,66 +102,17 @@ pub struct System {
 }
 
 #[cfg(feature = "serde")]
-#[derive(Deserialize)]
-struct RawSystem {
-    behavior_version: i32,
-    #[serde(default)]
-    snapshot_file: Option<String>,
-    #[serde(default)]
-    snapshot: Option<super::Snapshot>,
-    #[serde(default)]
-    snapshot_control_point: super::ControlPoint,
-    first_multiple_override: i32,
-    max_particles: u32,
-    initial_particles: u32,
-    max_time_step: f32,
-    #[serde(default = "default_sleep")]
-    sleep_after: f32,
-    #[serde(default = "default_bounds")]
-    bounds: [[f32; 3]; 2],
-    #[serde(default)]
-    infinite_bounds: bool,
-    constants: Constants,
-    group: i32,
-    pre_emission: Vec<Function<PreEmission>>,
-    emitters: Vec<Function<Emitter>>,
-    initializers: Vec<Function<Initializer>>,
-    operators: Vec<Function<Operator>>,
-    forces: Vec<Function<Force>>,
-    constraints: Vec<Function<Constraint>>,
-    renderers: Vec<Function<Renderer>>,
-    children: Vec<Child>,
+impl Serialize for System {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        Self::serialize(self, s)
+    }
 }
 
 #[cfg(feature = "serde")]
-impl TryFrom<RawSystem> for System {
-    type Error = crate::error::Error;
-
-    fn try_from(raw: RawSystem) -> Result<Self> {
-        let system = Self {
-            behavior_version: raw.behavior_version,
-            snapshot_file: raw.snapshot_file,
-            snapshot: raw.snapshot,
-            snapshot_control_point: raw.snapshot_control_point,
-            first_multiple_override: raw.first_multiple_override,
-            max_particles: raw.max_particles,
-            initial_particles: raw.initial_particles,
-            max_time_step: raw.max_time_step,
-            sleep_after: raw.sleep_after,
-            bounds: raw.bounds,
-            infinite_bounds: raw.infinite_bounds,
-            constants: raw.constants,
-            group: raw.group,
-            pre_emission: raw.pre_emission,
-            emitters: raw.emitters,
-            initializers: raw.initializers,
-            operators: raw.operators,
-            forces: raw.forces,
-            constraints: raw.constraints,
-            renderers: raw.renderers,
-            children: raw.children,
-        };
-        system.validate()?;
+impl<'de> Deserialize<'de> for System {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let system = Self::deserialize(d)?;
+        system.validate().map_err(serde::de::Error::custom)?;
         Ok(system)
     }
 }
@@ -313,28 +269,20 @@ impl System {
             }
         }
         for renderer in &self.renderers {
-            let too_long = match &renderer.class {
-                Renderer::Projected(p) => {
-                    p.materials.len() > MAX_LAYERS || p.materials.iter().any(|m| m.len() > MAX_NAME)
-                }
-                Renderer::DeferredLight(l) => {
-                    l.texture.as_ref().is_some_and(|t| t.len() > MAX_NAME)
-                }
-                Renderer::Models(m) => {
-                    m.models.len() > MAX_MODELS
-                        || m.models.iter().any(|(path, _)| path.len() > MAX_NAME)
-                        || m.equipment_slot
-                            .as_ref()
-                            .is_some_and(|slot| slot.len() > MAX_NAME)
-                        || m.override_material
-                            .as_ref()
-                            .is_some_and(|o| o.len() > MAX_NAME)
-                }
-                _ => false,
-            };
-            if too_long {
-                return Err(malformed(WHAT, "too many materials or too long a path"));
-            }
+            renderer.class.validate()?;
+        }
+        let timings = self
+            .pre_emission
+            .iter()
+            .map(|f| &f.timing)
+            .chain(self.emitters.iter().map(|f| &f.timing))
+            .chain(self.initializers.iter().map(|f| &f.timing))
+            .chain(self.operators.iter().map(|f| &f.timing))
+            .chain(self.forces.iter().map(|f| &f.timing))
+            .chain(self.constraints.iter().map(|f| &f.timing))
+            .chain(self.renderers.iter().map(|f| &f.timing));
+        for timing in timings {
+            timing.validate()?;
         }
         self.validate_sets()?;
         if self.children.len() > MAX_CHILDREN
@@ -371,6 +319,9 @@ impl System {
         if !(self.max_time_step > 0.0 && self.max_time_step.is_finite()) {
             return Err(malformed(WHAT, "a time step that is not positive"));
         }
+        #[cfg(feature = "serde")]
+        self.serialize(FiniteCheck)
+            .map_err(|_| malformed(WHAT, "a non-finite particle parameter"))?;
         Ok(())
     }
 
@@ -549,4 +500,272 @@ fn snapshot_path(root: &Obj<'_>) -> Result<Option<String>> {
         return Err(malformed(WHAT, "invalid snapshot path"));
     }
     Ok(Some(path.to_owned()))
+}
+
+#[cfg(feature = "serde")]
+#[derive(Debug)]
+struct NonFinite;
+
+#[cfg(feature = "serde")]
+impl std::fmt::Display for NonFinite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("non-finite float")
+    }
+}
+
+#[cfg(feature = "serde")]
+impl std::error::Error for NonFinite {}
+
+#[cfg(feature = "serde")]
+impl serde::ser::Error for NonFinite {
+    fn custom<T: std::fmt::Display>(_msg: T) -> Self {
+        Self
+    }
+}
+
+/// Zero-allocation serializer that walks every field of a [`System`] and rejects any non-finite
+/// `f32`/`f64` (e.g. JSON `1e300` decoded as `f32::INFINITY`).
+#[cfg(feature = "serde")]
+struct FiniteCheck;
+
+#[cfg(feature = "serde")]
+impl serde::Serializer for FiniteCheck {
+    type Ok = ();
+    type Error = NonFinite;
+    type SerializeSeq = Self;
+    type SerializeTuple = Self;
+    type SerializeTupleStruct = Self;
+    type SerializeTupleVariant = Self;
+    type SerializeMap = Self;
+    type SerializeStruct = Self;
+    type SerializeStructVariant = Self;
+
+    fn serialize_bool(self, _: bool) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+    fn serialize_i8(self, _: i8) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+    fn serialize_i16(self, _: i16) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+    fn serialize_i32(self, _: i32) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+    fn serialize_i64(self, _: i64) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+    fn serialize_u8(self, _: u8) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+    fn serialize_u16(self, _: u16) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+    fn serialize_u32(self, _: u32) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+    fn serialize_u64(self, _: u64) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+    fn serialize_f32(self, v: f32) -> std::result::Result<(), NonFinite> {
+        v.is_finite().then_some(()).ok_or(NonFinite)
+    }
+    fn serialize_f64(self, v: f64) -> std::result::Result<(), NonFinite> {
+        v.is_finite().then_some(()).ok_or(NonFinite)
+    }
+    fn serialize_char(self, _: char) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+    fn serialize_str(self, _: &str) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+    fn serialize_bytes(self, _: &[u8]) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+    fn serialize_none(self) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+    fn serialize_some<T: ?Sized + Serialize>(self, v: &T) -> std::result::Result<(), NonFinite> {
+        v.serialize(self)
+    }
+    fn serialize_unit(self) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+    fn serialize_unit_struct(self, _: &'static str) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+    fn serialize_unit_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+    ) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+    fn serialize_newtype_struct<T: ?Sized + Serialize>(
+        self,
+        _: &'static str,
+        v: &T,
+    ) -> std::result::Result<(), NonFinite> {
+        v.serialize(self)
+    }
+    fn serialize_newtype_variant<T: ?Sized + Serialize>(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        v: &T,
+    ) -> std::result::Result<(), NonFinite> {
+        v.serialize(self)
+    }
+    fn serialize_seq(self, _: Option<usize>) -> std::result::Result<Self, NonFinite> {
+        Ok(self)
+    }
+    fn serialize_tuple(self, _: usize) -> std::result::Result<Self, NonFinite> {
+        Ok(self)
+    }
+    fn serialize_tuple_struct(
+        self,
+        _: &'static str,
+        _: usize,
+    ) -> std::result::Result<Self, NonFinite> {
+        Ok(self)
+    }
+    fn serialize_tuple_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
+    ) -> std::result::Result<Self, NonFinite> {
+        Ok(self)
+    }
+    fn serialize_map(self, _: Option<usize>) -> std::result::Result<Self, NonFinite> {
+        Ok(self)
+    }
+    fn serialize_struct(self, _: &'static str, _: usize) -> std::result::Result<Self, NonFinite> {
+        Ok(self)
+    }
+    fn serialize_struct_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
+    ) -> std::result::Result<Self, NonFinite> {
+        Ok(self)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::ser::SerializeSeq for FiniteCheck {
+    type Ok = ();
+    type Error = NonFinite;
+    fn serialize_element<T: ?Sized + Serialize>(
+        &mut self,
+        v: &T,
+    ) -> std::result::Result<(), NonFinite> {
+        v.serialize(Self)
+    }
+    fn end(self) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::ser::SerializeTuple for FiniteCheck {
+    type Ok = ();
+    type Error = NonFinite;
+    fn serialize_element<T: ?Sized + Serialize>(
+        &mut self,
+        v: &T,
+    ) -> std::result::Result<(), NonFinite> {
+        v.serialize(Self)
+    }
+    fn end(self) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::ser::SerializeTupleStruct for FiniteCheck {
+    type Ok = ();
+    type Error = NonFinite;
+    fn serialize_field<T: ?Sized + Serialize>(
+        &mut self,
+        v: &T,
+    ) -> std::result::Result<(), NonFinite> {
+        v.serialize(Self)
+    }
+    fn end(self) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::ser::SerializeTupleVariant for FiniteCheck {
+    type Ok = ();
+    type Error = NonFinite;
+    fn serialize_field<T: ?Sized + Serialize>(
+        &mut self,
+        v: &T,
+    ) -> std::result::Result<(), NonFinite> {
+        v.serialize(Self)
+    }
+    fn end(self) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::ser::SerializeMap for FiniteCheck {
+    type Ok = ();
+    type Error = NonFinite;
+    fn serialize_key<T: ?Sized + Serialize>(
+        &mut self,
+        k: &T,
+    ) -> std::result::Result<(), NonFinite> {
+        k.serialize(Self)
+    }
+    fn serialize_value<T: ?Sized + Serialize>(
+        &mut self,
+        v: &T,
+    ) -> std::result::Result<(), NonFinite> {
+        v.serialize(Self)
+    }
+    fn end(self) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::ser::SerializeStruct for FiniteCheck {
+    type Ok = ();
+    type Error = NonFinite;
+    fn serialize_field<T: ?Sized + Serialize>(
+        &mut self,
+        _: &'static str,
+        v: &T,
+    ) -> std::result::Result<(), NonFinite> {
+        v.serialize(Self)
+    }
+    fn end(self) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::ser::SerializeStructVariant for FiniteCheck {
+    type Ok = ();
+    type Error = NonFinite;
+    fn serialize_field<T: ?Sized + Serialize>(
+        &mut self,
+        _: &'static str,
+        v: &T,
+    ) -> std::result::Result<(), NonFinite> {
+        v.serialize(Self)
+    }
+    fn end(self) -> std::result::Result<(), NonFinite> {
+        Ok(())
+    }
 }

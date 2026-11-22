@@ -264,6 +264,120 @@ pub struct Look {
     pub depth_bias: FloatInput,
 }
 
+impl Look {
+    pub(super) fn validate(&self) -> Result<()> {
+        if self.layers.len() > MAX_LAYERS
+            || self.texture.as_ref().is_some_and(|t| t.len() > MAX_NAME)
+            || self.layers.iter().any(|l| l.texture.len() > MAX_NAME)
+        {
+            return Err(malformed(
+                WHAT,
+                "too many texture layers or too long a path",
+            ));
+        }
+        let finite = self.texture_transform.iter().all(|v| v.is_finite())
+            && self.animation_rate.is_finite()
+            && self
+                .layers
+                .iter()
+                .all(|l| l.transform.iter().all(|v| v.is_finite()));
+        if !finite {
+            return Err(malformed(WHAT, "a renderer look value that is no number"));
+        }
+        self.overbright.validate()?;
+        self.add_self.validate()?;
+        self.alpha_scale.validate()?;
+        self.radius_scale.validate()?;
+        self.color_scale.validate()?;
+        self.depth_bias.validate()
+    }
+}
+
+impl Renderer {
+    pub(super) fn validate(&self) -> Result<()> {
+        match self {
+            Self::Sprites(s) => {
+                s.look.validate()?;
+                s.min_size.validate()?;
+                s.max_size.validate()?;
+                s.start_fade_size.validate()?;
+                s.end_fade_size.validate()
+            }
+            Self::Trails(t) => {
+                t.look.validate()?;
+                let nums = [
+                    t.max_length,
+                    t.min_length,
+                    t.length_scale,
+                    t.length_fade_in,
+                    t.radius_to_length,
+                    t.forward_shift,
+                ];
+                if !nums.iter().all(|v| v.is_finite()) {
+                    return Err(malformed(WHAT, "a trail renderer value that is no number"));
+                }
+                t.tail_alpha_scale.validate()?;
+                t.tail_radius_scale.validate()?;
+                t.head_radius_scale.validate()
+            }
+            Self::Ropes(r) => {
+                r.look.validate()?;
+                r.texture_v_world_size.validate()?;
+                r.texture_v_scroll_rate.validate()?;
+                r.texture_v_offset.validate()
+            }
+            Self::Projected(p) => {
+                p.look.validate()?;
+                if p.materials.len() > MAX_LAYERS || p.materials.iter().any(|m| m.len() > MAX_NAME)
+                {
+                    return Err(malformed(WHAT, "too many materials or too long a path"));
+                }
+                if let Some(depth) = p.projection_depth
+                    && !depth.iter().all(|v| v.is_finite())
+                {
+                    return Err(malformed(WHAT, "a projection depth that is no number"));
+                }
+                p.material_selection.validate()
+            }
+            Self::DeferredLight(l) => {
+                if l.texture.as_ref().is_some_and(|t| t.len() > MAX_NAME) {
+                    return Err(malformed(WHAT, "too many materials or too long a path"));
+                }
+                if ![l.start_falloff, l.light_distance, l.spot_fov]
+                    .iter()
+                    .all(|v| v.is_finite())
+                {
+                    return Err(malformed(WHAT, "a light renderer value that is no number"));
+                }
+                l.radius_scale.validate()?;
+                l.alpha_scale.validate()?;
+                l.color_scale.validate()
+            }
+            Self::Models(m) => {
+                if m.models.len() > super::models::MAX_MODELS
+                    || m.models.iter().any(|(path, _)| path.len() > MAX_NAME)
+                    || m.equipment_slot
+                        .as_ref()
+                        .is_some_and(|slot| slot.len() > MAX_NAME)
+                    || m.override_material
+                        .as_ref()
+                        .is_some_and(|o| o.len() > MAX_NAME)
+                {
+                    return Err(malformed(WHAT, "too many materials or too long a path"));
+                }
+                Ok(())
+            }
+            Self::ScreenVelocityRotate { forward_degrees } => {
+                if !forward_degrees.is_finite() {
+                    return Err(malformed(WHAT, "a rotation that is no number"));
+                }
+                Ok(())
+            }
+            Self::Unsupported(_) => Ok(()),
+        }
+    }
+}
+
 #[cfg(feature = "serde")]
 fn no_depth_bias() -> FloatInput {
     FloatInput::Literal(0.0)

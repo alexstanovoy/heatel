@@ -397,9 +397,9 @@ fn decode(
         "frames",
     )?;
     let fps = frame_rate(desc)?;
-    let blocks = frame_blocks(data)?;
+    let blocks = frame_blocks(data, budget)?;
     let movements = if include_trajectory {
-        movements(desc)?
+        movements(desc, budget)?
     } else {
         Vec::new()
     };
@@ -415,6 +415,7 @@ fn decode(
     for frame in 0..frames {
         Budget::spend(&mut budget.work, blocks.len().max(1), "frame blocks")?;
         for block in blocks.iter().filter(|b| (b.start..=b.end).contains(&frame)) {
+            Budget::spend(&mut budget.work, block.segments.len(), "segment visits")?;
             for &i in &block.segments {
                 if let Some(segment) = segments.get(i, budget)? {
                     Budget::spend(&mut budget.work, segment.work(), "segment reads")?;
@@ -424,7 +425,12 @@ fn decode(
         }
         let time = frame as f32 / fps;
         let previous = (frame as f32 - 1.0) / fps;
-        let motion = (!movements.is_empty()).then(|| root_motion(&movements, frame));
+        let motion = if movements.is_empty() {
+            None
+        } else {
+            Budget::spend(&mut budget.work, movements.len(), "movements")?;
+            Some(root_motion(&movements, frame))
+        };
         for ((bone, now), writer) in bones.iter().zip(&pose).zip(&mut writers) {
             let root = bone.parent.is_none();
             let (translation, rotation, scale) = local(now, motion.filter(|_| root), root);
@@ -477,16 +483,19 @@ fn frame_rate(desc: &Value) -> Result<f32> {
     Ok(fps)
 }
 
-fn frame_blocks(data: Option<&Value>) -> Result<Vec<FrameBlock>> {
+fn frame_blocks(data: Option<&Value>, budget: &mut Budget) -> Result<Vec<FrameBlock>> {
     let index = |v: &Value, key| {
         v.get(key)
             .and_then(Value::as_u64)
             .and_then(|i| usize::try_from(i).ok())
     };
-    array(data.and_then(|d| d.get("m_frameblockArray")))
-        .iter()
+    let list = array(data.and_then(|d| d.get("m_frameblockArray")));
+    Budget::spend(&mut budget.work, list.len(), "frame blocks")?;
+    list.iter()
         .map(|b| {
-            let segments = array(b.get("m_segmentIndexArray"))
+            let raw_segments = array(b.get("m_segmentIndexArray"));
+            Budget::spend(&mut budget.work, raw_segments.len(), "frame block segments")?;
+            let segments = raw_segments
                 .iter()
                 .map(|s| s.as_u64().and_then(|s| usize::try_from(s).ok()))
                 .collect::<Option<Vec<_>>>();
@@ -502,9 +511,10 @@ fn frame_blocks(data: Option<&Value>) -> Result<Vec<FrameBlock>> {
         .collect()
 }
 
-fn movements(desc: &Value) -> Result<Vec<Movement>> {
-    array(desc.get("m_movementArray"))
-        .iter()
+fn movements(desc: &Value, budget: &mut Budget) -> Result<Vec<Movement>> {
+    let list = array(desc.get("m_movementArray"));
+    Budget::spend(&mut budget.work, list.len(), "movements")?;
+    list.iter()
         .map(|m| {
             let end = m.get("endframe").and_then(Value::as_i64);
             let angle = m.get("angle").and_then(Value::as_f64);

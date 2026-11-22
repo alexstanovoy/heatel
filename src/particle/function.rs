@@ -3,10 +3,10 @@
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{Result, malformed};
 
 use super::input::FloatInput;
-use super::read::Obj;
+use super::read::{Obj, WHAT};
 
 /// One function of a system: its class with its parameters, and when it runs.
 #[derive(Clone, Debug, PartialEq)]
@@ -80,6 +80,18 @@ impl Timing {
             oscillate: obj.float("m_flOpFadeOscillatePeriod", 0.0)?,
             run_once: obj.bool("m_bRunOnce", false)?,
         })
+    }
+
+    /// Checks that all timing numbers and strength inputs are valid and finite.
+    pub(super) fn validate(&self) -> Result<()> {
+        self.strength.validate()?;
+        let finite = self.fade_in.iter().all(|v| v.is_finite())
+            && self.fade_out.iter().all(|v| v.is_finite())
+            && self.oscillate.is_finite();
+        if !finite {
+            return Err(malformed(WHAT, "a timing value that is no number"));
+        }
+        Ok(())
     }
 
     /// Whether it runs at full strength in every phase at every age.

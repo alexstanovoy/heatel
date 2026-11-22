@@ -46,7 +46,8 @@ impl Texture {
         Self::parse_in(bytes, &mut Budget::named(WHAT))
     }
 
-    /// Like [`parse`](Self::parse), charging PNG decode buffers to `budget` before allocating.
+    /// Like [`parse`](Self::parse), charging decoded level and PNG buffers to `budget` before
+    /// allocating.
     pub fn parse_in(bytes: &[u8], budget: &mut Budget) -> Result<Self> {
         let resource = Resource::parse(bytes)?;
         let data = resource
@@ -59,7 +60,7 @@ impl Texture {
         let mips = if matches!(stored, Stored::Png) {
             vec![decode_png(raw, width, height, budget)?]
         } else {
-            header.read_levels(raw, &sizes)?
+            header.read_levels(raw, &sizes, budget)?
         };
         let mut texture = Self {
             width,
@@ -78,14 +79,16 @@ impl Texture {
                     px.swap(0, 2);
                 }
             }
-            Stored::Plain(PixelFormat::Bc3) => texture.decode_content(Content::of(&resource)?)?,
+            Stored::Plain(PixelFormat::Bc3) => {
+                texture.decode_content(Content::of(&resource)?, budget)?;
+            }
             _ => {}
         }
         Ok(texture)
     }
 
     /// Decodes DXT5 levels that hold a normal or a YCoCg image to RGBA8.
-    fn decode_content(&mut self, content: Content) -> Result<()> {
+    fn decode_content(&mut self, content: Content, budget: &mut Budget) -> Result<()> {
         if content == Content::Colour {
             return Ok(());
         }
@@ -101,6 +104,7 @@ impl Texture {
                 format!("decodes to more than {MAX_BYTES} bytes"),
             ));
         }
+        budget.charge(total)?;
         for (level, mip) in self.mips.iter_mut().enumerate() {
             let (w, h) = ((self.width >> level).max(1), (self.height >> level).max(1));
             *mip = content.decode_bc3(mip, w, h)?;
@@ -543,7 +547,14 @@ impl Header {
     /// The levels out of the bytes after the resource, which hold the smallest level first. Each
     /// is stored as listed in the compressed sizes entry, if any: LZ4 where that is smaller than
     /// the level itself.
-    fn read_levels(&self, raw: &[u8], sizes: &[usize]) -> Result<Vec<Vec<u8>>> {
+    fn read_levels(
+        &self,
+        raw: &[u8],
+        sizes: &[usize],
+        budget: &mut Budget,
+    ) -> Result<Vec<Vec<u8>>> {
+        let total: usize = sizes.iter().sum();
+        budget.charge(total)?;
         let stored: Vec<usize> = match &self.compressed {
             Some(c) => c.sizes[..self.mips].iter().map(|&n| n as usize).collect(),
             None => sizes.to_vec(),
@@ -586,8 +597,11 @@ fn rgba8_size(width: u32, height: u32) -> Result<usize> {
 /// The RGBA8 pixels of a PNG-coded level, which must be the texture's size.
 fn decode_png(png: &[u8], width: u32, height: u32, budget: &mut Budget) -> Result<Vec<u8>> {
     let png_err = |e: png::DecodingError| malformed(WHAT, format!("png: {e}"));
-    rgba8_size(width, height)?;
-    let mut decoder = png::Decoder::new(IoCursor::new(png));
+    let rgba_len = rgba8_size(width, height)?;
+    let limits = png::Limits {
+        bytes: budget.left().min(MAX_BYTES),
+    };
+    let mut decoder = png::Decoder::new_with_limits(IoCursor::new(png), limits);
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info().map_err(png_err)?;
     let info = reader.info();
@@ -609,32 +623,44 @@ fn decode_png(png: &[u8], width: u32, height: u32, budget: &mut Budget) -> Resul
             format!("png decodes to {size} bytes, more than {MAX_BYTES}"),
         ));
     }
-    budget.charge(size)?;
-    let mut pixels = vec![0; size];
-    let frame = reader.next_frame(&mut pixels).map_err(png_err)?;
-    pixels.truncate(frame.buffer_size());
-    let (colors, texels) = (frame.color_type, width as usize * height as usize);
-    let rgba = match colors {
-        png::ColorType::Rgba => pixels,
-        png::ColorType::Rgb => pixels
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .flat_map(|p| [p[0], p[1], p[2], 255])
-            .collect(),
-        png::ColorType::GrayscaleAlpha => pixels
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .flat_map(|p| [p[0], p[0], p[0], p[1]])
-            .collect(),
-        png::ColorType::Grayscale => pixels.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+    let alloc = size.max(rgba_len);
+    budget.charge(alloc)?;
+    let mut pixels = vec![0; alloc];
+    let frame = reader.next_frame(&mut pixels[..size]).map_err(png_err)?;
+    let (colors, decoded, texels) = (
+        frame.color_type,
+        frame.buffer_size(),
+        width as usize * height as usize,
+    );
+    // Expand narrower colour types back-to-front in place so no second full-frame Vec is allocated.
+    match colors {
+        png::ColorType::Rgba if decoded == texels * 4 => {}
+        png::ColorType::Rgb if decoded == texels * 3 => {
+            for i in (0..texels).rev() {
+                let (s, d) = (i * 3, i * 4);
+                let [r, g, b] = [pixels[s], pixels[s + 1], pixels[s + 2]];
+                pixels[d..d + 4].copy_from_slice(&[r, g, b, 255]);
+            }
+        }
+        png::ColorType::GrayscaleAlpha if decoded == texels * 2 => {
+            for i in (0..texels).rev() {
+                let (s, d) = (i * 2, i * 4);
+                let [g, a] = [pixels[s], pixels[s + 1]];
+                pixels[d..d + 4].copy_from_slice(&[g, g, g, a]);
+            }
+        }
+        png::ColorType::Grayscale if decoded == texels => {
+            for i in (0..texels).rev() {
+                let g = pixels[i];
+                let d = i * 4;
+                pixels[d..d + 4].copy_from_slice(&[g, g, g, 255]);
+            }
+        }
         png::ColorType::Indexed => return Err(malformed(WHAT, "png left indexed")),
-    };
-    if rgba.len() != texels * 4 {
-        return Err(malformed(WHAT, "png pixels do not fill the texture"));
+        _ => return Err(malformed(WHAT, "png pixels do not fill the texture")),
     }
-    Ok(rgba)
+    pixels.truncate(rgba_len);
+    Ok(pixels)
 }
 
 /// The colour half of a DXT5 block as a BC1 block of the same four colours (see
