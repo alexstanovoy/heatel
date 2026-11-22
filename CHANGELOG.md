@@ -4,6 +4,17 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - 2026-11-22
+
+### Security
+
+- `anim::clip::decode`: cap frame count (`MAX_FRAMES = 1 << 20`) and charge `bones.len().max(1)`, `blocks.len().max(1)`, `block.segments.len()`, parsed frame blocks, and `movements` against `Budget` so zero-bone / empty-block / cached-segment / movement-heavy clips cannot bypass `MAX_WORK` or hang.
+- `face::MorphSet`: validate destination rect coordinates and `[0.0, 1.0]` source UVs in `read`, use checked arithmetic for atlas sizes and rect placement, and add `targets_in(&mut Budget)` (charging output buffers and `place()` texel work against `Budget`).
+- `texture::vtex`: add `Texture::parse_in(&mut Budget)`, bound `png::Decoder` metadata allocations with `png::Limits` from `budget.left().min(MAX_BYTES)`, charge and expand non-RGBA8 PNGs back-to-front in place within a single allocation, charge `Budget` for non-PNG mip/decode paths, and fix `Texture::first_frame` crop bounds (`x1 <= fx0 || y1 <= fy0`).
+- `vpk` & `ntro`: cap untrusted VPK directory tree (`256 MiB`) and entry (`512 MiB`) allocations before reading; use checked field-offset addition and file-bounds checks on `RESOURCE_POINTER` / `RESOURCE_ARRAY` indirections.
+- `particle::System`: route Serde deserialization through `validate()` (`#[serde(remote = "Self")]`), rejecting non-finite floats (including JSON overflow such as `1e300`) and bounding `Look` layers/names, `Curve` keys, and `Gradient` stops.
+- `world::lighting` & `sound::Lipsync`: reject `NaN` / non-finite values and non-finite weighted-blend sums.
+
 ## [0.2.0] - 2026-11-21
 
 ### Breaking
