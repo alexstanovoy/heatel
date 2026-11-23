@@ -4,7 +4,7 @@
 //! overrides a draw. Materials are made once per path and tint; images once per texture. Vertex data is not kept: the meshes record
 //! where it comes from and its bounds.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -27,10 +27,175 @@ use crate::vpk::Vpk;
 pub(super) const OVERLAY_LIFT: f32 = 0.01;
 /// Most nodes, meshes and materials a world may have.
 const MAX_ITEMS: usize = 1 << 20;
+/// Most entity lumps loaded for one world by [`active_entity_lumps`].
+pub const MAX_ENTITY_LUMPS: usize = 64;
+/// Most unique entity lump paths inspected by [`active_entity_lumps`].
+const MAX_VISITED_LUMPS: usize = MAX_ENTITY_LUMPS * 4;
+/// Longest entity lump path accepted by [`active_entity_lumps`].
+const MAX_LUMP_PATH: usize = 256;
 /// Most bytes the scene's retained state (or any single file read) may take.
 pub(super) const MAX_SCENE_BYTES: usize = 256 << 20;
 /// Most cumulative bytes read and decoded across an entire world export.
 pub(super) const MAX_WORLD_READ_BYTES: u64 = 8 << 30;
+
+/// Reads the active entity lumps of the world at `path` (`maps/.../world.vwrld_c`) from
+/// `packages`: every lump listed in `m_entityLumps`, plus any child lump named by an
+/// `info_world_layer` entity whose `spawnflags` bit 0 ("start enabled") is set.
+///
+/// Each lump is read at most once (cycles are ignored), and at most [`MAX_ENTITY_LUMPS`] lumps
+/// are loaded within a bounded memory budget.
+pub fn active_entity_lumps(
+    src: &(impl Source + ?Sized),
+    packages: &[&Vpk],
+    path: &str,
+) -> Result<Vec<EntityLump>> {
+    let mut budget = Budget::with_limit("world", MAX_SCENE_BYTES);
+    active_entity_lumps_in(src, packages, path, &mut budget)
+}
+
+/// [`active_entity_lumps`] within a caller-supplied [`Budget`].
+pub fn active_entity_lumps_in(
+    src: &(impl Source + ?Sized),
+    packages: &[&Vpk],
+    path: &str,
+    budget: &mut Budget,
+) -> Result<Vec<EntityLump>> {
+    let mut load = |file: &str, budget: &mut Budget| -> Result<Option<Value>> {
+        let bytes = match read_from_in(src, packages, file, budget) {
+            Ok(bytes) => bytes,
+            Err(Error::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let resource = Resource::parse(&bytes)?;
+        let data = resource
+            .data_in(budget)
+            .ok_or_else(|| malformed("world", format!("{file} has no DATA")))??;
+        Ok(Some(data))
+    };
+    active_entity_lumps_with(path, budget, &mut load)
+}
+
+fn active_entity_lumps_with(
+    path: &str,
+    budget: &mut Budget,
+    load: &mut impl FnMut(&str, &mut Budget) -> Result<Option<Value>>,
+) -> Result<Vec<EntityLump>> {
+    let world = load(path, budget)?.ok_or_else(|| Error::NotFound(path.to_owned()))?;
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    for lump in world.array("m_entityLumps") {
+        let Some(lump_path) = lump.as_str().filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        enqueue_lump(lump_path, &mut visited, &mut queue, budget)?;
+    }
+    let mut out = Vec::new();
+    while let Some(file) = queue.pop_front() {
+        let Some(data) = load(&file, budget)? else {
+            continue;
+        };
+        if out.len() >= MAX_ENTITY_LUMPS {
+            return Err(malformed(
+                "world",
+                format!("more than {MAX_ENTITY_LUMPS} entity lumps"),
+            ));
+        }
+        let lump = EntityLump::from_data(&data)?;
+        for child in enabled_child_lumps(&lump)? {
+            enqueue_lump(child, &mut visited, &mut queue, budget)?;
+        }
+        out.push(lump);
+    }
+    Ok(out)
+}
+
+fn enqueue_lump(
+    lump_path: &str,
+    visited: &mut HashSet<String>,
+    queue: &mut VecDeque<String>,
+    budget: &mut Budget,
+) -> Result<()> {
+    check_lump_path(lump_path)?;
+    let file = compiled(lump_path);
+    if visited.contains(&file) {
+        return Ok(());
+    }
+    if visited.len() >= MAX_VISITED_LUMPS {
+        return Err(malformed(
+            "world",
+            format!("more than {MAX_VISITED_LUMPS} entity lump paths"),
+        ));
+    }
+    budget.string_of(file.len())?;
+    budget.string_of(file.len())?;
+    visited.insert(file.clone());
+    queue.push_back(file);
+    Ok(())
+}
+
+fn check_lump_path(path: &str) -> Result<()> {
+    let invalid = path.is_empty()
+        || path.len() > MAX_LUMP_PATH
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..");
+    if invalid {
+        return Err(malformed(
+            "world",
+            format!("invalid entity lump path: {path}"),
+        ));
+    }
+    Ok(())
+}
+
+fn entity_int(entity: &Value, key: &str) -> Option<i64> {
+    match entity.get(key)? {
+        Value::String(text) => text.trim().parse().ok(),
+        other => other.as_i64(),
+    }
+}
+
+fn enabled_child_lumps(lump: &EntityLump) -> Result<Vec<&str>> {
+    let mut enabled: HashSet<&str> = HashSet::new();
+    for layer in lump
+        .entities
+        .iter()
+        .filter(|e| e.str_field("classname") == Some("info_world_layer"))
+    {
+        let name = layer
+            .str_field("layerName")
+            .filter(|n| !n.is_empty())
+            .ok_or_else(|| malformed("world", "info_world_layer has no layerName"))?;
+        let flags = match layer.get("spawnflags") {
+            None => 0,
+            Some(_) => entity_int(layer, "spawnflags").ok_or_else(|| {
+                malformed("world", format!("layer {name}: spawnflags not a number"))
+            })?,
+        };
+        if flags & 1 != 0 {
+            enabled.insert(name);
+        }
+    }
+    if enabled.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut active = Vec::new();
+    for child in &lump.children {
+        let Some(layer) = child.rsplit('/').next().and_then(|file| {
+            file.strip_suffix(".vents_c")
+                .or_else(|| file.strip_suffix(".vents"))
+        }) else {
+            continue;
+        };
+        if enabled.contains(layer) {
+            active.push(child.as_str());
+        }
+    }
+    Ok(active)
+}
 
 /// Smallest and largest corner.
 pub(super) type Bounds = [[f32; 3]; 2];
@@ -1019,5 +1184,211 @@ mod tests {
         let err = builder.model("m/m4.vmdl").unwrap_err().to_string();
         assert!(err.contains("reading more than 5000 bytes"), "{err}");
         assert_eq!(builder.scene.skipped_models.len(), 4);
+    }
+
+    fn lump_data(entities: Vec<Value>, children: &[&str]) -> Value {
+        let entity_kvs: Vec<Value> = entities
+            .into_iter()
+            .map(|values| Value::object([("keyValues3Data", Value::object([("values", values)]))]))
+            .collect();
+        Value::object([
+            ("m_entityKeyValues", Value::Array(entity_kvs)),
+            ("m_childLumps", Value::from_array(children.iter().copied())),
+        ])
+    }
+
+    #[test]
+    fn active_entity_lumps_loads_enabled_layers_and_skips_disabled_and_cycles() {
+        let mut files: HashMap<String, Value> = HashMap::new();
+        files.insert(
+            "maps/test/world.vwrld_c".into(),
+            Value::object([(
+                "m_entityLumps",
+                Value::from_array(["maps/test/entities/default_ents.vents"]),
+            )]),
+        );
+        files.insert(
+            "maps/test/entities/default_ents.vents_c".into(),
+            lump_data(
+                vec![
+                    Value::object([
+                        ("classname", Value::from("info_world_layer")),
+                        ("layerName", Value::from("enabled_int")),
+                        ("spawnflags", Value::from(1)),
+                    ]),
+                    Value::object([
+                        ("classname", Value::from("info_world_layer")),
+                        ("layerName", Value::from("enabled_str")),
+                        ("spawnflags", Value::from("3")),
+                    ]),
+                    Value::object([
+                        ("classname", Value::from("info_world_layer")),
+                        ("layerName", Value::from("disabled_absent")),
+                    ]),
+                    Value::object([
+                        ("classname", Value::from("info_world_layer")),
+                        ("layerName", Value::from("disabled_zero")),
+                        ("spawnflags", Value::from(2)),
+                    ]),
+                ],
+                &[
+                    "maps/test/entities/enabled_int.vents",
+                    "maps/test/entities/enabled_str.vents",
+                    "maps/test/entities/disabled_absent.vents",
+                    "maps/test/entities/disabled_zero.vents",
+                ],
+            ),
+        );
+        // enabled_int points back to default_ents (cycle!) and has its own entity.
+        files.insert(
+            "maps/test/entities/enabled_int.vents_c".into(),
+            lump_data(
+                vec![
+                    Value::object([("classname", Value::from("prop_dynamic"))]),
+                    Value::object([
+                        ("classname", Value::from("info_world_layer")),
+                        ("layerName", Value::from("default_ents")),
+                        ("spawnflags", Value::from(1)),
+                    ]),
+                ],
+                &["maps/test/entities/default_ents.vents"],
+            ),
+        );
+        files.insert(
+            "maps/test/entities/enabled_str.vents_c".into(),
+            lump_data(
+                vec![Value::object([(
+                    "classname",
+                    Value::from("env_soundscape"),
+                )])],
+                &[],
+            ),
+        );
+        files.insert(
+            "maps/test/entities/disabled_absent.vents_c".into(),
+            lump_data(
+                vec![Value::object([(
+                    "classname",
+                    Value::from("should_not_load"),
+                )])],
+                &[],
+            ),
+        );
+        let mut load = |p: &str, _: &mut Budget| Ok(files.get(p).cloned());
+        let mut budget = Budget::with_limit("world", MAX_SCENE_BYTES);
+        let lumps =
+            active_entity_lumps_with("maps/test/world.vwrld_c", &mut budget, &mut load).unwrap();
+        assert_eq!(lumps.len(), 3);
+        assert_eq!(
+            lumps[1].entities[0].str_field("classname"),
+            Some("prop_dynamic")
+        );
+        assert_eq!(
+            lumps[2].entities[0].str_field("classname"),
+            Some("env_soundscape")
+        );
+    }
+
+    #[test]
+    fn active_entity_lumps_rejects_bad_spawnflags_traversal_and_lump_overflow() {
+        let mut files: HashMap<String, Value> = HashMap::new();
+        files.insert(
+            "maps/test/world.vwrld_c".into(),
+            Value::object([(
+                "m_entityLumps",
+                Value::from_array(["maps/test/entities/default_ents.vents"]),
+            )]),
+        );
+        files.insert(
+            "maps/test/entities/default_ents.vents_c".into(),
+            lump_data(
+                vec![Value::object([
+                    ("classname", Value::from("info_world_layer")),
+                    ("layerName", Value::from("bad")),
+                    ("spawnflags", Value::from("not_a_number")),
+                ])],
+                &[],
+            ),
+        );
+        let mut load = |p: &str, _: &mut Budget| Ok(files.get(p).cloned());
+        let mut budget = Budget::with_limit("world", MAX_SCENE_BYTES);
+        assert!(
+            active_entity_lumps_with("maps/test/world.vwrld_c", &mut budget, &mut load).is_err()
+        );
+
+        // Path traversal, backslash, leading slash, dot, empty segment, and control chars rejected.
+        for bad_path in [
+            "maps/../escape.vents",
+            "maps\\..\\escape.vents",
+            "maps\\test\\a.vents",
+            "/maps/test/a.vents",
+            "maps/./a.vents",
+            "maps//a.vents",
+            "maps/a.vents/",
+            "maps/a\0.vents",
+            "maps/a\n.vents",
+        ] {
+            let mut bad: HashMap<String, Value> = HashMap::new();
+            bad.insert(
+                "maps/test/world.vwrld_c".into(),
+                Value::object([("m_entityLumps", Value::from_array([bad_path]))]),
+            );
+            let mut load = |p: &str, _: &mut Budget| Ok(bad.get(p).cloned());
+            let mut budget = Budget::with_limit("world", MAX_SCENE_BYTES);
+            assert!(
+                active_entity_lumps_with("maps/test/world.vwrld_c", &mut budget, &mut load)
+                    .is_err(),
+                "expected {bad_path:?} to be rejected"
+            );
+        }
+
+        // Count limit enforced on loaded lumps.
+        let mut many: HashMap<String, Value> = HashMap::new();
+        let names: Vec<String> = (0..=MAX_ENTITY_LUMPS)
+            .map(|i| format!("maps/test/entities/l{i}.vents"))
+            .collect();
+        many.insert(
+            "maps/test/world.vwrld_c".into(),
+            Value::object([(
+                "m_entityLumps",
+                Value::from_array(names.iter().map(String::as_str)),
+            )]),
+        );
+        for name in &names {
+            many.insert(format!("{name}_c"), lump_data(vec![], &[]));
+        }
+        let mut load = |p: &str, _: &mut Budget| Ok(many.get(p).cloned());
+        let mut budget = Budget::with_limit("world", MAX_SCENE_BYTES);
+        assert!(
+            active_entity_lumps_with("maps/test/world.vwrld_c", &mut budget, &mut load).is_err()
+        );
+
+        // Visited path cap enforced even when all referenced lumps are missing.
+        let missing_names: Vec<String> = (0..=MAX_VISITED_LUMPS)
+            .map(|i| format!("maps/test/entities/missing_{i}.vents"))
+            .collect();
+        let mut missing_world: HashMap<String, Value> = HashMap::new();
+        missing_world.insert(
+            "maps/test/world.vwrld_c".into(),
+            Value::object([(
+                "m_entityLumps",
+                Value::from_array(missing_names.iter().map(String::as_str)),
+            )]),
+        );
+        let mut load = |p: &str, _: &mut Budget| Ok(missing_world.get(p).cloned());
+        let mut budget = Budget::with_limit("world", MAX_SCENE_BYTES);
+        let err = active_entity_lumps_with("maps/test/world.vwrld_c", &mut budget, &mut load)
+            .err()
+            .expect("visited cap exceeded")
+            .to_string();
+        assert!(err.contains("entity lump paths"), "{err}");
+
+        // Tight budget rejects queueing lump paths before inserting.
+        let mut tiny_budget = Budget::with_limit("world", 32);
+        let err = active_entity_lumps_with("maps/test/world.vwrld_c", &mut tiny_budget, &mut load)
+            .err()
+            .expect("budget exceeded")
+            .to_string();
+        assert!(err.contains("more than it may"), "{err}");
     }
 }

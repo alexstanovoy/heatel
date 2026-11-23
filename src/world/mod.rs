@@ -19,3 +19,4 @@ pub use light::{
     Light, LightZone, Lighting, MAX_LIGHT_ZONES, Rgb, Shade, ZoneShade, lighting, lighting_in,
 };
 pub use placements::{Placement, placements};
+pub use scene::{MAX_ENTITY_LUMPS, active_entity_lumps, active_entity_lumps_in};

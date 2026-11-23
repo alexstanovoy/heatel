@@ -3,12 +3,30 @@
 //! Read out of the plain KeyValues text of `scripts/npc/items.txt`, `npc_abilities.txt` and the
 //! heroes' scripts, so a client can import every one of them without a list of its own.
 
+use std::collections::BTreeMap;
+
+use crate::budget::Budget;
 use crate::error::{Result, malformed};
-use crate::keyvalues::{Kv, parse_kv_repeats, text};
+use crate::keyvalues::{Kv, parse_kv, parse_kv_repeats, text};
 
 /// Most entries one script lists: Dota's `items.txt` holds a few hundred and `npc_abilities.txt`
 /// a few thousand.
 pub const MAX_ENTRIES: usize = 20_000;
+
+/// Maximum `BaseClass` inheritance hops followed when resolving an NPC's `Model`.
+pub const MAX_BASE_CLASS_DEPTH: usize = 16;
+
+/// Longest NPC unit/hero block name accepted when indexing NPC scripts.
+const MAX_UNIT_NAME: usize = 256;
+
+/// Longest resolved `Model` path accepted when indexing NPC scripts.
+const MAX_MODEL_PATH: usize = 512;
+
+/// Most NPC script files parsed together by [`npc_models`].
+const MAX_NPC_SCRIPTS: usize = 512;
+
+/// Most retained bytes allocated by [`npc_models_from_trees`].
+const MAX_NPC_MODEL_BYTES: usize = 32 << 20;
 
 /// Most precached particles read of one entry.
 const MAX_PARTICLES: usize = 64;
@@ -108,6 +126,104 @@ fn entry(name: &str, block: &Kv) -> Entry {
     }
 }
 
+/// Resolves the `Model` path of NPC `name` from `units` by following `BaseClass` inheritance
+/// links up to [`MAX_BASE_CLASS_DEPTH`] hops.
+///
+/// Returns `None` if `name` is missing, has an explicit empty `Model`, exceeds
+/// [`MAX_BASE_CLASS_DEPTH`], or hits a `BaseClass` cycle.
+pub fn resolve_npc_model<'a>(name: &str, units: &BTreeMap<&str, &'a Kv>) -> Option<&'a str> {
+    let mut visited = Vec::with_capacity(MAX_BASE_CLASS_DEPTH + 1);
+    let mut current = name;
+    for _ in 0..=MAX_BASE_CLASS_DEPTH {
+        if visited.contains(&current) {
+            return None;
+        }
+        visited.push(current);
+        let node = units.get(current)?;
+        if let Some(Kv::Text(model)) = node.get("Model") {
+            return (!model.is_empty()).then_some(model.as_str());
+        }
+        let Kv::Text(base) = node.get("BaseClass")? else {
+            return None;
+        };
+        current = base.as_str();
+    }
+    None
+}
+
+/// Resolves `Model` paths for every NPC block under `DOTAUnits` or `DOTAHeroes` across parsed
+/// KeyValues `trees`, following `BaseClass` inheritance up to [`MAX_BASE_CLASS_DEPTH`] hops.
+///
+/// Later trees override earlier definitions of the same NPC name. At most [`MAX_ENTRIES`] NPC
+/// definitions are indexed within a bounded memory budget.
+pub fn npc_models_from_trees(trees: &[Kv]) -> Result<BTreeMap<String, String>> {
+    if trees.len() > MAX_NPC_SCRIPTS {
+        return Err(malformed(
+            "scripts",
+            format!("more than {MAX_NPC_SCRIPTS} NPC scripts"),
+        ));
+    }
+    let mut units: BTreeMap<&str, &Kv> = BTreeMap::new();
+    for tree in trees {
+        let Some(root) = tree.get("DOTAUnits").or_else(|| tree.get("DOTAHeroes")) else {
+            continue;
+        };
+        for (name, definition) in root.block().unwrap_or_default() {
+            if definition.block().is_none() {
+                continue;
+            }
+            if name.len() > MAX_UNIT_NAME {
+                return Err(malformed(
+                    "scripts",
+                    format!("unit name longer than {MAX_UNIT_NAME} bytes"),
+                ));
+            }
+            if !units.contains_key(name.as_str()) && units.len() >= MAX_ENTRIES {
+                return Err(malformed(
+                    "scripts",
+                    format!("more than {MAX_ENTRIES} NPC entries"),
+                ));
+            }
+            units.insert(name.as_str(), definition);
+        }
+    }
+    let mut budget = Budget::with_limit("scripts", MAX_NPC_MODEL_BYTES);
+    let mut models = BTreeMap::new();
+    for &name in units.keys() {
+        if let Some(model) = resolve_npc_model(name, &units) {
+            if model.len() > MAX_MODEL_PATH {
+                return Err(malformed(
+                    "scripts",
+                    format!("model path longer than {MAX_MODEL_PATH} bytes"),
+                ));
+            }
+            budget.slots::<(String, String)>(1)?;
+            let key = budget.copy(name)?;
+            let value = budget.copy(model)?;
+            models.insert(key, value);
+        }
+    }
+    Ok(models)
+}
+
+/// Parses raw NPC script files (`npc_units.txt`, `npc_heroes.txt`, `heroes/*.txt`) and resolves
+/// each NPC's `Model` via `BaseClass` inheritance (up to [`MAX_BASE_CLASS_DEPTH`] hops).
+pub fn npc_models(scripts: &[&[u8]]) -> Result<BTreeMap<String, String>> {
+    if scripts.len() > MAX_NPC_SCRIPTS {
+        return Err(malformed(
+            "scripts",
+            format!("more than {MAX_NPC_SCRIPTS} NPC scripts"),
+        ));
+    }
+    let mut input_budget = Budget::named("scripts");
+    let mut trees = Vec::with_capacity(scripts.len());
+    for script in scripts {
+        input_budget.bytes(script.len())?;
+        trees.push(parse_kv(text(script)?)?);
+    }
+    npc_models_from_trees(&trees)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +281,106 @@ mod tests {
         assert_eq!(entries[0].particles.len(), 2);
         assert_eq!(entries[1].icon_name(), "item_recipe");
         assert!(!entries[2].item && entries[3].icon_name() == "nevermore_shadowraze1");
+    }
+
+    #[test]
+    fn npc_models_resolve_base_class_inheritance_cycles_and_depth_limit() {
+        let units_txt = br#""DOTAUnits"
+{
+    "npc_dota_base"
+    {
+        "Model" "models/base.vmdl"
+    }
+    "npc_dota_mid"
+    {
+        "BaseClass" "npc_dota_base"
+    }
+    "npc_dota_leaf"
+    {
+        "BaseClass" "npc_dota_mid"
+    }
+    "npc_dota_override_empty"
+    {
+        "BaseClass" "npc_dota_base"
+        "Model" ""
+    }
+    "npc_cycle_a"
+    {
+        "BaseClass" "npc_cycle_b"
+    }
+    "npc_cycle_b"
+    {
+        "BaseClass" "npc_cycle_a"
+    }
+    "npc_self_cycle"
+    {
+        "BaseClass" "npc_self_cycle"
+    }
+}"#;
+        let heroes_txt = br#""DOTAHeroes"
+{
+    "npc_dota_hero_base"
+    {
+        "Model" "models/hero_base.vmdl"
+    }
+    "npc_dota_hero_test"
+    {
+        "BaseClass" "npc_dota_hero_base"
+    }
+}"#;
+        let models = npc_models(&[units_txt, heroes_txt]).unwrap();
+        assert_eq!(
+            models.get("npc_dota_leaf").map(String::as_str),
+            Some("models/base.vmdl")
+        );
+        assert_eq!(
+            models.get("npc_dota_hero_test").map(String::as_str),
+            Some("models/hero_base.vmdl")
+        );
+        assert!(!models.contains_key("npc_dota_override_empty"));
+        assert!(!models.contains_key("npc_cycle_a"));
+        assert!(!models.contains_key("npc_cycle_b"));
+        assert!(!models.contains_key("npc_self_cycle"));
+
+        // Depth limit: 16 hops succeeds; 17 hops exceeds MAX_BASE_CLASS_DEPTH (16).
+        let mut chain = String::from("\"DOTAUnits\" {\n\"n0\" { \"Model\" \"models/ok.vmdl\" }\n");
+        for i in 1..=MAX_BASE_CLASS_DEPTH + 1 {
+            chain.push_str(&format!("\"n{i}\" {{ \"BaseClass\" \"n{}\" }}\n", i - 1));
+        }
+        chain.push('}');
+        let deep = npc_models(&[chain.as_bytes()]).unwrap();
+        assert_eq!(
+            deep.get(&format!("n{MAX_BASE_CLASS_DEPTH}"))
+                .map(String::as_str),
+            Some("models/ok.vmdl")
+        );
+        assert!(!deep.contains_key(&format!("n{}", MAX_BASE_CLASS_DEPTH + 1)));
+    }
+
+    #[test]
+    fn npc_models_rejects_oversized_model_paths_and_too_many_scripts() {
+        let exact = "a".repeat(MAX_MODEL_PATH);
+        let ok_script = format!(
+            "\"DOTAUnits\" {{ \"base\" {{ \"Model\" \"{exact}\" }} \"child\" {{ \"BaseClass\" \"base\" }} }}"
+        );
+        let resolved = npc_models(&[ok_script.as_bytes()]).unwrap();
+        assert_eq!(
+            resolved.get("child").map(String::as_str),
+            Some(exact.as_str())
+        );
+
+        let oversized = "a".repeat(MAX_MODEL_PATH + 1);
+        let bad_script = format!(
+            "\"DOTAUnits\" {{ \"base\" {{ \"Model\" \"{oversized}\" }} \"child\" {{ \"BaseClass\" \"base\" }} }}"
+        );
+        let err = npc_models(&[bad_script.as_bytes()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("model path longer than"), "{err}");
+
+        let empty: &[u8] = b"\"DOTAUnits\" {}";
+        let too_many = vec![empty; MAX_NPC_SCRIPTS + 1];
+        let err = npc_models(&too_many).unwrap_err().to_string();
+        assert!(err.contains("NPC scripts"), "{err}");
     }
 }

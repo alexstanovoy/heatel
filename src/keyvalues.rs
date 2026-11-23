@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use crate::budget::Budget;
 use crate::error::{Result, malformed};
-use crate::kv1::quoted_end;
+use crate::kv1::{OrderedTokens, quoted_end};
 pub use crate::kv1::{Token, Tokens};
 
 /// Deepest nesting of a script's blocks.
@@ -23,6 +23,9 @@ const MAX_DEPTH: usize = 64;
 
 /// Largest file read; the largest, the localization, is ~1.8 MB.
 const MAX_FILE: usize = 16 << 20;
+
+/// Most tokens/nodes accepted by [`parse_ordered`] and [`parse_ordered_in`].
+pub const MAX_ORDERED_NODES: usize = 1 << 18;
 
 /// A file as text, without a byte-order mark; one that is not UTF-8 or larger than any of
 /// Dota's (16 MiB) is an error.
@@ -82,6 +85,14 @@ impl Kv {
         }
     }
 
+    /// The string value, or none for a block.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) => Some(text),
+            Self::Block(_) => None,
+        }
+    }
+
     /// A block's keys and values in file order; none for a string.
     pub fn block(&self) -> Option<&[(String, Kv)]> {
         match self {
@@ -94,6 +105,75 @@ impl Kv {
 /// The tokens of `text`, read as they are asked for.
 pub fn tokens(text: &str) -> Tokens<'_> {
     Tokens::new(text)
+}
+
+/// KeyValues text as a lossless ordered tree (a [`Kv::Block`] at the root).
+///
+/// Unlike [`parse_kv`], this retains unquoted keys and block names (such as Valve's
+/// `soundscapes_manifest` root), preserves every repeated sibling sub-block (`playlooping`,
+/// `playrandom`, `rndwave`) and repeated string key in file order without merging, keeps
+/// anonymous `{ ... }` blocks under an empty key `""`, and rejects unbalanced braces,
+/// unterminated strings, files larger than 16 MiB, nesting deeper than 64, or more than
+/// [`MAX_ORDERED_NODES`] tokens.
+pub fn parse_ordered(text: &str) -> Result<Kv> {
+    parse_ordered_in(text, &mut Budget::named("keyvalues"))
+}
+
+/// [`parse_ordered`] within `budget`: every key, string, and block growth is charged before it
+/// is allocated.
+pub fn parse_ordered_in(text: &str, budget: &mut Budget) -> Result<Kv> {
+    if text.len() > MAX_FILE {
+        return Err(malformed("keyvalues", format!("{} bytes", text.len())));
+    }
+    let mut stack: Vec<(String, Block)> = vec![(String::new(), Block::default())];
+    let mut key: Option<String> = None;
+    let mut lexer = OrderedTokens::new(text);
+    let mut count = 0usize;
+    while let Some(token) = lexer.next_token()? {
+        count += 1;
+        if count > MAX_ORDERED_NODES {
+            return Err(malformed(
+                "keyvalues",
+                format!("more than {MAX_ORDERED_NODES} tokens"),
+            ));
+        }
+        match token {
+            Token::Open => {
+                if stack.len() > MAX_DEPTH {
+                    return Err(malformed("keyvalues", "blocks nested too deep"));
+                }
+                let block_key = key.take().unwrap_or_default();
+                stack.push((block_key, Block::default()));
+            }
+            Token::Close => {
+                if stack.len() < 2 {
+                    return Err(malformed("keyvalues", "unexpected closing brace"));
+                }
+                key = None;
+                let (block_key, block) = stack.pop().expect("more than the root");
+                let parent = &mut stack.last_mut().expect("the root stays").1;
+                budget.charge(push_cost(parent, block_key.len()))?;
+                parent.push(block_key, Kv::Block(block));
+            }
+            Token::Text(s) => match key.take() {
+                None => {
+                    budget.charge(s.len() + 16)?;
+                    key = Some(s.to_owned());
+                }
+                Some(k) => {
+                    let top = &mut stack.last_mut().expect("the root stays").1;
+                    budget.charge(push_cost(top, k.len()) + s.len() + 16)?;
+                    top.push(k, Kv::Text(s.to_owned()));
+                }
+            },
+        }
+    }
+    if stack.len() != 1 {
+        return Err(malformed("keyvalues", "unclosed block"));
+    }
+    Ok(Kv::Block(
+        stack.pop().map(|(_, block)| block).unwrap_or_default(),
+    ))
 }
 
 /// KeyValues text as a tree (a [`Kv::Block`] at the root). Keys and values are quoted strings;
@@ -255,9 +335,127 @@ fn localization_pair(text: &str, at: usize) -> Option<(&str, &str, usize)> {
         return None;
     }
     let i = skip_ws(key_end + 1);
-    if i == key_end + 1 || bytes.get(i) != Some(&b'"') {
+    if bytes.get(i) != Some(&b'"') {
         return None;
     }
     let end = quoted_end(bytes, i + 1).ok()?;
     Some((&text[key_start..key_end], &text[i + 1..end], end + 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn localization_handles_adjacent_quotes_escaped_quotes_and_empty_values() {
+        let input = concat!(
+            "\"lang\"\n{\n",
+            "\"Tokens\"\n{\n",
+            "\"DOTA_Tooltip_ability_special_bonus_unique_witch_doctor_2\"\"+12% Maledict Damage\"\n",
+            "\"escaped_key\" \"say \\\"hello\\\"\\nworld\"\n",
+            "\"adjacent_escaped\"\"say \\\"hi\\\"\"\n",
+            "\"empty_spaced\" \"\"\n",
+            "\"empty_adjacent\"\"\"\n",
+            "\"normal\" \"value\"\n",
+            "}\n}\n",
+        );
+        let table = localization_table(input);
+        assert_eq!(
+            table
+                .get("dota_tooltip_ability_special_bonus_unique_witch_doctor_2")
+                .map(String::as_str),
+            Some("+12% Maledict Damage")
+        );
+        assert_eq!(
+            table.get("escaped_key").map(String::as_str),
+            Some("say \"hello\"\nworld")
+        );
+        assert_eq!(
+            table.get("adjacent_escaped").map(String::as_str),
+            Some("say \"hi\"")
+        );
+        assert_eq!(table.get("empty_spaced").map(String::as_str), Some(""));
+        assert_eq!(table.get("empty_adjacent").map(String::as_str), Some(""));
+        assert_eq!(table.get("normal").map(String::as_str), Some("value"));
+    }
+
+    #[test]
+    fn kv_parser_handles_adjacent_quotes_escaped_quotes_empty_values_and_nested_blocks() {
+        let input = r#""Root" { "Sub" { "k1""v1" "k2" "" "k3""a\"b" "Inner" { "x""y" } } }"#;
+        let tree = parse_kv(input).unwrap();
+        let sub = tree.get("Root").unwrap().get("Sub").unwrap();
+        assert_eq!(sub.get("k1").and_then(Kv::as_str), Some("v1"));
+        assert_eq!(sub.get("k2").and_then(Kv::as_str), Some(""));
+        assert_eq!(sub.get("k3").and_then(Kv::as_str), Some(r#"a\"b"#));
+        assert_eq!(
+            sub.get("Inner").unwrap().get("x").and_then(Kv::as_str),
+            Some("y")
+        );
+    }
+
+    #[test]
+    fn parse_ordered_preserves_unquoted_names_and_repeated_sibling_blocks() {
+        let input = r#"
+// comment
+soundscapes_manifest
+{
+    "file" "scripts/a.txt"
+    /* block comment */
+    "playlooping" { "wave" "sounds/a.vsnd" }
+    "playlooping" { "wave" "sounds/b.vsnd" }
+    "playrandom"
+    {
+        "rndwave"
+        {
+            "wave" "sounds/r1.vsnd"
+            "wave" "sounds/r2.vsnd"
+        }
+        "rndwave"
+        {
+            "wave" "sounds/r3.vsnd"
+        }
+    }
+}
+"#;
+        let tree = parse_ordered(input).unwrap();
+        let root = tree.block().unwrap();
+        assert_eq!(root.len(), 1);
+        assert_eq!(root[0].0, "soundscapes_manifest");
+        let items = root[0].1.block().unwrap();
+        let keys: Vec<&str> = items.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["file", "playlooping", "playlooping", "playrandom"]);
+        assert_eq!(
+            items[1].1.get("wave").and_then(Kv::as_str),
+            Some("sounds/a.vsnd")
+        );
+        assert_eq!(
+            items[2].1.get("wave").and_then(Kv::as_str),
+            Some("sounds/b.vsnd")
+        );
+        let rndwaves: Vec<&[(String, Kv)]> = items[3]
+            .1
+            .block()
+            .unwrap()
+            .iter()
+            .filter_map(|(k, v)| (k == "rndwave").then(|| v.block()).flatten())
+            .collect();
+        assert_eq!(rndwaves.len(), 2);
+        assert_eq!(rndwaves[0].len(), 2);
+        assert_eq!(rndwaves[1].len(), 1);
+    }
+
+    #[test]
+    fn parse_ordered_enforces_bounds_and_syntax() {
+        assert!(parse_ordered("\"a\" { \"b\" \"c\"").is_err());
+        assert!(parse_ordered("}").is_err());
+        assert!(parse_ordered("\"unterminated").is_err());
+        let deep = format!(
+            "{} {}",
+            "a {".repeat(MAX_DEPTH + 1),
+            "}".repeat(MAX_DEPTH + 1)
+        );
+        assert!(parse_ordered(&deep).is_err());
+        let mut tiny = Budget::new(16);
+        assert!(parse_ordered_in("\"a\" \"bbbbbbbbbbbbbbbbbbbb\"", &mut tiny).is_err());
+    }
 }

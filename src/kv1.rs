@@ -66,6 +66,68 @@ impl<'a> Iterator for Tokens<'a> {
     }
 }
 
+/// The quoted strings, unquoted tokens, and braces of KeyValues text, one at a time;
+/// comments are skipped, and unterminated quotes are reported as an error.
+#[derive(Clone, Debug)]
+pub(crate) struct OrderedTokens<'a> {
+    text: &'a str,
+    at: usize,
+}
+
+impl<'a> OrderedTokens<'a> {
+    pub(crate) fn new(text: &'a str) -> Self {
+        Self { text, at: 0 }
+    }
+
+    pub(crate) fn next_token(&mut self) -> Result<Option<Token<'a>>> {
+        let bytes = self.text.as_bytes();
+        while self.at < bytes.len() {
+            let i = self.at;
+            match bytes[i] {
+                b if b.is_ascii_whitespace() => {
+                    self.at += 1;
+                }
+                b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                    self.at = line_end(bytes, i + 2);
+                }
+                b'/' if bytes.get(i + 1) == Some(&b'*') => match self.text[i + 2..].find("*/") {
+                    Some(n) => self.at = i + n + 4,
+                    None => self.at = bytes.len(),
+                },
+                b'{' => {
+                    self.at += 1;
+                    return Ok(Some(Token::Open));
+                }
+                b'}' => {
+                    self.at += 1;
+                    return Ok(Some(Token::Close));
+                }
+                b'"' => match quoted_end(bytes, i + 1) {
+                    Ok(end) => {
+                        self.at = end + 1;
+                        return Ok(Some(Token::Text(&self.text[i + 1..end])));
+                    }
+                    Err(_) => return Err(malformed("keyvalues", "unterminated string")),
+                },
+                _ => {
+                    let start = i;
+                    self.at += 1;
+                    while self.at < bytes.len() {
+                        match bytes[self.at] {
+                            b if b.is_ascii_whitespace() => break,
+                            b'{' | b'}' | b'"' => break,
+                            b'/' if matches!(bytes.get(self.at + 1), Some(b'/' | b'*')) => break,
+                            _ => self.at += 1,
+                        }
+                    }
+                    return Ok(Some(Token::Text(&self.text[start..self.at])));
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
 pub(crate) fn line_end(bytes: &[u8], from: usize) -> usize {
     bytes[from..]
         .iter()

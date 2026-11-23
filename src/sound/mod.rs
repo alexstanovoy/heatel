@@ -5,6 +5,7 @@ mod events;
 mod lipsync;
 mod mixer;
 mod mp3;
+pub mod soundscapes;
 mod vsnd;
 mod wav;
 

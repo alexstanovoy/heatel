@@ -41,14 +41,26 @@ pub struct Object {
 }
 
 impl Object {
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
+    /// Creates an empty KV3 object.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates an empty KV3 object with space for `capacity` members.
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
             members: Vec::with_capacity(capacity),
         }
     }
 
-    pub(crate) fn push(&mut self, key: String, value: Value) {
+    /// Appends a `(key, value)` member to the object in file order.
+    pub fn push(&mut self, key: String, value: Value) {
         self.members.push((key, value));
+    }
+
+    /// Appends a `(key, value)` member, converting key and value into [`String`] and [`Value`].
+    pub fn insert(&mut self, key: impl Into<String>, value: impl Into<Value>) {
+        self.members.push((key.into(), value.into()));
     }
 
     /// The member `key`; when a key repeats, the last one wins, as in Valve's reader.
@@ -76,7 +88,79 @@ impl Object {
     }
 }
 
+impl<K: Into<String>, V: Into<Value>> FromIterator<(K, V)> for Object {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let iter = iter.into_iter();
+        let (lower, _) = iter.size_hint();
+        let mut object = Self::with_capacity(lower);
+        for (key, value) in iter {
+            object.insert(key, value);
+        }
+        object
+    }
+}
+
+impl<K: Into<String>, V: Into<Value>, const N: usize> From<[(K, V); N]> for Object {
+    fn from(members: [(K, V); N]) -> Self {
+        members.into_iter().collect()
+    }
+}
+
 impl Value {
+    /// Constructs [`Value::Null`].
+    pub fn null() -> Self {
+        Self::Null
+    }
+
+    /// Constructs [`Value::Bool`].
+    pub fn bool(value: bool) -> Self {
+        Self::Bool(value)
+    }
+
+    /// Constructs [`Value::Int`].
+    pub fn int(value: i64) -> Self {
+        Self::Int(value)
+    }
+
+    /// Constructs [`Value::UInt`].
+    pub fn uint(value: u64) -> Self {
+        Self::UInt(value)
+    }
+
+    /// Constructs [`Value::Float`].
+    pub fn float(value: f64) -> Self {
+        Self::Float(value)
+    }
+
+    /// Constructs [`Value::String`].
+    pub fn string(value: impl Into<String>) -> Self {
+        Self::String(value.into())
+    }
+
+    /// Constructs [`Value::Blob`].
+    pub fn blob(value: impl Into<Vec<u8>>) -> Self {
+        Self::Blob(value.into())
+    }
+
+    /// Constructs [`Value::Array`] from any iterable of values convertible into [`Value`].
+    pub fn from_array<I, V>(items: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<Value>,
+    {
+        Self::Array(items.into_iter().map(Into::into).collect())
+    }
+
+    /// Constructs [`Value::Object`] from any iterable of `(key, value)` pairs.
+    pub fn object<I, K, V>(members: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<Value>,
+    {
+        Self::Object(members.into_iter().collect())
+    }
+
     /// The member `key` of an object.
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.as_object()?.get(key)
@@ -197,6 +281,113 @@ impl Value {
             Value::Object(o) => Some(o),
             _ => None,
         }
+    }
+}
+
+impl From<bool> for Value {
+    fn from(value: bool) -> Self {
+        Self::Bool(value)
+    }
+}
+
+impl From<i32> for Value {
+    fn from(value: i32) -> Self {
+        Self::Int(i64::from(value))
+    }
+}
+
+impl From<i64> for Value {
+    fn from(value: i64) -> Self {
+        Self::Int(value)
+    }
+}
+
+impl From<u32> for Value {
+    fn from(value: u32) -> Self {
+        Self::UInt(u64::from(value))
+    }
+}
+
+impl From<u64> for Value {
+    fn from(value: u64) -> Self {
+        Self::UInt(value)
+    }
+}
+
+impl From<f32> for Value {
+    fn from(value: f32) -> Self {
+        Self::Float(f64::from(value))
+    }
+}
+
+impl From<f64> for Value {
+    fn from(value: f64) -> Self {
+        Self::Float(value)
+    }
+}
+
+impl From<String> for Value {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_owned())
+    }
+}
+
+impl From<Vec<Value>> for Value {
+    fn from(value: Vec<Value>) -> Self {
+        Self::Array(value)
+    }
+}
+
+impl<V: Into<Value>, const N: usize> From<[V; N]> for Value {
+    fn from(value: [V; N]) -> Self {
+        Self::Array(value.into_iter().map(Into::into).collect())
+    }
+}
+
+impl From<Object> for Value {
+    fn from(value: Object) -> Self {
+        Self::Object(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Object, Value};
+
+    #[test]
+    fn public_constructors_build_values_and_objects_directly() {
+        let mut obj = Object::new();
+        obj.insert("flag", true);
+        obj.insert("count", 42_i32);
+        obj.insert("count", 7_u32);
+        assert_eq!(obj.len(), 3);
+        assert_eq!(obj.get("flag").and_then(Value::as_bool), Some(true));
+        assert_eq!(obj.get("count").and_then(Value::as_u64), Some(7));
+
+        let entity = Value::object([
+            ("classname", Value::from("env_soundscape")),
+            ("origin", Value::from_array([1.0_f64, 2.0, 3.0])),
+            ("radius", Value::int(512)),
+            ("raw", Value::blob([0xDE_u8, 0xAD])),
+            ("none", Value::null()),
+        ]);
+        assert_eq!(entity.str_field("classname"), Some("env_soundscape"));
+        assert_eq!(entity.get("radius").and_then(Value::as_i64), Some(512));
+        assert_eq!(
+            entity.get("raw").and_then(Value::as_blob),
+            Some(&[0xDE, 0xAD][..])
+        );
+        assert_eq!(entity.get("none"), Some(&Value::Null));
+        assert_eq!(
+            entity.get("origin").and_then(Value::f32_array::<3>),
+            Some([1.0, 2.0, 3.0])
+        );
     }
 }
 
