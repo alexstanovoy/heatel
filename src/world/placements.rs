@@ -23,14 +23,11 @@ pub fn placements(entities: &[Value]) -> Vec<Placement> {
 }
 
 fn placed(entity: &Value) -> Option<Placement> {
-    let model = entity.get("model")?.as_str()?;
+    let model = entity.str_field("model")?;
     let file = model.rsplit('/').next()?;
     let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
     let numbers = |key, default: f64| -> [f64; 3] {
-        let list = entity
-            .get(key)
-            .and_then(Value::as_array)
-            .unwrap_or_default();
+        let list = entity.array(key);
         std::array::from_fn(|i| list.get(i).and_then(Value::as_f64).unwrap_or(default))
     };
     let finite = |v: f64| if v.is_finite() { v } else { 0.0 };

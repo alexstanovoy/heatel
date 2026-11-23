@@ -18,21 +18,97 @@ use std::collections::HashMap;
 use serde_json::{Value as Json, json};
 
 use crate::anim::{Clip, Keys};
+use crate::coords::{multiply, rotate, valid_bone_scale};
 use crate::error::{Result, malformed};
 use crate::export::ExportedTexture;
 use crate::material::{Images, Material, convert, extensions_used};
-use crate::model::{Mesh, Model, multiply, rotate};
+use crate::model::{Mesh, Model};
 use crate::vertices::{Attribute, Skin, Vertices};
 
-const FLOAT: u32 = 5126;
-const UNSIGNED_SHORT: u32 = 5123;
-const UNSIGNED_INT: u32 = 5125;
-const ARRAY_BUFFER: u32 = 34962;
-const ELEMENT_ARRAY_BUFFER: u32 = 34963;
+pub(crate) const FLOAT: u32 = 5126;
+pub(crate) const UNSIGNED_SHORT: u32 = 5123;
+pub(crate) const UNSIGNED_INT: u32 = 5125;
+pub(crate) const ARRAY_BUFFER: u32 = 34962;
+pub(crate) const ELEMENT_ARRAY_BUFFER: u32 = 34963;
 /// Largest `.glb` written; the install's largest model makes ~10 MB.
 const MAX_GLB: usize = 1 << 30;
 /// JSON bytes counted per accessor, view, node or channel besides its names.
 const JSON_ITEM: usize = 256;
+
+/// Shared binary buffer, `bufferViews`, and `accessors` builder used by model and world exporters.
+#[derive(Default)]
+pub(crate) struct GltfBuffer {
+    pub(crate) bin: Vec<u8>,
+    pub(crate) views: Vec<Json>,
+    pub(crate) accessors: Vec<Json>,
+}
+
+impl GltfBuffer {
+    pub(crate) fn push_accessor(
+        &mut self,
+        bytes: &[u8],
+        target: Option<u32>,
+        component: u32,
+        count: usize,
+        kind: &str,
+    ) -> usize {
+        let at = self.bin.len().next_multiple_of(4);
+        self.bin.resize(at, 0);
+        self.bin.extend_from_slice(bytes);
+        let mut view = json!({ "buffer": 0, "byteOffset": at, "byteLength": bytes.len() });
+        if let Some(target) = target {
+            view["target"] = json!(target);
+        }
+        self.views.push(view);
+        self.accessors.push(json!({
+            "bufferView": self.views.len() - 1,
+            "componentType": component,
+            "count": count,
+            "type": kind,
+        }));
+        self.accessors.len() - 1
+    }
+
+    pub(crate) fn push_f32_slice(
+        &mut self,
+        values: &[f32],
+        count: usize,
+        kind: &str,
+        target: Option<u32>,
+    ) -> usize {
+        let bytes: Vec<u8> = values.iter().flat_map(|f| f.to_le_bytes()).collect();
+        self.push_accessor(&bytes, target, FLOAT, count, kind)
+    }
+
+    pub(crate) fn push_indices(&mut self, indices: &[u32], short: bool) -> usize {
+        let (bytes, component): (Vec<u8>, u32) = if short {
+            (
+                indices
+                    .iter()
+                    .flat_map(|&i| (i as u16).to_le_bytes())
+                    .collect(),
+                UNSIGNED_SHORT,
+            )
+        } else {
+            (
+                indices.iter().flat_map(|i| i.to_le_bytes()).collect(),
+                UNSIGNED_INT,
+            )
+        };
+        self.push_accessor(
+            &bytes,
+            Some(ELEMENT_ARRAY_BUFFER),
+            component,
+            indices.len(),
+            "SCALAR",
+        )
+    }
+
+    pub(crate) fn set_bounds(&mut self, accessor: usize, min: [f32; 3], max: [f32; 3]) {
+        self.accessors[accessor]["min"] = json!(min);
+        self.accessors[accessor]["max"] = json!(max);
+    }
+}
 
 /// What to write besides the model itself.
 pub struct GltfOptions<'a> {
@@ -56,9 +132,7 @@ pub struct GltfOptions<'a> {
 
 #[derive(Default)]
 struct Builder {
-    bin: Vec<u8>,
-    views: Vec<Json>,
-    accessors: Vec<Json>,
+    buf: GltfBuffer,
     nodes: Vec<Json>,
     meshes: Vec<Json>,
     materials: Vec<Json>,
@@ -105,9 +179,9 @@ pub fn write_glb(model: &Model, options: &GltfOptions) -> Result<(Vec<u8>, Vec<E
         "nodes": b.nodes,
         "meshes": b.meshes,
         "materials": b.materials,
-        "accessors": b.accessors,
-        "bufferViews": b.views,
-        "buffers": [{ "byteLength": b.bin.len() }],
+        "accessors": b.buf.accessors,
+        "bufferViews": b.buf.views,
+        "buffers": [{ "byteLength": b.buf.bin.len() }],
     });
     if !animations.is_empty() {
         root["animations"] = json!(animations);
@@ -125,7 +199,7 @@ pub fn write_glb(model: &Model, options: &GltfOptions) -> Result<(Vec<u8>, Vec<E
     if !extensions.is_empty() {
         root["extensionsUsed"] = json!(extensions);
     }
-    Ok((container(&root, &b.bin), b.images.list))
+    Ok((container(&root, &b.buf.bin), b.images.list))
 }
 
 /// The one sampler: linear, mipmapped, repeating.
@@ -201,26 +275,6 @@ impl Builder {
         }
     }
 
-    /// Appends `bytes` as a buffer view (4-byte aligned).
-    fn view(&mut self, bytes: &[u8], target: Option<u32>) -> usize {
-        self.bin.resize(self.bin.len().next_multiple_of(4), 0);
-        let mut view =
-            json!({ "buffer": 0, "byteOffset": self.bin.len(), "byteLength": bytes.len() });
-        if let Some(target) = target {
-            view["target"] = json!(target);
-        }
-        self.bin.extend_from_slice(bytes);
-        self.views.push(view);
-        self.views.len() - 1
-    }
-
-    fn accessor(&mut self, view: usize, component: u32, count: usize, kind: &str) -> usize {
-        self.accessors.push(json!({
-            "bufferView": view, "componentType": component, "count": count, "type": kind,
-        }));
-        self.accessors.len() - 1
-    }
-
     /// `values` as an accessor of vertex attributes.
     fn floats<const N: usize>(&mut self, values: &[[f32; N]], kind: &str) -> usize {
         self.floats_for(values, kind, Some(ARRAY_BUFFER))
@@ -232,34 +286,28 @@ impl Builder {
         kind: &str,
         target: Option<u32>,
     ) -> usize {
-        let bytes: Vec<u8> = values
-            .iter()
-            .flatten()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
-        let view = self.view(&bytes, target);
-        self.accessor(view, FLOAT, values.len(), kind)
+        self.buf
+            .push_f32_slice(values.as_flattened(), values.len(), kind, target)
     }
 
     /// `attribute` as an accessor of as many components as it has.
     fn attribute(&mut self, attribute: &Attribute) -> usize {
         let width = attribute.width.clamp(1, 4);
-        let bytes: Vec<u8> = attribute
+        let values: Vec<f32> = attribute
             .values
             .iter()
             .flat_map(|v| &v[..width])
-            .flat_map(|f| f.to_le_bytes())
+            .copied()
             .collect();
-        let view = self.view(&bytes, Some(ARRAY_BUFFER));
         let kind = ["SCALAR", "VEC2", "VEC3", "VEC4"][width - 1];
-        self.accessor(view, FLOAT, attribute.values.len(), kind)
+        self.buf
+            .push_f32_slice(&values, attribute.values.len(), kind, Some(ARRAY_BUFFER))
     }
 
     fn attributes(&mut self, v: &Vertices) -> Json {
         let position = self.floats(&v.positions, "VEC3");
         if let Some((min, max)) = bounds(&v.positions) {
-            self.accessors[position]["min"] = json!(min);
-            self.accessors[position]["max"] = json!(max);
+            self.buf.set_bounds(position, min, max);
         }
         let mut attributes = json!({ "POSITION": position });
         if let Some(normals) = &v.normals {
@@ -280,9 +328,14 @@ impl Builder {
                 .flatten()
                 .flat_map(|j| j.to_le_bytes())
                 .collect();
-            let view = self.view(&bytes, Some(ARRAY_BUFFER));
-            attributes["JOINTS_0"] =
-                json!(self.accessor(view, UNSIGNED_SHORT, joints.len(), "VEC4"));
+            let joints_acc = self.buf.push_accessor(
+                &bytes,
+                Some(ARRAY_BUFFER),
+                UNSIGNED_SHORT,
+                joints.len(),
+                "VEC4",
+            );
+            attributes["JOINTS_0"] = json!(joints_acc);
             attributes["WEIGHTS_0"] = json!(self.floats(weights, "VEC4"));
         }
         attributes
@@ -339,8 +392,7 @@ impl Builder {
         for target in &mesh.targets {
             let position = self.floats_for(&target.positions, "VEC3", None);
             if let Some((min, max)) = bounds(&target.positions) {
-                self.accessors[position]["min"] = json!(min);
-                self.accessors[position]["max"] = json!(max);
+                self.buf.set_bounds(position, min, max);
             }
             let mut attributes = json!({ "POSITION": position });
             if normals {
@@ -386,11 +438,12 @@ impl Builder {
         let input = match self.time_index.get(&bits) {
             Some(&i) => i,
             None => {
-                let times: Vec<[f32; 1]> = keys.times.iter().map(|&t| [t]).collect();
-                let i = self.floats_for(&times, "SCALAR", None);
+                let i = self
+                    .buf
+                    .push_f32_slice(&keys.times, keys.times.len(), "SCALAR", None);
                 let first = keys.times.first().copied().unwrap_or(0.0);
-                self.accessors[i]["min"] = json!([first]);
-                self.accessors[i]["max"] = json!([keys.times.last().copied().unwrap_or(0.0)]);
+                self.buf.accessors[i]["min"] = json!([first]);
+                self.buf.accessors[i]["max"] = json!([keys.times.last().copied().unwrap_or(0.0)]);
                 self.time_index.insert(bits, i);
                 i
             }
@@ -400,9 +453,7 @@ impl Builder {
     }
 
     fn indices(&mut self, indices: &[u32]) -> usize {
-        let bytes: Vec<u8> = indices.iter().flat_map(|i| i.to_le_bytes()).collect();
-        let view = self.view(&bytes, Some(ELEMENT_ARRAY_BUFFER));
-        self.accessor(view, UNSIGNED_INT, indices.len(), "SCALAR")
+        self.buf.push_indices(indices, false)
     }
 
     /// Each bone's inverse world transform at rest, column major.
@@ -425,15 +476,7 @@ impl Builder {
             }
             matrices.push(matrix);
         }
-        let view = self.view(
-            &matrices
-                .iter()
-                .flatten()
-                .flat_map(|f| f.to_le_bytes())
-                .collect::<Vec<_>>(),
-            None,
-        );
-        Ok(self.accessor(view, FLOAT, matrices.len(), "MAT4"))
+        Ok(self.floats_for(&matrices, "MAT4", None))
     }
 
     /// The material `path` drawn with the draw call's `tint`, made on first use; none when
@@ -524,7 +567,7 @@ fn check(model: &Model, options: &GltfOptions) -> Result<()> {
         }
         if !finite(&[bone.translation])
             || !finite(&[bone.rotation])
-            || !crate::model::valid_bone_scale(bone.scale)
+            || !valid_bone_scale(bone.scale)
         {
             return Err(bad(format!("bone {i} is not finite")));
         }

@@ -4,89 +4,9 @@
 use bevy_image::{CompressedImageFormats, ktx2_buffer_to_image};
 use heatel::texture::{Encoding, PixelFormat, Texture};
 
-/// A `vtex_c` as the game's compiler lays it out.
-struct Vtex {
-    flags: u16,
-    width: u16,
-    height: u16,
-    format: u8,
-    mips: u8,
-    /// Extra data entries: type and payload.
-    extras: Vec<(u32, Vec<u8>)>,
-    /// The levels as they sit after the resource, smallest first.
-    levels: Vec<Vec<u8>>,
-    /// The `REDI` block's bytes (the old edit info), if any.
-    redi: Option<Vec<u8>>,
-}
-
-fn words(values: &[u32]) -> Vec<u8> {
-    values.iter().flat_map(|v| v.to_le_bytes()).collect()
-}
-
-impl Vtex {
-    fn new(width: u16, height: u16, format: u8, levels: Vec<Vec<u8>>) -> Self {
-        Self {
-            flags: 0,
-            width,
-            height,
-            format,
-            mips: levels.len() as u8,
-            extras: Vec::new(),
-            levels,
-            redi: None,
-        }
-    }
-
-    fn bytes(&self) -> Vec<u8> {
-        let mut data = Vec::new();
-        data.extend_from_slice(&1u16.to_le_bytes());
-        data.extend_from_slice(&self.flags.to_le_bytes());
-        data.extend_from_slice(&[0; 16]);
-        for v in [self.width, self.height, 1] {
-            data.extend_from_slice(&v.to_le_bytes());
-        }
-        data.extend_from_slice(&[self.format, self.mips]);
-        data.extend_from_slice(&words(&[0, 8, self.extras.len() as u32]));
-        // Each entry: type, offset to its payload (from the offset field), size.
-        let mut payload_at = data.len() + 12 * self.extras.len();
-        let mut payloads = Vec::new();
-        for (kind, payload) in &self.extras {
-            let field = data.len() + 4;
-            data.extend_from_slice(&words(&[
-                *kind,
-                (payload_at - field) as u32,
-                payload.len() as u32,
-            ]));
-            payload_at += payload.len();
-            payloads.extend_from_slice(payload);
-        }
-        data.extend_from_slice(&payloads);
-        // The resource: file size, header version 12, version, table offset, block count, the
-        // table (each block's offset counts from its own field), the blocks.
-        let mut blocks = vec![(b"DATA", data)];
-        blocks.extend(self.redi.iter().map(|redi| (b"REDI", redi.clone())));
-        let table_end = 16 + 12 * blocks.len();
-        let file_size = table_end + blocks.iter().map(|(_, b)| b.len()).sum::<usize>();
-        let mut out = words(&[file_size as u32]);
-        out.extend_from_slice(&12u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&words(&[8, blocks.len() as u32]));
-        let mut at = table_end;
-        for (kind, block) in &blocks {
-            let field = out.len() + 4;
-            out.extend_from_slice(*kind);
-            out.extend_from_slice(&words(&[(at - field) as u32, block.len() as u32]));
-            at += block.len();
-        }
-        for (_, block) in &blocks {
-            out.extend_from_slice(block);
-        }
-        for level in &self.levels {
-            out.extend_from_slice(level);
-        }
-        out
-    }
-}
+#[path = "support/wire_builders.rs"]
+mod wire;
+use wire::{Vtex, words};
 
 /// `n` bytes counting up from `seed`.
 fn pattern(n: usize, seed: u8) -> Vec<u8> {

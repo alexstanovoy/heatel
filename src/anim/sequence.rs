@@ -4,9 +4,10 @@
 //! their activities, the `ANIM` block holds the animations they play, with the events.
 
 use super::clip::{block, listing};
+use crate::budget::Budget;
+use crate::coords::finite;
 use crate::error::{Result, malformed};
 use crate::kv3::Value;
-use crate::model::{array, finite};
 use crate::resource::Resource;
 
 /// Most sequences a model has (the largest hero here has about 700).
@@ -151,18 +152,19 @@ pub enum EventData {
 /// then the animations no sequence names). A sequence without an animation (a bind pose, a blend
 /// of nothing) is left out. A model without embedded animation has none.
 pub fn read_sequences(resource: &Resource) -> Result<Vec<Sequence>> {
-    let Some(ctrl) = resource.kv3(b"CTRL") else {
+    let mut budget = Budget::named("animation");
+    let Some(ctrl) = resource.kv3_in(b"CTRL", &mut budget) else {
         return Ok(Vec::new());
     };
     let ctrl = ctrl?.root;
     let Some(embedded) = ctrl.get("embedded_animation") else {
         return Ok(Vec::new());
     };
-    let Some(anim) = block(resource, embedded, "anim_data_block")? else {
+    let Some(anim) = block(resource, embedded, "anim_data_block", &mut budget)? else {
         return Ok(Vec::new());
     };
-    let sequences = block(resource, embedded, "seqgroup_data_block")?;
-    let descs = array(anim.get("m_animArray"));
+    let sequences = block(resource, embedded, "seqgroup_data_block", &mut budget)?;
+    let descs = anim.array("m_animArray");
     let mut out = Vec::new();
     let mut events = 0;
     for (name, desc, sequence) in listing(sequences.as_ref(), descs) {
@@ -205,7 +207,7 @@ fn frame_rate(desc: &Value) -> f32 {
 /// The activities of an `m_activityArray`: each `ACT_` entry, with the plain entries after it as
 /// its modifiers. Plain entries before any activity belong to none and are left out.
 pub(super) fn read_activities(entries: Option<&Value>) -> Result<Vec<Activity>> {
-    let entries = array(entries);
+    let entries = entries.map_or(&[][..], Value::slice);
     if entries.len() > MAX_ACTIVITY_ENTRIES {
         return Err(malformed(
             "animation",
@@ -214,10 +216,7 @@ pub(super) fn read_activities(entries: Option<&Value>) -> Result<Vec<Activity>> 
     }
     let mut out: Vec<Activity> = Vec::new();
     for entry in entries {
-        let name = entry
-            .get("m_name")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let name = entry.str_field("m_name").unwrap_or_default();
         if name.starts_with(ACTIVITY_PREFIX) {
             let weight = entry.get("m_nWeight").and_then(Value::as_u64);
             out.push(Activity {
@@ -234,7 +233,7 @@ pub(super) fn read_activities(entries: Option<&Value>) -> Result<Vec<Activity>> 
 
 /// The events of an animation, charged to `total`, sorted by frame (stably).
 fn read_events(desc: &Value, total: &mut usize) -> Result<Vec<AnimEvent>> {
-    let list = array(desc.get("m_eventArray"));
+    let list = desc.array("m_eventArray");
     *total += list.len();
     if *total > MAX_EVENTS {
         return Err(malformed("animation", "more events than any model has"));
@@ -245,22 +244,13 @@ fn read_events(desc: &Value, total: &mut usize) -> Result<Vec<AnimEvent>> {
 }
 
 fn event(value: &Value) -> AnimEvent {
-    let name = value
-        .get("m_sEventName")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let frame = |key| {
-        value
-            .get(key)
-            .and_then(Value::as_i64)
-            .and_then(|f| u32::try_from(f).ok())
-    };
-    let cycle = value.get("m_flCycle").and_then(Value::as_f64);
+    let name = value.str_field("m_sEventName").unwrap_or_default();
+    let frame = |key| value.usize_field(key).and_then(|f| u32::try_from(f).ok());
     AnimEvent {
         name: name.to_owned(),
         frame: frame("m_nFrame").unwrap_or(0),
         end_frame: frame("m_nEndFrame"),
-        cycle: finite(cycle.unwrap_or(0.0) as f32),
+        cycle: value.f32_field("m_flCycle").unwrap_or(0.0),
         data: value
             .get("m_EventData")
             .map_or(EventData::Other, |d| event_data(name, d)),
@@ -268,14 +258,13 @@ fn event(value: &Value) -> AnimEvent {
 }
 
 fn event_data(name: &str, d: &Value) -> EventData {
-    let text = |key: &str| {
-        d.get(key)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
-    };
+    let text = |key: &str| d.str_field(key).unwrap_or_default().to_owned();
     let flag = |key: &str| d.get(key).and_then(Value::as_bool) == Some(true);
-    let some = |key: &str| Some(text(key)).filter(|t| !t.is_empty());
+    let some = |key: &str| {
+        d.str_field(key)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned)
+    };
     match name {
         "AE_CL_PLAYSOUND" => EventData::PlaySound {
             sound: text("name"),

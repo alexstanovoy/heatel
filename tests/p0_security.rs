@@ -11,83 +11,14 @@ use heatel::{Budget, Error, Resource, Source, Vpk, kv3};
 
 #[path = "common/kv3.rs"]
 mod fixture;
+#[path = "support/wire_builders.rs"]
+mod wire;
 use fixture::{K, kv3_file, s};
+use wire::{
+    minimal_png, png_chunk, resource, sheet_extra, vpk_v1, vpk_v2, vtex_bytes, words, zlib_stored,
+};
 
-/// Builds a compiled Source 2 resource from `(kind, payload)` blocks.
-fn resource(blocks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
-    let table_end = 16 + 12 * blocks.len();
-    let size = table_end + blocks.iter().map(|(_, b)| b.len()).sum::<usize>();
-    let mut out = (size as u32).to_le_bytes().to_vec();
-    out.extend(12u16.to_le_bytes());
-    out.extend(0u16.to_le_bytes());
-    out.extend(8u32.to_le_bytes());
-    out.extend((blocks.len() as u32).to_le_bytes());
-    let mut at = table_end;
-    for (kind, block) in blocks {
-        let field = out.len() + 4;
-        out.extend(*kind);
-        out.extend(((at - field) as u32).to_le_bytes());
-        out.extend((block.len() as u32).to_le_bytes());
-        at += block.len();
-    }
-    for (_, block) in blocks {
-        out.extend(block);
-    }
-    out
-}
-
-fn words(values: &[u32]) -> Vec<u8> {
-    values.iter().flat_map(|v| v.to_le_bytes()).collect()
-}
-
-fn vtex_bytes(
-    width: u16,
-    height: u16,
-    format: u8,
-    extras: &[(u32, Vec<u8>)],
-    raw: &[u8],
-) -> Vec<u8> {
-    let mut data = Vec::new();
-    data.extend_from_slice(&1u16.to_le_bytes());
-    data.extend_from_slice(&0u16.to_le_bytes());
-    data.extend_from_slice(&[0; 16]);
-    for v in [width, height, 1] {
-        data.extend_from_slice(&v.to_le_bytes());
-    }
-    data.extend_from_slice(&[format, 1]);
-    data.extend_from_slice(&words(&[0, 8, extras.len() as u32]));
-    let mut payload_at = data.len() + 12 * extras.len();
-    let mut payloads = Vec::new();
-    for (kind, payload) in extras {
-        let field = data.len() + 4;
-        data.extend_from_slice(&words(&[
-            *kind,
-            (payload_at - field) as u32,
-            payload.len() as u32,
-        ]));
-        payload_at += payload.len();
-        payloads.extend_from_slice(payload);
-    }
-    data.extend_from_slice(&payloads);
-    let mut out = resource(&[(b"DATA", data)]);
-    out.extend_from_slice(raw);
-    out
-}
-
-fn sheet_extra(rect: [f32; 4]) -> Vec<u8> {
-    let mut out = words(&[8, 1]);
-    out.extend_from_slice(&words(&[0, 0, 24, 1, 1.0f32.to_bits(), 0, 0, 0]));
-    out.extend_from_slice(&words(&[1.0f32.to_bits(), 8, 1]));
-    for v in rect.into_iter().chain([0.0, 0.0, 1.0, 1.0]) {
-        out.extend_from_slice(&v.to_bits().to_le_bytes());
-    }
-    out
-}
-
-/// P0 #1: A clip with `m_nFrames = u64::MAX`, 0 bones, and 0 frame blocks must fail
-/// instantaneously instead of spinning for 2^64 iterations.
-#[test]
-fn anim_clip_zero_bones_u64_max_frames_returns_err_immediately() {
+fn anim_resource(group: K, anim: K) -> Vec<u8> {
     let ctrl = K::Obj(vec![(
         "embedded_animation",
         K::Obj(vec![
@@ -96,7 +27,18 @@ fn anim_clip_zero_bones_u64_max_frames_returns_err_immediately() {
         ]),
     )]);
     let data = K::Obj(vec![("m_modelSkeleton", K::Obj(vec![]))]);
-    let group = K::Obj(vec![("m_decodeKey", K::Obj(vec![]))]);
+    resource(&[
+        (b"CTRL", kv3_file(&ctrl)),
+        (b"DATA", kv3_file(&data)),
+        (b"AGRP", kv3_file(&group)),
+        (b"ANIM", kv3_file(&anim)),
+    ])
+}
+
+/// P0 #1: A clip with `m_nFrames = u64::MAX`, 0 bones, and 0 frame blocks must fail
+/// instantaneously instead of spinning for 2^64 iterations.
+#[test]
+fn anim_clip_zero_bones_u64_max_frames_returns_err_immediately() {
     let anim = K::Obj(vec![(
         "m_animArray",
         K::Arr(vec![K::Obj(vec![
@@ -111,14 +53,8 @@ fn anim_clip_zero_bones_u64_max_frames_returns_err_immediately() {
             ),
         ])]),
     )]);
-    let bytes = resource(&[
-        (b"CTRL", kv3_file(&ctrl)),
-        (b"DATA", kv3_file(&data)),
-        (b"AGRP", kv3_file(&group)),
-        (b"ANIM", kv3_file(&anim)),
-    ]);
-    let parsed = Resource::parse(&bytes).expect("valid resource");
-    let err = read_clips(&parsed, &["spin"])
+    let bytes = anim_resource(K::Obj(vec![("m_decodeKey", K::Obj(vec![]))]), anim);
+    let err = read_clips(&Resource::parse(&bytes).expect("valid resource"), &["spin"])
         .err()
         .expect("must reject u64::MAX frames");
     assert!(err.to_string().contains("animation"), "{err}");
@@ -128,15 +64,6 @@ fn anim_clip_zero_bones_u64_max_frames_returns_err_immediately() {
 /// `budget.work` so they cannot spin uncharged.
 #[test]
 fn anim_clip_cached_none_segments_charge_work_budget() {
-    let ctrl = K::Obj(vec![(
-        "embedded_animation",
-        K::Obj(vec![
-            ("group_data_block", K::Int(2)),
-            ("anim_data_block", K::Int(3)),
-        ]),
-    )]);
-    let data = K::Obj(vec![("m_modelSkeleton", K::Obj(vec![]))]);
-    // One channel with an unknown attribute so Segment::parse returns Ok(None) and caches None.
     let group = K::Obj(vec![(
         "m_decodeKey",
         K::Obj(vec![(
@@ -187,41 +114,26 @@ fn anim_clip_cached_none_segments_charge_work_budget() {
             ])]),
         ),
     ]);
-    let bytes = resource(&[
-        (b"CTRL", kv3_file(&ctrl)),
-        (b"DATA", kv3_file(&data)),
-        (b"AGRP", kv3_file(&group)),
-        (b"ANIM", kv3_file(&anim)),
-    ]);
-    let parsed = Resource::parse(&bytes).expect("valid resource");
-    let err = read_clips(&parsed, &["none_segs"])
-        .err()
-        .expect("must exhaust work budget on repeated cached None segments");
+    let bytes = anim_resource(group, anim);
+    let err = read_clips(
+        &Resource::parse(&bytes).expect("valid resource"),
+        &["none_segs"],
+    )
+    .err()
+    .expect("must exhaust work budget on repeated cached None segments");
     assert!(err.to_string().contains("segment visits"), "{err}");
 }
 
 /// P0 #1c: Per-frame `m_movementArray` scans must charge `budget.work`.
 #[test]
 fn anim_clip_many_movements_charge_work_budget() {
-    let ctrl = K::Obj(vec![(
-        "embedded_animation",
-        K::Obj(vec![
-            ("group_data_block", K::Int(2)),
-            ("anim_data_block", K::Int(3)),
-        ]),
-    )]);
-    let data = K::Obj(vec![("m_modelSkeleton", K::Obj(vec![]))]);
-    let group = K::Obj(vec![("m_decodeKey", K::Obj(vec![]))]);
     // 10_000 frames * 30_000 movements = 3e8 > MAX_WORK (2^28).
     let moves: Vec<K> = (0..30_000)
         .map(|i| {
             K::Obj(vec![
                 ("endframe", K::Int(i)),
                 ("angle", K::Float(0.0)),
-                (
-                    "position",
-                    K::Arr(vec![K::Float(0.0), K::Float(0.0), K::Float(0.0)]),
-                ),
+                ("position", K::Arr(vec![K::Float(0.0); 3])),
             ])
         })
         .collect();
@@ -240,14 +152,8 @@ fn anim_clip_many_movements_charge_work_budget() {
             ),
         ])]),
     )]);
-    let bytes = resource(&[
-        (b"CTRL", kv3_file(&ctrl)),
-        (b"DATA", kv3_file(&data)),
-        (b"AGRP", kv3_file(&group)),
-        (b"ANIM", kv3_file(&anim)),
-    ]);
-    let parsed = Resource::parse(&bytes).expect("valid resource");
-    let err = read_clips(&parsed, &["walk"])
+    let bytes = anim_resource(K::Obj(vec![("m_decodeKey", K::Obj(vec![]))]), anim);
+    let err = read_clips(&Resource::parse(&bytes).expect("valid resource"), &["walk"])
         .err()
         .expect("must exhaust work budget on many movements");
     assert!(err.to_string().contains("movements"), "{err}");
@@ -268,73 +174,55 @@ fn morph_set_atlas_dims_overflow_returns_err() {
     assert!(err.to_string().contains("atlas"), "{err}");
 }
 
+fn morph_rect(x: u64, y: u64, w: f64, h: f64, u: f64, v: f64) -> K {
+    K::Obj(vec![
+        ("m_nXLeftDst", K::UInt(x)),
+        ("m_nYTopDst", K::UInt(y)),
+        ("m_flUWidthSrc", K::Float(w)),
+        ("m_flVHeightSrc", K::Float(h)),
+        (
+            "m_bundleDatas",
+            K::Arr(vec![K::Obj(vec![
+                ("m_flULeftSrc", K::Float(u)),
+                ("m_flVTopSrc", K::Float(v)),
+                ("m_offsets", K::Arr(vec![K::Float(0.0); 4])),
+                ("m_ranges", K::Arr(vec![K::Float(1.0); 4])),
+            ])]),
+        ),
+    ])
+}
+
+fn morph_doc(rects: Vec<K>) -> kv3::Document {
+    kv3::decode(&kv3_file(&K::Obj(vec![
+        ("m_nWidth", K::UInt(4)),
+        ("m_nHeight", K::UInt(4)),
+        (
+            "m_bundleTypes",
+            K::Arr(vec![s("MORPH_BUNDLE_TYPE_POSITION_SPEED")]),
+        ),
+        (
+            "m_morphDatas",
+            K::Arr(vec![K::Obj(vec![("m_morphRectDatas", K::Arr(rects))])]),
+        ),
+    ])))
+    .unwrap()
+}
+
 /// P0 #2b: MorphSet::read rejects rectangles with `rect.x = usize::MAX` directly, and `place()`
 /// rejects rectangles that start inside the grid but extend past it.
 #[test]
 fn morph_set_rect_bounds_and_uv_validation() {
-    let make_rect = |x: u64, y: u64, w: f64, h: f64, u: f64, v: f64| {
-        K::Obj(vec![
-            ("m_nXLeftDst", K::UInt(x)),
-            ("m_nYTopDst", K::UInt(y)),
-            ("m_flUWidthSrc", K::Float(w)),
-            ("m_flVHeightSrc", K::Float(h)),
-            (
-                "m_bundleDatas",
-                K::Arr(vec![K::Obj(vec![
-                    ("m_flULeftSrc", K::Float(u)),
-                    ("m_flVTopSrc", K::Float(v)),
-                    (
-                        "m_offsets",
-                        K::Arr(vec![
-                            K::Float(0.0),
-                            K::Float(0.0),
-                            K::Float(0.0),
-                            K::Float(0.0),
-                        ]),
-                    ),
-                    (
-                        "m_ranges",
-                        K::Arr(vec![
-                            K::Float(1.0),
-                            K::Float(1.0),
-                            K::Float(1.0),
-                            K::Float(1.0),
-                        ]),
-                    ),
-                ])]),
-            ),
-        ])
-    };
-    let make_morph = |rect: K| {
-        kv3::decode(&kv3_file(&K::Obj(vec![
-            ("m_nWidth", K::UInt(4)),
-            ("m_nHeight", K::UInt(4)),
-            (
-                "m_bundleTypes",
-                K::Arr(vec![s("MORPH_BUNDLE_TYPE_POSITION_SPEED")]),
-            ),
-            (
-                "m_morphDatas",
-                K::Arr(vec![K::Obj(vec![("m_morphRectDatas", K::Arr(vec![rect]))])]),
-            ),
-        ])))
-        .unwrap()
-    };
-
-    // rect.x = usize::MAX rejected directly in MorphSet::read.
-    let kv = make_morph(make_rect(usize::MAX as u64, 0, 0.25, 0.25, 0.0, 0.0));
+    let kv = morph_doc(vec![morph_rect(usize::MAX as u64, 0, 0.25, 0.25, 0.0, 0.0)]);
     let err = MorphSet::read(&kv.root, "atlas.vtex").unwrap_err();
     assert!(err.to_string().contains("past the grid"), "{err}");
 
-    // Out-of-range UVs rejected in MorphSet::read.
     for (u, v) in [(-0.1, 0.0), (0.0, -0.1), (1.1, 0.0), (0.0, 1.1)] {
-        let kv = make_morph(make_rect(0, 0, 0.25, 0.25, u, v));
+        let kv = morph_doc(vec![morph_rect(0, 0, 0.25, 0.25, u, v)]);
         let err = MorphSet::read(&kv.root, "atlas.vtex").unwrap_err();
         assert!(err.to_string().contains("outside the atlas"), "{err}");
     }
 
-    // Starts inside grid (x = 3 <= 4) but width = 0.5 on 4x4 atlas -> rw = 2, 3 + 2 > 4 in place().
-    let kv = make_morph(make_rect(3, 0, 0.5, 0.5, 0.0, 0.0));
+    let kv = morph_doc(vec![morph_rect(3, 0, 0.5, 0.5, 0.0, 0.0)]);
     let set = MorphSet::read(&kv.root, "atlas.vtex").unwrap();
     let err = set.targets(&[0u8; 4 * 4 * 4], (4, 4), 16).unwrap_err();
     assert!(err.to_string().contains("past the grid"), "{err}");
@@ -357,121 +245,16 @@ fn morph_set_oversized_flex_vertex_count_and_overlapping_rects_respect_budget() 
     let err = set.targets(&[0u8; 4], (1, 1), 1 << 22).unwrap_err();
     assert!(err.to_string().contains("morph set"), "{err}");
 
-    // Overlapping rectangles on a small 4x4 grid must charge `Budget` per placed rectangle.
     let rects: Vec<K> = (0..100)
-        .map(|_| {
-            K::Obj(vec![
-                ("m_nXLeftDst", K::UInt(0)),
-                ("m_nYTopDst", K::UInt(0)),
-                ("m_flUWidthSrc", K::Float(1.0)),
-                ("m_flVHeightSrc", K::Float(1.0)),
-                (
-                    "m_bundleDatas",
-                    K::Arr(vec![K::Obj(vec![
-                        ("m_flULeftSrc", K::Float(0.0)),
-                        ("m_flVTopSrc", K::Float(0.0)),
-                        (
-                            "m_offsets",
-                            K::Arr(vec![
-                                K::Float(0.0),
-                                K::Float(0.0),
-                                K::Float(0.0),
-                                K::Float(0.0),
-                            ]),
-                        ),
-                        (
-                            "m_ranges",
-                            K::Arr(vec![
-                                K::Float(1.0),
-                                K::Float(1.0),
-                                K::Float(1.0),
-                                K::Float(1.0),
-                            ]),
-                        ),
-                    ])]),
-                ),
-            ])
-        })
+        .map(|_| morph_rect(0, 0, 1.0, 1.0, 0.0, 0.0))
         .collect();
-    let kv = kv3::decode(&kv3_file(&K::Obj(vec![
-        ("m_nWidth", K::UInt(4)),
-        ("m_nHeight", K::UInt(4)),
-        (
-            "m_bundleTypes",
-            K::Arr(vec![s("MORPH_BUNDLE_TYPE_POSITION_SPEED")]),
-        ),
-        (
-            "m_morphDatas",
-            K::Arr(vec![K::Obj(vec![("m_morphRectDatas", K::Arr(rects))])]),
-        ),
-    ])))
-    .unwrap();
+    let kv = morph_doc(rects);
     let set = MorphSet::read(&kv.root, "atlas.vtex").unwrap();
-    // 1 target of 16 vertices = ~440 B, but 100 overlapping 4x4 rects = 100 * 16 * 12 = 19,200 B.
     let mut budget = Budget::new(2048);
     let err = set
         .targets_in(&[0u8; 4 * 4 * 4], (4, 4), 16, &mut budget)
         .unwrap_err();
     assert!(err.to_string().contains("more than it may"), "{err}");
-}
-
-/// Builds a minimal valid PNG chunk (`len || kind || data || crc32`).
-fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
-    let mut out = (data.len() as u32).to_be_bytes().to_vec();
-    out.extend_from_slice(kind);
-    out.extend_from_slice(data);
-    let mut h = crc32fast::Hasher::new();
-    h.update(kind);
-    h.update(data);
-    out.extend_from_slice(&h.finalize().to_be_bytes());
-    out
-}
-
-/// Wraps raw uncompressed bytes in a valid zlib stream using stored deflate blocks.
-fn zlib_stored(raw: &[u8]) -> Vec<u8> {
-    let mut out = vec![0x78, 0x01];
-    let chunks: Vec<&[u8]> = if raw.is_empty() {
-        vec![&[]]
-    } else {
-        raw.chunks(65535).collect()
-    };
-    for (idx, chunk) in chunks.iter().enumerate() {
-        let last = u8::from(idx + 1 == chunks.len());
-        out.push(last);
-        let len = chunk.len() as u16;
-        out.extend_from_slice(&len.to_le_bytes());
-        out.extend_from_slice(&(!len).to_le_bytes());
-        out.extend_from_slice(chunk);
-    }
-    let (mut s1, mut s2) = (1u32, 0u32);
-    for &b in raw {
-        s1 = (s1 + u32::from(b)) % 65521;
-        s2 = (s2 + s1) % 65521;
-    }
-    out.extend_from_slice(&((s2 << 16) | s1).to_be_bytes());
-    out
-}
-
-/// Builds a minimal PNG of `w x h` with `color_type` (0=Gray, 2=RGB, 4=GrayAlpha, 6=RGBA) and
-/// optional extra chunks before `IDAT`.
-fn minimal_png(w: u32, h: u32, color_type: u8, rows: &[&[u8]], extra: &[Vec<u8>]) -> Vec<u8> {
-    let mut out = vec![137, 80, 78, 71, 13, 10, 26, 10];
-    let mut ihdr = Vec::new();
-    ihdr.extend_from_slice(&w.to_be_bytes());
-    ihdr.extend_from_slice(&h.to_be_bytes());
-    ihdr.extend_from_slice(&[8, color_type, 0, 0, 0]);
-    out.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
-    for chunk in extra {
-        out.extend_from_slice(chunk);
-    }
-    let mut raw = Vec::new();
-    for row in rows {
-        raw.push(0); // filter: None
-        raw.extend_from_slice(row);
-    }
-    out.extend_from_slice(&png_chunk(b"IDAT", &zlib_stored(&raw)));
-    out.extend_from_slice(&png_chunk(b"IEND", &[]));
-    out
 }
 
 /// P0 #3a: `Texture::parse_in` enforces `Budget` on PNG decode, `zTXt` metadata chunks, in-place
@@ -610,11 +393,7 @@ fn vpk_read_caps_untrusted_archive_len() {
     tree.extend_from_slice(&0xFFFFu16.to_le_bytes()); // terminator
     tree.extend_from_slice(&[0, 0, 0]);
 
-    let mut dir = Vec::new();
-    for w in [0x55AA_1234u32, 2, tree.len() as u32, 0, 0, 0, 0] {
-        dir.extend_from_slice(&w.to_le_bytes());
-    }
-    dir.extend_from_slice(&tree);
+    let dir = vpk_v2(&tree, &[]);
 
     let src = HugeMockSource {
         dir_header: dir,
@@ -918,4 +697,127 @@ fn sound_lipsync_nan_ease_is_guarded() {
     );
     assert_eq!(morph.ease_in, 0.0);
     assert_eq!(morph.ease_out, 0.0);
+}
+
+/// End-to-end `Budget` threading: `Vpk::open_in`/`read_file_in`, `Texture::from_resource_in`,
+/// `Resource::data_in`, `Model::read_in`, transient `zstd` peak headroom, `export_model_in_group`,
+/// and `world::export_world`.
+#[test]
+fn end_to_end_budget_is_shared_across_readers_and_exporters() {
+    use heatel::export::{ModelOptions, export_model_in_group};
+    use heatel::world::{WorldOptions, export_world};
+    use heatel::{Model, SliceSource};
+
+    // 1) Vpk::open_in and Vpk::read_file_in enforce caller budget.
+    let payload = vec![0x42u8; 2048];
+    let (pkg, _) = vpk_v1(&[("dir/data.bin", payload.clone())]);
+    let mut src = SliceSource::default();
+    src.insert("pak01_dir.vpk", pkg);
+    assert!(Vpk::open_in(&src, "pak01_dir.vpk", &mut Budget::new(8)).is_err());
+    let vpk = Vpk::open_in(&src, "pak01_dir.vpk", &mut Budget::new(4096)).unwrap();
+    assert!(
+        vpk.read_file_in(&src, "dir/data.bin", &mut Budget::new(512))
+            .is_err()
+    );
+    let mut enough = Budget::new(4096);
+    assert_eq!(
+        vpk.read_file_in(&src, "dir/data.bin", &mut enough).unwrap(),
+        payload
+    );
+    assert_eq!(enough.spent(), payload.len());
+
+    // 2) Texture::from_resource_in and Resource::data_in enforce caller budget.
+    let vtex = vtex_bytes(8, 8, 4, &[], &vec![0u8; 8 * 8 * 4]);
+    let res = Resource::parse(&vtex).unwrap();
+    assert!(Texture::from_resource_in(&res, &mut Budget::new(64)).is_err());
+    let mut tex_budget = Budget::new(1024);
+    assert!(Texture::from_resource_in(&res, &mut tex_budget).is_ok());
+    assert!(tex_budget.spent() >= 8 * 8 * 4);
+
+    let big_data = resource(&[(
+        b"DATA",
+        kv3_file(&K::Obj(vec![("s", s(&"a".repeat(4096)))])),
+    )]);
+    let res = Resource::parse(&big_data).unwrap();
+    assert!(res.data_in(&mut Budget::new(512)).unwrap().is_err());
+    assert!(res.data_in(&mut Budget::new(32 * 1024)).unwrap().is_ok());
+
+    // 3) Model::read_in charges MDAT KV3 decoding and checks zstd window as transient peak
+    //    (two consecutive zstd vertex buffers fit in 8 MiB even though zstd_worst is ~6 MiB each).
+    let zstd_frame = |raw: &[u8]| {
+        let mut f = 0xFD2F_B528u32.to_le_bytes().to_vec();
+        f.extend([0x20, raw.len() as u8]); // single-segment, 1-byte content size
+        let hdr = ((raw.len() as u32) << 3) | 1; // raw last block
+        f.extend(&hdr.to_le_bytes()[..3]);
+        f.extend_from_slice(raw);
+        f
+    };
+    let pos_raw = [0.0f32; 3]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect::<Vec<_>>();
+    let buf_desc = |blk: i64| {
+        K::Obj(vec![
+            ("m_nElementCount", K::UInt(1)),
+            ("m_nElementSizeInBytes", K::UInt(12)),
+            ("m_nBlockIndex", K::Int(blk)),
+            ("m_bCompressedZSTD", K::Bool(true)),
+            (
+                "m_inputLayoutFields",
+                K::Arr(vec![K::Obj(vec![
+                    ("m_pSemanticName", s("POSITION")),
+                    ("m_Format", K::UInt(6)),
+                    ("m_nOffset", K::UInt(0)),
+                ])]),
+            ),
+        ])
+    };
+    let ctrl = K::Obj(vec![(
+        "embedded_meshes",
+        K::Arr(vec![K::Obj(vec![
+            ("name", s("m")),
+            ("mesh_index", K::Int(0)),
+            ("data_block", K::Int(2)),
+            ("m_vertexBuffers", K::Arr(vec![buf_desc(3), buf_desc(4)])),
+            ("m_indexBuffers", K::Arr(vec![])),
+        ])]),
+    )]);
+    let mdat = K::Obj(vec![("pad", s(&"m".repeat(4096)))]);
+    let mdl = resource(&[
+        (b"DATA", kv3_file(&K::Obj(vec![]))),
+        (b"CTRL", kv3_file(&ctrl)),
+        (b"MDAT", kv3_file(&mdat)),
+        (b"MVTX", zstd_frame(&pos_raw)),
+        (b"MVTX", zstd_frame(&pos_raw)),
+    ]);
+    let res = Resource::parse(&mdl).unwrap();
+    assert!(Model::read_in(&res, &mut Budget::new(1024)).is_err());
+    let mut zstd_budget = Budget::new(8 << 20);
+    assert!(Model::read_in(&res, &mut zstd_budget).is_ok());
+    assert!(
+        zstd_budget.spent() < 1 << 20,
+        "zstd scratch must not be permanently charged"
+    );
+
+    // 4) export_model_in_group and world::export_world share budgets cleanly end-to-end.
+    let world_data = resource(&[(b"DATA", kv3_file(&K::Obj(vec![])))]);
+    let (pkg, _) = vpk_v1(&[
+        ("models/m.vmdl_c", mdl),
+        ("maps/w/world.vwrld_c", world_data),
+    ]);
+    let mut src = SliceSource::default();
+    src.insert("pak01_dir.vpk", pkg);
+    let vpk = Vpk::open(&src, "pak01_dir.vpk").unwrap();
+    let uri = |p: &str| p.to_owned();
+    let opts = ModelOptions::new(&uri);
+    assert!(export_model_in_group(&src, &[&vpk], "models/m.vmdl_c", &opts, None).is_ok());
+    let wopts = WorldOptions {
+        band: None,
+        exclude: &[],
+        scene: "w",
+        bin_uri: "w.bin",
+        texture_uri: &uri,
+        generator: "test",
+    };
+    assert!(export_world(&src, &[&vpk], "maps/w/world.vwrld_c", &wopts).is_ok());
 }

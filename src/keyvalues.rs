@@ -15,6 +15,8 @@ use std::collections::HashMap;
 
 use crate::budget::Budget;
 use crate::error::{Result, malformed};
+use crate::kv1::quoted_end;
+pub use crate::kv1::{Token, Tokens};
 
 /// Deepest nesting of a script's blocks.
 const MAX_DEPTH: usize = 64;
@@ -89,90 +91,9 @@ impl Kv {
     }
 }
 
-/// A token of KeyValues text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Token<'a> {
-    /// A quoted string's text, escapes left as they are.
-    Text(&'a str),
-    /// `{`
-    Open,
-    /// `}`
-    Close,
-}
-
-/// The quoted strings and braces of KeyValues text, one at a time; comments and anything else
-/// are skipped.
-#[derive(Clone, Debug)]
-pub struct Tokens<'a> {
-    text: &'a str,
-    at: usize,
-    /// Where a `*/` was last searched for and none found: none follows any later `/*` either.
-    no_comment_end: Option<usize>,
-    /// Where the last quoted string that never closed stopped being read: every quote before it
-    /// was escaped in that string, so it ends there unclosed as well.
-    no_quote_end: usize,
-}
-
-impl<'a> Iterator for Tokens<'a> {
-    type Item = Token<'a>;
-
-    fn next(&mut self) -> Option<Token<'a>> {
-        let bytes = self.text.as_bytes();
-        while self.at < bytes.len() {
-            let i = self.at;
-            self.at += 1;
-            match bytes[i] {
-                b'"' if i >= self.no_quote_end => match quoted_end(bytes, i + 1) {
-                    Ok(end) => {
-                        self.at = end + 1;
-                        return Some(Token::Text(&self.text[i + 1..end]));
-                    }
-                    Err(stop) => self.no_quote_end = stop,
-                },
-                b'{' => return Some(Token::Open),
-                b'}' => return Some(Token::Close),
-                b'/' if bytes.get(i + 1) == Some(&b'/') => {
-                    self.at = bytes[i..]
-                        .iter()
-                        .position(|&b| b == b'\n')
-                        .map_or(bytes.len(), |n| i + n);
-                }
-                b'/' if bytes.get(i + 1) == Some(&b'*') && self.no_comment_end.is_none() => {
-                    match self.text[i + 2..].find("*/") {
-                        Some(n) => self.at = i + n + 4,
-                        None => self.no_comment_end = Some(i),
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-}
-
 /// The tokens of `text`, read as they are asked for.
 pub fn tokens(text: &str) -> Tokens<'_> {
-    Tokens {
-        text,
-        at: 0,
-        no_comment_end: None,
-        no_quote_end: 0,
-    }
-}
-
-/// Where the quoted string whose text starts at `from` closes (a backslash escapes the next
-/// byte, a newline excepted), or where it was found never to close.
-fn quoted_end(bytes: &[u8], from: usize) -> std::result::Result<usize, usize> {
-    let mut i = from;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => return Ok(i),
-            b'\\' if bytes.get(i + 1).is_some_and(|&b| b != b'\n') => i += 2,
-            b'\\' => return Err(i),
-            _ => i += 1,
-        }
-    }
-    Err(bytes.len())
+    Tokens::new(text)
 }
 
 /// KeyValues text as a tree (a [`Kv::Block`] at the root). Keys and values are quoted strings;
@@ -318,11 +239,13 @@ pub fn localization_table(text: &str) -> HashMap<String, String> {
 /// raw value and where the match ends.
 fn localization_pair(text: &str, at: usize) -> Option<(&str, &str, usize)> {
     let bytes = text.as_bytes();
-    let space = |i: usize| bytes.get(i).is_some_and(|b| b.is_ascii_whitespace());
-    let mut i = at;
-    while space(i) {
-        i += 1;
-    }
+    let skip_ws = |mut i: usize| {
+        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        i
+    };
+    let i = skip_ws(at);
     if bytes.get(i) != Some(&b'"') {
         return None;
     }
@@ -331,14 +254,8 @@ fn localization_pair(text: &str, at: usize) -> Option<(&str, &str, usize)> {
     if key_end == key_start {
         return None;
     }
-    i = key_end + 1;
-    if !space(i) {
-        return None;
-    }
-    while space(i) {
-        i += 1;
-    }
-    if bytes.get(i) != Some(&b'"') {
+    let i = skip_ws(key_end + 1);
+    if i == key_end + 1 || bytes.get(i) != Some(&b'"') {
         return None;
     }
     let end = quoted_end(bytes, i + 1).ok()?;

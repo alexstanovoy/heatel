@@ -2,9 +2,9 @@
 //! control points the effect expects and how an editor attaches them to preview it. They say
 //! which points a system reads (Shadowraze: 0, 3, 60, 61), not what the game feeds them.
 
+use crate::coords::finite;
 use crate::error::{Result, malformed};
 use crate::kv3::Value;
-use crate::model::finite;
 use crate::resource::Resource;
 
 use super::read::{MAX_CONTROL_POINT, WHAT};
@@ -50,13 +50,7 @@ pub fn control_point_configurations(resource: &Resource<'_>) -> Result<Vec<Contr
     let data = resource
         .kv3(b"DATA")
         .ok_or_else(|| malformed(WHAT, "no KV3 DATA block"))??;
-    let Some(configs) = data
-        .root
-        .get("m_controlPointConfigurations")
-        .and_then(Value::as_array)
-    else {
-        return Ok(Vec::new());
-    };
+    let configs = data.root.array("m_controlPointConfigurations");
     if configs.len() > MAX_CONFIGS {
         return Err(malformed(
             WHAT,
@@ -66,24 +60,22 @@ pub fn control_point_configurations(resource: &Resource<'_>) -> Result<Vec<Contr
     configs.iter().map(config).collect()
 }
 
-fn text(v: &Value, key: &str) -> Option<String> {
-    v.get(key).and_then(Value::as_str).map(str::to_owned)
-}
-
 fn config(v: &Value) -> Result<ControlPointConfig> {
-    let drivers = v.get("m_drivers").and_then(Value::as_array);
-    let drivers = drivers.unwrap_or_default();
+    let drivers = v.array("m_drivers");
     if drivers.len() > MAX_DRIVERS {
         return Err(malformed(WHAT, "more control point drivers than any has"));
     }
     let state = v.get("m_previewState");
     Ok(ControlPointConfig {
-        name: text(v, "m_name").unwrap_or_default(),
+        name: v.str_field("m_name").unwrap_or_default().to_owned(),
         drivers: drivers.iter().map(driver).collect::<Result<_>>()?,
         preview_model: state
-            .and_then(|s| text(s, "m_previewModel"))
-            .or_else(|| text(v, "m_previewModel")),
-        preview_sequence: state.and_then(|s| text(s, "m_sequenceName")),
+            .and_then(|s| s.str_field("m_previewModel"))
+            .or_else(|| v.str_field("m_previewModel"))
+            .map(str::to_owned),
+        preview_sequence: state
+            .and_then(|s| s.str_field("m_sequenceName"))
+            .map(str::to_owned),
     })
 }
 
@@ -98,9 +90,12 @@ fn driver(v: &Value) -> Result<ControlPointDriver> {
         .ok_or_else(|| malformed(WHAT, format!("control point {point}")))?;
     Ok(ControlPointDriver {
         control_point,
-        attach_type: text(v, "m_iAttachType"),
-        entity: text(v, "m_entityName"),
-        attachment: text(v, "m_attachmentName").filter(|a| !a.is_empty()),
+        attach_type: v.str_field("m_iAttachType").map(str::to_owned),
+        entity: v.str_field("m_entityName").map(str::to_owned),
+        attachment: v
+            .str_field("m_attachmentName")
+            .filter(|a| !a.is_empty())
+            .map(str::to_owned),
         offset: vector(v.get("m_vecOffset")),
         angles: vector(v.get("m_angOffset")),
     })
@@ -108,12 +103,10 @@ fn driver(v: &Value) -> Result<ControlPointDriver> {
 
 /// Three numbers; zeros for anything else.
 fn vector(v: Option<&Value>) -> [f32; 3] {
-    let mut out = [0.0; 3];
-    let items = v.and_then(Value::as_array).unwrap_or_default();
+    let items = v.map_or(&[][..], Value::slice);
     if items.len() == 3 {
-        for (o, i) in out.iter_mut().zip(items) {
-            *o = finite(i.as_f64().unwrap_or(0.0) as f32);
-        }
+        std::array::from_fn(|i| finite(items[i].as_f64().unwrap_or(0.0) as f32))
+    } else {
+        [0.0; 3]
     }
-    out
 }

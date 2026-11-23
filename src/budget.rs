@@ -94,6 +94,15 @@ impl Budget {
         Ok(())
     }
 
+    /// Checks that `len` bytes of transient scratch fit within the remaining budget without
+    /// permanently deducting them.
+    pub(crate) fn check_peak(&self, len: usize) -> Result<()> {
+        self.left
+            .checked_sub(len)
+            .ok_or_else(|| malformed(self.what, format!("takes {len} bytes more than it may")))?;
+        Ok(())
+    }
+
     /// Charges a string of `len` bytes about to be made, with what its allocation takes besides.
     pub(crate) fn string_of(&mut self, len: usize) -> Result<()> {
         self.bytes(len.saturating_add(STRING_OVERHEAD))

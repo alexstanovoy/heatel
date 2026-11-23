@@ -1,184 +1,14 @@
 //! Synthetic snapshot resources: no installed-file bytes.
 #[path = "common/kv3.rs"]
 mod fixture;
+#[path = "support/wire_builders.rs"]
+mod wire;
 use fixture::{K, kv3_file, s};
 use heatel::{Resource, particle::Snapshot};
-fn resource(data: Vec<u8>, snap: Vec<u8>) -> Vec<u8> {
-    let blocks = [(b"DATA", data), (b"SNAP", snap)];
-    let end = 40;
-    let mut out = Vec::new();
-    out.extend((end + blocks.iter().map(|(_, b)| b.len()).sum::<usize>() as u32).to_le_bytes());
-    out.extend(12u16.to_le_bytes());
-    out.extend(0u16.to_le_bytes());
-    out.extend(8u32.to_le_bytes());
-    out.extend(2u32.to_le_bytes());
-    let mut offset = end as usize;
-    for (kind, bytes) in &blocks {
-        out.extend(*kind);
-        out.extend(((offset - out.len()) as u32).to_le_bytes());
-        out.extend((bytes.len() as u32).to_le_bytes());
-        offset += bytes.len();
-    }
-    for (_, bytes) in blocks {
-        out.extend(bytes);
-    }
-    out
-}
-fn file(count: i64, offset: i64, values: &[f32], raw: bool) -> Vec<u8> {
-    let root = K::Obj(vec![
-        ("num_particles", K::Int(count)),
-        (
-            "attributes",
-            K::Arr(vec![K::Obj(vec![
-                ("name", s("position")),
-                ("type", s("float3")),
-                ("data_offset", K::Int(offset)),
-                ("data_size", K::Int(values.len() as i64 * 4)),
-            ])]),
-        ),
-        ("string_list", K::Arr(vec![])),
-    ]);
-    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-    let mut packed = Vec::new();
-    packed.extend((bytes.len() as u32 | if raw { 0x8000_0000 } else { 0 }).to_le_bytes());
-    if raw {
-        packed.extend(bytes);
-    } else {
-        for chunk in bytes.chunks(16) {
-            packed.extend(0u16.to_le_bytes());
-            packed.extend(chunk);
-        }
-    }
-    resource(kv3_file(&root), packed)
-}
-#[test]
-fn raw_and_compressed_snapshot_positions_match() {
-    for raw in [false, true] {
-        let bytes = file(2, 0, &[1.0, 2.0, 3.0, -4.0, 5.0, 6.0], raw);
-        assert_eq!(
-            Snapshot::read(&Resource::parse(&bytes).expect("resource")).expect("snapshot"),
-            Snapshot::Points {
-                positions: vec![[1.0, 2.0, 3.0], [-4.0, 5.0, 6.0]],
-                normals: None
-            }
-        );
-    }
-}
-#[test]
-fn hostile_snapshot_counts_offsets_numbers_and_backreferences_are_errors() {
-    for (bytes, expected) in [
-        (file(5001, 0, &[], true), "invalid particle count"),
-        (
-            file(1, i64::MAX, &[0.0; 3], true),
-            "invalid attribute offset",
-        ),
-        (file(1, 0, &[f32::NAN, 0.0, 0.0], true), "non-finite number"),
-    ] {
-        let error = Snapshot::read(&Resource::parse(&bytes).expect("resource"))
-            .expect_err("hostile snapshot");
-        assert!(error.to_string().contains(expected), "{error}");
-    }
-    let mut bytes = file(1, 0, &[0.0; 3], false);
-    bytes.truncate(bytes.len() - 1);
-    assert!(Resource::parse(&bytes).is_err());
-}
+use wire::{floats, resource};
 
-#[test]
-fn snapshot_backreferences_and_declared_output_are_bounded_before_allocation() {
-    let base = file(1, 0, &[0.0; 3], true);
-    let metadata = Resource::parse(&base)
-        .expect("resource")
-        .block(b"DATA")
-        .expect("DATA")
-        .to_vec();
-    for (packed, expected) in [
-        (vec![3, 0, 0, 0, 1, 0, 0, 0], "invalid SNAP back-reference"),
-        (u32::MAX.to_le_bytes().to_vec(), "SNAP exceeds 1 MiB"),
-    ] {
-        let bytes = resource(metadata.clone(), packed);
-        let error =
-            Snapshot::read(&Resource::parse(&bytes).expect("resource")).expect_err("hostile SNAP");
-        assert!(error.to_string().contains(expected), "{error}");
-    }
-}
-
-#[test]
-fn overlapping_backreferences_decode_without_reading_unwritten_data() {
-    let base = file(1, 0, &[0.0; 3], true);
-    let metadata = Resource::parse(&base)
-        .expect("resource")
-        .block(b"DATA")
-        .expect("DATA")
-        .to_vec();
-    let bytes = resource(metadata, vec![12, 0, 0, 0, 2, 0, 0, 8, 0]);
-    assert_eq!(
-        Snapshot::read(&Resource::parse(&bytes).expect("resource")).expect("snapshot"),
-        Snapshot::Points {
-            positions: vec![[0.0; 3]],
-            normals: None
-        }
-    );
-    for end in 0..bytes.len() {
-        assert!(
-            Resource::parse(&bytes[..end])
-                .and_then(|r| Snapshot::read(&r))
-                .is_err(),
-            "truncated at {end}"
-        );
-    }
-}
-
-#[test]
-fn root_skinning_and_normals_are_retained_and_other_bones_are_named() {
-    for name in ["root", "spine"] {
-        let mut stream = Vec::new();
-        for value in [10.0f32, 20.0, 30.0, 0.0, 0.0, 1.0] {
-            stream.extend(value.to_le_bytes());
-        }
-        stream.extend([0u8; 8]);
-        for value in [1.0f32, 0.0, 0.0, 0.0] {
-            stream.extend(value.to_le_bytes());
-        }
-        let attributes = [
-            ("position", "float3", 0, 12),
-            ("normal", "float3", 12, 12),
-            ("skinning", "skinning", 24, 24),
-        ]
-        .into_iter()
-        .map(|(name, kind, offset, size)| {
-            K::Obj(vec![
-                ("name", s(name)),
-                ("type", s(kind)),
-                ("data_offset", K::Int(offset)),
-                ("data_size", K::Int(size)),
-            ])
-        })
-        .collect();
-        let metadata = kv3_file(&K::Obj(vec![
-            ("num_particles", K::Int(1)),
-            ("attributes", K::Arr(attributes)),
-            ("string_list", K::Arr(vec![s(name)])),
-        ]));
-        let packed = (0x8000_0000 | stream.len() as u32)
-            .to_le_bytes()
-            .into_iter()
-            .chain(stream)
-            .collect();
-        let bytes = resource(metadata, packed);
-        let decoded =
-            Snapshot::read(&Resource::parse(&bytes).expect("resource")).expect("snapshot");
-        if name == "root" {
-            assert_eq!(
-                decoded,
-                Snapshot::Points {
-                    positions: vec![[10.0, 20.0, 30.0]],
-                    normals: Some(vec![[0.0, 0.0, 1.0]])
-                }
-            );
-        } else {
-            assert_eq!(decoded, Snapshot::Unsupported("skinning bone spine".into()));
-        }
-    }
+fn snap_resource(data: Vec<u8>, snap: Vec<u8>) -> Vec<u8> {
+    resource(&[(b"DATA", data), (b"SNAP", snap)])
 }
 
 fn attribute(name: &str, kind: &str, offset: i64, size: i64) -> K {
@@ -189,29 +19,164 @@ fn attribute(name: &str, kind: &str, offset: i64, size: i64) -> K {
         ("data_size", K::Int(size)),
     ])
 }
-fn raw_snapshot(count: i64, attributes: Vec<K>, strings: Vec<K>, stream: &[u8]) -> Vec<u8> {
+
+fn position() -> K {
+    attribute("position", "float3", 0, 12)
+}
+
+fn pack_stream(bytes: &[u8], raw: bool) -> Vec<u8> {
+    let mut packed = (bytes.len() as u32 | if raw { 0x8000_0000 } else { 0 })
+        .to_le_bytes()
+        .to_vec();
+    if raw {
+        packed.extend_from_slice(bytes);
+    } else {
+        for chunk in bytes.chunks(16) {
+            packed.extend(0u16.to_le_bytes());
+            packed.extend(chunk);
+        }
+    }
+    packed
+}
+
+fn snapshot_file(
+    count: i64,
+    attributes: Vec<K>,
+    strings: Vec<K>,
+    stream: &[u8],
+    raw: bool,
+) -> Vec<u8> {
     let root = K::Obj(vec![
         ("num_particles", K::Int(count)),
         ("attributes", K::Arr(attributes)),
         ("string_list", K::Arr(strings)),
     ]);
-    let mut packed = (stream.len() as u32 | 0x8000_0000).to_le_bytes().to_vec();
-    packed.extend(stream);
-    resource(kv3_file(&root), packed)
+    snap_resource(kv3_file(&root), pack_stream(stream, raw))
 }
-fn floats(values: &[f32]) -> Vec<u8> {
-    values.iter().flat_map(|v| v.to_le_bytes()).collect()
+
+fn raw_snapshot(count: i64, attributes: Vec<K>, strings: Vec<K>, stream: &[u8]) -> Vec<u8> {
+    snapshot_file(count, attributes, strings, stream, true)
 }
+
+fn file(count: i64, offset: i64, values: &[f32], raw: bool) -> Vec<u8> {
+    snapshot_file(
+        count,
+        vec![attribute(
+            "position",
+            "float3",
+            offset,
+            values.len() as i64 * 4,
+        )],
+        vec![],
+        &floats(values),
+        raw,
+    )
+}
+
 fn read(bytes: &[u8]) -> Result<Snapshot, String> {
     Resource::parse(bytes)
         .and_then(|r| Snapshot::read(&r))
         .map_err(|e| e.to_string())
 }
+
 fn read_error(bytes: &[u8]) -> String {
     read(bytes).expect_err("hostile snapshot")
 }
-fn position() -> K {
-    attribute("position", "float3", 0, 12)
+
+fn metadata_of(bytes: &[u8]) -> Vec<u8> {
+    Resource::parse(bytes)
+        .expect("resource")
+        .block(b"DATA")
+        .expect("DATA")
+        .to_vec()
+}
+
+#[test]
+fn raw_and_compressed_snapshot_positions_match() {
+    for raw in [false, true] {
+        assert_eq!(
+            read(&file(2, 0, &[1.0, 2.0, 3.0, -4.0, 5.0, 6.0], raw)).expect("snapshot"),
+            Snapshot::Points {
+                positions: vec![[1.0, 2.0, 3.0], [-4.0, 5.0, 6.0]],
+                normals: None
+            }
+        );
+    }
+}
+
+#[test]
+fn hostile_snapshot_counts_offsets_numbers_and_backreferences_are_errors() {
+    for (bytes, expected) in [
+        (file(5001, 0, &[], true), "invalid particle count"),
+        (
+            file(1, i64::MAX, &[0.0; 3], true),
+            "invalid attribute offset",
+        ),
+        (file(1, 0, &[f32::NAN, 0.0, 0.0], true), "non-finite number"),
+    ] {
+        let error = read_error(&bytes);
+        assert!(error.contains(expected), "{error}");
+    }
+    let mut bytes = file(1, 0, &[0.0; 3], false);
+    bytes.truncate(bytes.len() - 1);
+    assert!(Resource::parse(&bytes).is_err());
+}
+
+#[test]
+fn snapshot_backreferences_and_declared_output_are_bounded_before_allocation() {
+    let metadata = metadata_of(&file(1, 0, &[0.0; 3], true));
+    for (packed, expected) in [
+        (vec![3, 0, 0, 0, 1, 0, 0, 0], "invalid SNAP back-reference"),
+        (u32::MAX.to_le_bytes().to_vec(), "SNAP exceeds 1 MiB"),
+    ] {
+        let error = read_error(&snap_resource(metadata.clone(), packed));
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn overlapping_backreferences_decode_without_reading_unwritten_data() {
+    let metadata = metadata_of(&file(1, 0, &[0.0; 3], true));
+    let bytes = snap_resource(metadata, vec![12, 0, 0, 0, 2, 0, 0, 8, 0]);
+    assert_eq!(
+        read(&bytes).expect("snapshot"),
+        Snapshot::Points {
+            positions: vec![[0.0; 3]],
+            normals: None
+        }
+    );
+    for end in 0..bytes.len() {
+        assert!(read(&bytes[..end]).is_err(), "truncated at {end}");
+    }
+}
+
+#[test]
+fn root_skinning_and_normals_are_retained_and_other_bones_are_named() {
+    let mut stream = floats(&[10.0, 20.0, 30.0, 0.0, 0.0, 1.0]);
+    stream.extend([0u8; 8]);
+    stream.extend(floats(&[1.0, 0.0, 0.0, 0.0]));
+    for (name, expected) in [
+        (
+            "root",
+            Snapshot::Points {
+                positions: vec![[10.0, 20.0, 30.0]],
+                normals: Some(vec![[0.0, 0.0, 1.0]]),
+            },
+        ),
+        ("spine", Snapshot::Unsupported("skinning bone spine".into())),
+    ] {
+        let bytes = raw_snapshot(
+            1,
+            vec![
+                position(),
+                attribute("normal", "float3", 12, 12),
+                attribute("skinning", "skinning", 24, 24),
+            ],
+            vec![s(name)],
+            &stream,
+        );
+        assert_eq!(read(&bytes).expect("snapshot"), expected);
+    }
 }
 
 #[test]
@@ -393,11 +358,7 @@ fn overlapping_streams_and_empty_snapshots_are_accepted_as_authored() {
 #[test]
 fn packed_garbage_and_every_truncation_are_errors_not_panics() {
     let base = raw_snapshot(1, vec![position()], vec![], &floats(&[0.0; 3]));
-    let metadata = Resource::parse(&base)
-        .expect("resource")
-        .block(b"DATA")
-        .expect("DATA")
-        .to_vec();
+    let metadata = metadata_of(&base);
     let mut state = 0x1234_5678_u64;
     let mut next = || {
         state ^= state << 13;
@@ -407,11 +368,14 @@ fn packed_garbage_and_every_truncation_are_errors_not_panics() {
     };
     for round in 0..4000_usize {
         let packed: Vec<u8> = (0..round % 300).map(|_| next()).collect();
-        let _ = read(&resource(metadata.clone(), packed));
+        let _ = read(&snap_resource(metadata.clone(), packed));
     }
-    let declared = read_error(&resource(metadata.clone(), vec![0xff, 0xff, 0xff, 0x7f]));
+    let declared = read_error(&snap_resource(
+        metadata.clone(),
+        vec![0xff, 0xff, 0xff, 0x7f],
+    ));
     assert!(declared.contains("exceeds 1 MiB"), "{declared}");
-    let big = read_error(&resource(metadata, vec![0; 3 * 1024 * 1024]));
+    let big = read_error(&snap_resource(metadata, vec![0; 3 * 1024 * 1024]));
     assert!(big.contains("packed SNAP too large"), "{big}");
     for end in 0..base.len() {
         assert!(read(&base[..end]).is_err(), "truncated at {end}");

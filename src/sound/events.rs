@@ -4,9 +4,9 @@
 use std::sync::Arc;
 
 use crate::budget::Budget;
+use crate::coords::finite;
 use crate::error::{Result, malformed};
 use crate::kv3::Value;
-use crate::model::finite;
 use crate::resource::Resource;
 
 /// Most events one file holds (the largest of the install has a few thousand).
@@ -157,12 +157,7 @@ fn events_of(data: &Value, budget: &mut Budget) -> Result<Vec<SoundEvent>> {
 
 /// The texts an event keeps, each charged before it is copied.
 fn texts(v: &Value, budget: &mut Budget) -> Result<EventTexts> {
-    let mut text = |key: &str| -> Result<Option<String>> {
-        v.get(key)
-            .and_then(Value::as_str)
-            .map(|text| budget.copy(text))
-            .transpose()
-    };
+    let mut text = |key: &str| v.str_field(key).map(|t| budget.copy(t)).transpose();
     Ok(EventTexts {
         kind: text("type")?,
         mix_group: text("mixgroup")?,
@@ -335,12 +330,9 @@ pub fn read_sound_stacks(resource: &Resource, budget: &mut Budget) -> Result<Vec
     let mut out = Vec::with_capacity(root.len());
     for (name, stack) in root.iter() {
         let public = stack
-            .get("operators")
-            .and_then(Value::as_array)
-            .and_then(|ops| {
-                ops.iter()
-                    .find(|op| op.get("name").and_then(Value::as_str) == Some("public"))
-            })
+            .array("operators")
+            .iter()
+            .find(|op| op.str_field("name") == Some("public"))
             .and_then(|op| op.get("operator_variables"));
         let Some(variables) = public else {
             continue;
@@ -421,84 +413,79 @@ mod tests {
     use super::*;
     use crate::kv3::Object;
 
-    fn event_with_volume(volume: Value) -> Result<SoundEvent> {
-        let mut object = Object::with_capacity(1);
-        object.push("volume".to_owned(), volume);
-        event("Test.Event", &Value::Object(object), &mut Budget::default())
+    fn obj(entries: &[(&str, Value)]) -> Object {
+        let mut o = Object::with_capacity(entries.len());
+        for (k, v) in entries {
+            o.push((*k).to_owned(), v.clone());
+        }
+        o
+    }
+
+    fn event_of(name: &str, entries: &[(&str, Value)]) -> Result<SoundEvent> {
+        event(name, &Value::Object(obj(entries)), &mut Budget::default())
     }
 
     #[test]
     fn a_numeric_volume_is_read() {
-        let event = event_with_volume(Value::Float(0.6)).expect("an event");
+        let event = event_of("Test.Event", &[("volume", Value::Float(0.6))]).expect("an event");
         assert_eq!(event.volume, Some(0.6));
     }
 
     #[test]
     fn a_volume_that_is_a_range_string_is_refused_rather_than_played_at_full() {
-        let err = event_with_volume(Value::String("0.8,1.0".to_owned())).unwrap_err();
-        assert!(err.to_string().contains("Test.Event"), "{err}");
-        assert!(err.to_string().contains("volume is not a number"), "{err}");
+        let err = event_of("Test.Event", &[("volume", Value::String("0.8,1.0".into()))])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Test.Event") && err.contains("volume is not a number"),
+            "{err}"
+        );
     }
-}
-
-#[cfg(test)]
-mod default_tests {
-    use super::*;
-    use crate::kv3::Object;
 
     #[test]
     fn a_stack_states_its_defaults_as_strings_and_an_event_its_player_and_fog_fields_as_numbers() {
-        let mut stack = Object::with_capacity(2);
-        stack.push("soundlevel".to_owned(), Value::String("70".to_owned()));
-        stack.push(
-            "volume_on_player_mult".to_owned(),
-            Value::String("1.250000".to_owned()),
-        );
-        stack.push(
-            "volume_use_FOW".to_owned(),
-            Value::String("0.000000".to_owned()),
-        );
+        let stack = obj(&[
+            ("soundlevel", Value::String("70".into())),
+            ("volume_on_player_mult", Value::String("1.250000".into())),
+            ("volume_use_FOW", Value::String("0.000000".into())),
+        ]);
         let defaults = stack_defaults("t", |key| stack.get(key)).expect("defaults");
         assert_eq!(defaults.sound_level, Some(70.0));
         assert_eq!(defaults.volume_on_player_mult, Some(1.25));
         assert_eq!(defaults.use_fog_of_war, Some(false));
         assert_eq!(defaults.distance_max, None);
 
-        let mut object = Object::with_capacity(2);
-        object.push("volume_use_FOW".to_owned(), Value::Float(1.0));
-        object.push("volume_FOW_radius".to_owned(), Value::Float(300.0));
-        let event =
-            event("Test.Event", &Value::Object(object), &mut Budget::default()).expect("an event");
+        let event = event_of(
+            "Test.Event",
+            &[
+                ("volume_use_FOW", Value::Float(1.0)),
+                ("volume_FOW_radius", Value::Float(300.0)),
+            ],
+        )
+        .expect("an event");
         assert_eq!(event.use_fog_of_war, Some(true));
         assert_eq!(event.fog_of_war_radius, Some(300.0));
     }
-}
-
-#[cfg(test)]
-mod overflow_tests {
-    use super::*;
-    use crate::kv3::Object;
 
     #[test]
     fn a_distance_max_too_large_for_a_number_refuses_the_event_naming_it() {
-        let mut object = Object::with_capacity(1);
-        object.push("distance_max".to_owned(), Value::Float(1e300));
-        let err = event("Far.Event", &Value::Object(object), &mut Budget::default()).unwrap_err();
-        assert!(err.to_string().contains("Far.Event"), "{err}");
+        let err = event_of("Far.Event", &[("distance_max", Value::Float(1e300))])
+            .unwrap_err()
+            .to_string();
         assert!(
-            err.to_string().contains("distance_max does not fit"),
+            err.contains("Far.Event") && err.contains("distance_max does not fit"),
             "{err}"
         );
     }
 
     #[test]
     fn a_default_too_large_for_a_number_refuses_the_stack_naming_it() {
-        let mut stack = Object::with_capacity(1);
-        stack.push("distance_max".to_owned(), Value::String("1e300".to_owned()));
-        let err = stack_defaults("dota_x", |key| stack.get(key)).unwrap_err();
-        assert!(err.to_string().contains("dota_x"), "{err}");
+        let stack = obj(&[("distance_max", Value::String("1e300".into()))]);
+        let err = stack_defaults("dota_x", |key| stack.get(key))
+            .unwrap_err()
+            .to_string();
         assert!(
-            err.to_string().contains("distance_max does not fit"),
+            err.contains("dota_x") && err.contains("distance_max does not fit"),
             "{err}"
         );
     }

@@ -118,6 +118,55 @@ impl Value {
         }
     }
 
+    /// Any finite number as `f32`.
+    pub fn finite_f32(&self) -> Option<f32> {
+        self.as_f64().map(|f| f as f32).filter(|f| f.is_finite())
+    }
+
+    /// Any finite number as `f64`.
+    pub fn finite_f64(&self) -> Option<f64> {
+        self.as_f64().filter(|f| f.is_finite())
+    }
+
+    /// The integer, if it fits in a `usize`.
+    pub fn as_usize(&self) -> Option<usize> {
+        self.as_u64().and_then(|u| usize::try_from(u).ok())
+    }
+
+    /// An array of exactly `N` finite `f32` numbers.
+    pub fn f32_array<const N: usize>(&self) -> Option<[f32; N]> {
+        let items = self.as_array()?;
+        if items.len() != N {
+            return None;
+        }
+        let mut out = [0.0; N];
+        for (o, v) in out.iter_mut().zip(items) {
+            *o = v.finite_f32()?;
+        }
+        Some(out)
+    }
+
+    /// The array's items, or an empty slice when not an array.
+    pub fn slice(&self) -> &[Value] {
+        self.as_array().unwrap_or_default()
+    }
+
+    pub(crate) fn array(&self, key: &str) -> &[Value] {
+        self.get(key).map_or(&[], Value::slice)
+    }
+
+    pub(crate) fn str_field(&self, key: &str) -> Option<&str> {
+        self.get(key).and_then(Value::as_str)
+    }
+
+    pub(crate) fn f32_field(&self, key: &str) -> Option<f32> {
+        self.get(key).and_then(Value::finite_f32)
+    }
+
+    pub(crate) fn usize_field(&self, key: &str) -> Option<usize> {
+        self.get(key).and_then(Value::as_usize)
+    }
+
     /// The string, if it is one.
     pub fn as_str(&self) -> Option<&str> {
         match self {

@@ -53,6 +53,7 @@
 pub mod anim;
 mod budget;
 mod bytes;
+mod coords;
 mod error;
 pub mod export;
 pub mod face;
@@ -63,6 +64,7 @@ pub mod gltf;
 /// The cosmetics of `items_game.txt`: the models and effects a hero wears, by item.
 pub mod items_game;
 pub mod keyvalues;
+mod kv1;
 pub mod kv3;
 #[cfg(any(unix, windows))]
 pub mod locate;

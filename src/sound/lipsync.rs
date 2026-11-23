@@ -97,36 +97,39 @@ impl Lipsync {
 
     /// The newer layout: `CTRL.m_vSound.m_Sentences`, the first sentence (a voice line has one).
     fn from_ctrl(sound: &Value) -> Result<Self> {
-        let Some(sentence) = sound
-            .get("m_Sentences")
-            .and_then(Value::as_array)
-            .and_then(<[Value]>::first)
-        else {
+        let Some(sentence) = sound.array("m_Sentences").first() else {
             return Ok(Self::default());
         };
-        let list = |key: &str| sentence.get(key).and_then(Value::as_array).unwrap_or(&[]);
         let float = |v: &Value, key: &str| v.get(key).and_then(Value::as_f64).map(|f| f as f32);
-        let phonemes = bounded(list("m_RunTimePhonemes"), MAX_PHONEMES, "phonemes")?
-            .iter()
-            .map(|p| {
-                let code = p.get("m_nPhonemeCode").and_then(Value::as_u64);
-                match (float(p, "m_flStartTime"), float(p, "m_flEndTime"), code) {
-                    (Some(start), Some(end), Some(code)) => Ok(Phoneme {
-                        start,
-                        end,
-                        code: u32::try_from(code).map_err(|_| malformed(WHAT, "phoneme code"))?,
-                    }),
-                    _ => Err(malformed(WHAT, "a phoneme without its times or code")),
-                }
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let emphasis = bounded(list("m_EmphasisSamples"), MAX_KEYS, "emphasis samples")?
-            .iter()
-            .map(|s| match (float(s, "time"), float(s, "value")) {
-                (Some(t), Some(v)) => Ok((t, v)),
-                _ => Err(malformed(WHAT, "an emphasis sample without time or value")),
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let phonemes = bounded(
+            sentence.array("m_RunTimePhonemes"),
+            MAX_PHONEMES,
+            "phonemes",
+        )?
+        .iter()
+        .map(|p| {
+            let code = p.get("m_nPhonemeCode").and_then(Value::as_u64);
+            match (float(p, "m_flStartTime"), float(p, "m_flEndTime"), code) {
+                (Some(start), Some(end), Some(code)) => Ok(Phoneme {
+                    start,
+                    end,
+                    code: u32::try_from(code).map_err(|_| malformed(WHAT, "phoneme code"))?,
+                }),
+                _ => Err(malformed(WHAT, "a phoneme without its times or code")),
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+        let emphasis = bounded(
+            sentence.array("m_EmphasisSamples"),
+            MAX_KEYS,
+            "emphasis samples",
+        )?
+        .iter()
+        .map(|s| match (float(s, "time"), float(s, "value")) {
+            (Some(t), Some(v)) => Ok((t, v)),
+            _ => Err(malformed(WHAT, "an emphasis sample without time or value")),
+        })
+        .collect::<Result<Vec<_>>>()?;
         let morph = match sentence.get("m_morphData") {
             Some(data @ Value::Object(_)) => MorphCurves::from_kv3(data)?,
             _ => None,
@@ -202,15 +205,14 @@ impl MorphCurves {
     /// `m_morphData`: `m_times`, the channels' `m_nameHashCodes` (or their `m_nameStrings`,
     /// hashed here), `m_samples` (a row per time) and the ease times. None when it has no keys.
     fn from_kv3(data: &Value) -> Result<Option<Self>> {
-        let list = |key: &str| data.get(key).and_then(Value::as_array).unwrap_or(&[]);
-        let times = bounded(list("m_times"), MAX_KEYS, "morph keys")?
+        let times = bounded(data.array("m_times"), MAX_KEYS, "morph keys")?
             .iter()
             .map(|t| t.as_f64().map(|t| t as f32))
             .collect::<Option<Vec<_>>>()
             .ok_or_else(|| malformed(WHAT, "a morph key time that is no number"))?;
-        let hashes = list("m_nameHashCodes");
+        let hashes = data.array("m_nameHashCodes");
         let names: Vec<u32> = if hashes.is_empty() {
-            bounded(list("m_nameStrings"), MAX_CHANNELS, "morph channels")?
+            bounded(data.array("m_nameStrings"), MAX_CHANNELS, "morph channels")?
                 .iter()
                 .map(|n| n.as_str().map(token))
                 .collect::<Option<_>>()
@@ -221,17 +223,16 @@ impl MorphCurves {
                 .collect::<Option<_>>()
         }
         .ok_or_else(|| malformed(WHAT, "a morph channel's name"))?;
-        let rows = list("m_samples");
+        let rows = data.array("m_samples");
         if rows.len() != times.len() {
             return Err(malformed(WHAT, "morph samples and times differ in number"));
         }
         let mut values = Vec::with_capacity(rows.len());
         for row in rows {
             let row: Vec<f32> = row
-                .as_array()
-                .unwrap_or(&[])
+                .slice()
                 .iter()
-                .map(|v| v.as_f64().map(|v| v as f32).filter(|v| v.is_finite()))
+                .map(Value::finite_f32)
                 .collect::<Option<_>>()
                 .ok_or_else(|| malformed(WHAT, "a morph sample that is no number"))?;
             if row.len() != names.len() {
@@ -243,13 +244,7 @@ impl MorphCurves {
         if !ordered {
             return Err(malformed(WHAT, "morph key times out of order"));
         }
-        let ease = |key: &str| {
-            data.get(key)
-                .and_then(Value::as_f64)
-                .map(|e| e as f32)
-                .filter(|e| e.is_finite())
-                .map_or(0.0, |e| e.clamp(0.0, 60.0))
-        };
+        let ease = |key: &str| data.f32_field(key).map_or(0.0, |e| e.clamp(0.0, 60.0));
         Ok((!times.is_empty() && !names.is_empty()).then(|| Self {
             names,
             times,

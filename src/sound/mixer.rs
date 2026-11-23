@@ -4,7 +4,7 @@
 
 use crate::budget::Budget;
 use crate::error::{Result, malformed};
-use crate::kv3::{Object, Value, parse_text_in};
+use crate::kv3::{Value, parse_text_in};
 
 /// Most mix groups, mixes, levels in one and layers a file holds.
 const MAX_GROUPS: usize = 256;
@@ -118,10 +118,10 @@ pub fn read_sound_mixer(bytes: &[u8], budget: &mut Budget) -> Result<SoundMixer>
     let before = budget.spent();
     let document = parse_text_in(bytes, budget)?;
     budget.charge(budget.spent() - before)?;
-    let root = document
-        .root
-        .as_object()
-        .ok_or_else(|| malformed("soundmixers", "not an object"))?;
+    let root = &document.root;
+    if root.as_object().is_none() {
+        return Err(malformed("soundmixers", "not an object"));
+    }
     let groups = list(root, "MixGroups", MAX_GROUPS)?
         .iter()
         .map(group)
@@ -162,8 +162,8 @@ pub fn read_sound_mixer(bytes: &[u8], budget: &mut Budget) -> Result<SoundMixer>
     })
 }
 
-fn list<'a>(object: &'a Object, key: &str, most: usize) -> Result<&'a [Value]> {
-    let list = object
+fn list<'a>(value: &'a Value, key: &str, most: usize) -> Result<&'a [Value]> {
+    let list = value
         .get(key)
         .and_then(Value::as_array)
         .ok_or_else(|| malformed("soundmixers", format!("no {key} list")))?;
@@ -176,10 +176,10 @@ fn list<'a>(object: &'a Object, key: &str, most: usize) -> Result<&'a [Value]> {
     Ok(list)
 }
 
-fn number(object: &Object, key: &str, default: f32) -> Result<f32> {
-    match object.get(key) {
+fn number(value: &Value, key: &str, default: f32) -> Result<f32> {
+    match value.get(key) {
         None => Ok(default),
-        Some(value) => match value.as_f64() {
+        Some(v) => match v.as_f64() {
             Some(n) if n.is_finite() && (n as f32).is_finite() => Ok(n as f32),
             Some(n) if n.is_finite() => Err(malformed(
                 "soundmixers",
@@ -190,35 +190,30 @@ fn number(object: &Object, key: &str, default: f32) -> Result<f32> {
     }
 }
 
-fn text(object: &Object, key: &str) -> String {
-    object
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
-}
-
-fn group(value: &Value) -> Result<MixGroup> {
-    let o = value
-        .as_object()
-        .ok_or_else(|| malformed("soundmixers", "a mix group is not an object"))?;
-    let name = text(o, "name");
+fn group(v: &Value) -> Result<MixGroup> {
+    if v.as_object().is_none() {
+        return Err(malformed("soundmixers", "a mix group is not an object"));
+    }
+    let name = v.str_field("name").unwrap_or_default().to_owned();
     if name.is_empty() {
         return Err(malformed("soundmixers", "a mix group has no name"));
     }
     Ok(MixGroup {
         name,
-        path_substring: text(o, "path_substring"),
-        class_substring: text(o, "class_substring"),
-        sound_level_min: o
+        path_substring: v.str_field("path_substring").unwrap_or_default().to_owned(),
+        class_substring: v
+            .str_field("class_substring")
+            .unwrap_or_default()
+            .to_owned(),
+        sound_level_min: v
             .get("sndlvl_min")
-            .map(|_| number(o, "sndlvl_min", 0.0))
+            .map(|_| number(v, "sndlvl_min", 0.0))
             .transpose()?,
-        priority: number(o, "priority", 0.0)? as i32,
-        is_ducked: number(o, "is_ducked", 0.0)? != 0.0,
-        causes_ducking: number(o, "causes_ducking", 0.0)? != 0.0,
-        duck_to_percent: number(o, "duck_to_percent", 100.0)?,
-        ducker_threshold: number(o, "ducker_threshold", 0.0)?,
+        priority: number(v, "priority", 0.0)? as i32,
+        is_ducked: number(v, "is_ducked", 0.0)? != 0.0,
+        causes_ducking: number(v, "causes_ducking", 0.0)? != 0.0,
+        duck_to_percent: number(v, "duck_to_percent", 100.0)?,
+        ducker_threshold: number(v, "ducker_threshold", 0.0)?,
     })
 }
 
@@ -230,32 +225,32 @@ fn levels_of(value: &Value) -> Result<Vec<GroupLevel>> {
         return Err(malformed("soundmixers", "more levels than any file has"));
     }
     list.iter()
-        .map(|level| {
-            let o = level
-                .as_object()
-                .ok_or_else(|| malformed("soundmixers", "a level is not an object"))?;
+        .map(|v| {
+            if v.as_object().is_none() {
+                return Err(malformed("soundmixers", "a level is not an object"));
+            }
             Ok(GroupLevel {
-                group: text(o, "mixgroup"),
-                volume: number(o, "vol", 1.0)?,
-                level: number(o, "lvl", 1.0)?,
-                mute: number(o, "mute", 0.0)?,
+                group: v.str_field("mixgroup").unwrap_or_default().to_owned(),
+                volume: number(v, "vol", 1.0)?,
+                level: number(v, "lvl", 1.0)?,
+                mute: number(v, "mute", 0.0)?,
             })
         })
         .collect()
 }
 
-fn layer_of(name: &str, value: &Value) -> Result<MixLayer> {
-    let o = value
-        .as_object()
-        .ok_or_else(|| malformed("soundmixers", "a layer is not an object"))?;
-    let triggers = list(o, "Triggers", MAX_TRIGGERS)?
+fn layer_of(name: &str, v: &Value) -> Result<MixLayer> {
+    if v.as_object().is_none() {
+        return Err(malformed("soundmixers", "a layer is not an object"));
+    }
+    let triggers = list(v, "Triggers", MAX_TRIGGERS)?
         .iter()
-        .map(|trigger| {
-            let t = trigger
-                .as_object()
-                .ok_or_else(|| malformed("soundmixers", "a trigger is not an object"))?;
+        .map(|t| {
+            if t.as_object().is_none() {
+                return Err(malformed("soundmixers", "a trigger is not an object"));
+            }
             Ok(LayerTrigger {
-                trigger: text(t, "trigger"),
+                trigger: t.str_field("trigger").unwrap_or_default().to_owned(),
                 threshold: number(t, "threshold", 0.0)?,
                 amount: number(t, "mixamount", 1.0)?,
                 attack: number(t, "attack", 0.0)?.max(0.0),
@@ -265,7 +260,7 @@ fn layer_of(name: &str, value: &Value) -> Result<MixLayer> {
         .collect::<Result<Vec<_>>>()?;
     Ok(MixLayer {
         name: name.to_owned(),
-        levels: o
+        levels: v
             .get("Mixers")
             .map(levels_of)
             .transpose()?

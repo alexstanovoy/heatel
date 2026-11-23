@@ -3,6 +3,10 @@
 
 use heatel::{Error, SliceSource, Vpk};
 
+#[path = "support/wire_builders.rs"]
+mod wire;
+use wire::vpk_v2;
+
 #[derive(Clone, Copy)]
 struct File {
     ext: &'static str,
@@ -50,21 +54,7 @@ fn directory(files: &[File], in_dir: &[u8]) -> Vec<u8> {
         tree.push(0);
     }
     tree.push(0);
-    let mut out = Vec::new();
-    for word in [
-        0x55AA_1234,
-        2,
-        tree.len() as u32,
-        in_dir.len() as u32,
-        0,
-        48,
-        0,
-    ] {
-        out.extend_from_slice(&u32::to_le_bytes(word));
-    }
-    out.extend_from_slice(&tree);
-    out.extend_from_slice(in_dir);
-    out
+    vpk_v2(&tree, in_dir)
 }
 
 const FILES: [File; 3] = [

@@ -146,14 +146,13 @@ pub(crate) fn zstd(input: &[u8], len: usize, budget: &mut Budget) -> Result<Vec<
 }
 
 /// Decompresses zstd frames of unknown decoded size, at most `max` bytes, and no more than the
-/// input can expand to: that much is allocated up front.
-pub(crate) fn zstd_to_vec(input: &[u8], max: usize) -> Result<Vec<u8>> {
-    let len = max.min(input.len().saturating_mul(ZSTD_RATIO));
-    // The buffer and a decoder of a window as large.
-    let mut budget = Budget::with_limit("zstd", MAX_BUFFER + zstd_worst(MAX_BUFFER));
-    let mut out = buffer(len, &mut budget)?;
-    let len =
-        zstd_into(input, &mut out, &mut budget)?.map_err(|e| malformed("zstd", e.to_string()))?;
+/// input can expand to: that much and the decoder window are charged to `budget` up front.
+pub(crate) fn zstd_to_vec(input: &[u8], max: usize, budget: &mut Budget) -> Result<Vec<u8>> {
+    let len = max
+        .min(MAX_BUFFER)
+        .min(input.len().saturating_mul(ZSTD_RATIO));
+    let mut out = buffer(len, budget)?;
+    let len = zstd_into(input, &mut out, budget)?.map_err(|e| malformed("zstd", e.to_string()))?;
     out.truncate(len);
     Ok(out)
 }
@@ -168,7 +167,7 @@ fn zstd_into(
     budget: &mut Budget,
 ) -> Result<std::result::Result<usize, ruzstd::decoding::errors::FrameDecoderError>> {
     let window = zstd_window(input)?;
-    budget.bytes(zstd_worst(usize::try_from(window).unwrap_or(usize::MAX)))?;
+    budget.check_peak(zstd_worst(usize::try_from(window).unwrap_or(usize::MAX)))?;
     let mut decoder = ruzstd::decoding::FrameDecoder::new();
     decoder.set_max_window_size(window);
     Ok(decoder.decode_all(input, out))

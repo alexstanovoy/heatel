@@ -9,22 +9,18 @@ use std::f64::consts::SQRT_2;
 use serde_json::{Value as Json, json};
 
 use super::scene::{Bounds, Scene, SceneMesh, overlay_positions};
+use crate::coords::SCALE;
 use crate::error::{Result, malformed};
-use crate::gltf::{images, sampler, textures};
+use crate::gltf::{ARRAY_BUFFER, GltfBuffer, images, sampler, textures};
 use crate::material::extensions_used;
 use crate::model::{Mesh, Model};
-use crate::vertices::{SCALE, Vertices};
+use crate::vertices::Vertices;
 
 /// Most bytes of geometry written.
 const MAX_BIN: usize = 1 << 30;
 /// Most indices and vertices visited while writing (the band of Dota's map takes ~2e7): many
 /// pieces over one large buffer must not cost without bound before the output fills.
 const MAX_WORK: usize = 1 << 31;
-const FLOAT: u32 = 5126;
-const UNSIGNED_SHORT: u32 = 5123;
-const UNSIGNED_INT: u32 = 5125;
-const ARRAY_BUFFER: u32 = 34962;
-const ELEMENT_ARRAY_BUFFER: u32 = 34963;
 
 /// A band along the map's diagonal (the direction Dota's mid lane runs), in Dota units:
 /// `|x - y| / √2 <= half_width` across it and `v_min <= (x + y) / √2 <= v_max` along it.
@@ -133,9 +129,9 @@ pub(super) fn crop(
         "scenes": [{ "name": cut.scene, "nodes": (0..nodes.len()).collect::<Vec<_>>() }],
         "nodes": nodes,
         "meshes": w.meshes,
-        "accessors": w.accessors,
-        "bufferViews": w.views,
-        "buffers": [{ "byteLength": w.bin.len().next_multiple_of(4), "uri": cut.bin_uri }],
+        "accessors": w.buf.accessors,
+        "bufferViews": w.buf.views,
+        "buffers": [{ "byteLength": w.buf.bin.len().next_multiple_of(4), "uri": cut.bin_uri }],
         "materials": materials,
     });
     if !list.is_empty() {
@@ -147,7 +143,7 @@ pub(super) fn crop(
     if !used.is_empty() {
         doc["extensionsUsed"] = json!(used);
     }
-    let mut bin = w.bin;
+    let mut bin = w.buf.bin;
     bin.resize(bin.len().next_multiple_of(4), 0);
     Ok(Cropped {
         doc,
@@ -159,9 +155,7 @@ pub(super) fn crop(
 
 #[derive(Default)]
 struct Writer {
-    bin: Vec<u8>,
-    views: Vec<Json>,
-    accessors: Vec<Json>,
+    buf: GltfBuffer,
     meshes: Vec<Json>,
     /// Accessors of whole vertex buffers by (accessor set, buffer), shared by the primitives
     /// that use most of their buffer: all but the positions, and the positions (an overlay's
@@ -281,10 +275,24 @@ impl Writer {
                 ));
             }
             let kind = ["SCALAR", "VEC2", "VEC3", "VEC4"][width - 1];
-            let view = self.view(&floats_bytes(&picked), ARRAY_BUFFER)?;
-            out[&extra.name] = json!(self.accessor(view, FLOAT, kept.len(), kind));
+            self.check_bin(picked.len() * 4)?;
+            out[&extra.name] =
+                json!(
+                    self.buf
+                        .push_f32_slice(&picked, kept.len(), kind, Some(ARRAY_BUFFER),)
+                );
         }
         Ok(out)
+    }
+
+    fn check_bin(&self, added: usize) -> Result<()> {
+        if self.buf.bin.len().next_multiple_of(4).saturating_add(added) > MAX_BIN {
+            return Err(malformed(
+                "world",
+                format!("more than {MAX_BIN} bytes of geometry"),
+            ));
+        }
+        Ok(())
     }
 
     fn positions(&mut self, positions: &[[f32; 3]], kept: &[usize]) -> Result<usize> {
@@ -294,8 +302,7 @@ impl Writer {
             .filter_map(|&i| positions.get(i).copied())
             .collect();
         if let Some([min, max]) = super::scene::bounds_of(&picked) {
-            self.accessors[accessor]["min"] = json!(min);
-            self.accessors[accessor]["max"] = json!(max);
+            self.buf.set_bounds(accessor, min, max);
         }
         Ok(accessor)
     }
@@ -318,46 +325,16 @@ impl Writer {
                 "an attribute shorter than its positions",
             ));
         }
-        let view = self.view(&floats_bytes(&picked), ARRAY_BUFFER)?;
-        Ok(self.accessor(view, FLOAT, kept.len(), kind))
+        self.check_bin(picked.len() * 4)?;
+        Ok(self
+            .buf
+            .push_f32_slice(&picked, kept.len(), kind, Some(ARRAY_BUFFER)))
     }
 
     /// Indices as 16-bit numbers when `short`, else 32-bit.
     fn indices(&mut self, indices: &[u32], short: bool) -> Result<usize> {
-        let bytes: Vec<u8> = if short {
-            indices
-                .iter()
-                .flat_map(|&i| (i as u16).to_le_bytes())
-                .collect()
-        } else {
-            indices.iter().flat_map(|i| i.to_le_bytes()).collect()
-        };
-        let view = self.view(&bytes, ELEMENT_ARRAY_BUFFER)?;
-        let component = if short { UNSIGNED_SHORT } else { UNSIGNED_INT };
-        Ok(self.accessor(view, component, indices.len(), "SCALAR"))
-    }
-
-    fn view(&mut self, bytes: &[u8], target: u32) -> Result<usize> {
-        let at = self.bin.len().next_multiple_of(4);
-        if at + bytes.len() > MAX_BIN {
-            return Err(malformed(
-                "world",
-                format!("more than {MAX_BIN} bytes of geometry"),
-            ));
-        }
-        self.bin.resize(at, 0);
-        self.bin.extend_from_slice(bytes);
-        self.views.push(json!({
-            "buffer": 0, "byteOffset": at, "byteLength": bytes.len(), "target": target,
-        }));
-        Ok(self.views.len() - 1)
-    }
-
-    fn accessor(&mut self, view: usize, component: u32, count: usize, kind: &str) -> usize {
-        self.accessors.push(json!({
-            "bufferView": view, "componentType": component, "count": count, "type": kind,
-        }));
-        self.accessors.len() - 1
+        self.check_bin(indices.len() * if short { 2 } else { 4 })?;
+        Ok(self.buf.push_indices(indices, short))
     }
 
     /// The kept materials as glTF, and the scene images they use, in first-use order.
@@ -385,8 +362,4 @@ impl Writer {
         }
         (list, order)
     }
-}
-
-fn floats_bytes(values: &[f32]) -> Vec<u8> {
-    values.iter().flat_map(|f| f.to_le_bytes()).collect()
 }

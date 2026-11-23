@@ -3,9 +3,9 @@
 //! among (`SPEAK nevermore_nev_spawn_03`); the criteria say what each requirement matches.
 
 use crate::budget::Budget;
+use crate::coords::finite;
 use crate::error::{Result, malformed};
 use crate::kv3::Value;
-use crate::model::finite;
 use crate::resource::Resource;
 
 /// Most response groups one file holds (the largest of the install has a few thousand).
@@ -203,10 +203,7 @@ fn names(items: &[Value], key: &str, budget: &mut Budget) -> Result<Vec<String>>
 }
 
 fn text(v: &Value, key: &str, budget: &mut Budget) -> Result<Option<String>> {
-    v.get(key)
-        .and_then(Value::as_str)
-        .map(|text| budget.copy(text))
-        .transpose()
+    v.str_field(key).map(|text| budget.copy(text)).transpose()
 }
 
 fn number(v: Option<&Value>) -> Option<f32> {
@@ -255,7 +252,7 @@ fn response(v: &Value, budget: &mut Budget) -> Result<Response> {
             .or_else(|| number(params.and_then(|p| p.get(key)?.get("start"))))
     };
     // The kinds Source names are no copy; another kind is kept by its name.
-    let kind = match v.get("m_type").and_then(Value::as_str).unwrap_or_default() {
+    let kind = match v.str_field("m_type").unwrap_or_default() {
         "SPEAK" => ResponseKind::Speak,
         "SCENE" => ResponseKind::Scene,
         "PRINT" => ResponseKind::Print,

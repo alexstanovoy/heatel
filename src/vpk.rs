@@ -4,6 +4,7 @@ use std::hash::BuildHasher;
 use foldhash::fast::RandomState;
 use hashbrown::HashTable;
 
+use crate::budget::Budget;
 use crate::bytes::Cursor;
 use crate::error::{Error, Result, malformed};
 use crate::source::Source;
@@ -15,6 +16,8 @@ const TERMINATOR: u16 = 0xFFFF;
 const RECORD_LEN: usize = 18;
 /// Largest directory tree `Vpk::open` will read (`pak01_dir.vpk` is ~21 MiB).
 const MAX_TREE_LEN: usize = 256 << 20;
+/// Most files one VPK directory may list (`pak01_dir.vpk` has ~388k).
+const MAX_FILES: usize = 1 << 20;
 /// Largest single entry `Vpk::read` will allocate (preload + archive bytes).
 const MAX_ENTRY_LEN: usize = 512 << 20;
 
@@ -57,6 +60,20 @@ pub struct Entry<'a> {
 impl Vpk {
     /// Reads the header and directory tree of the package at `dir_path` in `src`.
     pub fn open(src: &(impl Source + ?Sized), dir_path: &str) -> Result<Self> {
+        Self::open_in(
+            src,
+            dir_path,
+            &mut Budget::with_limit("VPK directory", MAX_TREE_LEN * 2),
+        )
+    }
+
+    /// Like [`open`](Self::open), charging the directory tree and index to `budget` before
+    /// allocating.
+    pub fn open_in(
+        src: &(impl Source + ?Sized),
+        dir_path: &str,
+        budget: &mut Budget,
+    ) -> Result<Self> {
         let size = src.size(dir_path)?;
         let head = src.read_at(dir_path, 0, size.min(28) as usize)?;
         let mut header = Cursor::new(&head, "VPK header");
@@ -85,10 +102,11 @@ impl Vpk {
                 format!("{dir_path}: directory tree of {tree_len} bytes exceeds {MAX_TREE_LEN}"),
             ));
         }
+        budget.bytes(tree_len)?;
         let tree = src.read_at(dir_path, header_len, tree_len)?;
         let part_prefix = dir_path.strip_suffix("_dir.vpk").map(str::to_owned);
         let hasher = RandomState::default();
-        let (files, index) = index_tree(&tree, &hasher)?;
+        let (files, index) = index_tree(&tree, &hasher, budget)?;
         Ok(Self {
             dir_path: dir_path.to_owned(),
             part_prefix,
@@ -148,20 +166,48 @@ impl Vpk {
 
     /// The whole file at `path`, its CRC checked.
     pub fn read_file(&self, src: &(impl Source + ?Sized), path: &str) -> Result<Vec<u8>> {
+        self.read_file_in(
+            src,
+            path,
+            &mut Budget::with_limit("VPK entry", MAX_ENTRY_LEN),
+        )
+    }
+
+    /// Like [`read_file`](Self::read_file), charging the entry's bytes to `budget` before reading.
+    pub fn read_file_in(
+        &self,
+        src: &(impl Source + ?Sized),
+        path: &str,
+        budget: &mut Budget,
+    ) -> Result<Vec<u8>> {
         let entry = self
             .get(path)
             .ok_or_else(|| Error::NotFound(format!("{}:{path}", self.dir_path)))?;
-        self.read(src, entry)
+        self.read_in(src, entry, budget)
     }
 
     /// The entry's bytes (preload, then the archive part's), its CRC checked.
     pub fn read(&self, src: &(impl Source + ?Sized), entry: Entry<'_>) -> Result<Vec<u8>> {
+        self.read_in(
+            src,
+            entry,
+            &mut Budget::with_limit("VPK entry", MAX_ENTRY_LEN),
+        )
+    }
+
+    /// Like [`read`](Self::read), charging the entry's bytes to `budget` before reading.
+    pub fn read_in(
+        &self,
+        src: &(impl Source + ?Sized),
+        entry: Entry<'_>,
+        budget: &mut Budget,
+    ) -> Result<Vec<u8>> {
         let len = entry.archive_len() as usize;
         let preload = entry.preload();
-        if len
+        let Some(total) = len
             .checked_add(preload.len())
-            .is_none_or(|total| total > MAX_ENTRY_LEN)
-        {
+            .filter(|&total| total <= MAX_ENTRY_LEN)
+        else {
             return Err(malformed(
                 "VPK entry",
                 format!(
@@ -171,7 +217,8 @@ impl Vpk {
                     entry.size()
                 ),
             ));
-        }
+        };
+        budget.charge(total)?;
         let tail = if len == 0 {
             Vec::new()
         } else {
@@ -217,7 +264,11 @@ impl Vpk {
 }
 
 /// Walks the tree (extension → directory → name → record), checking every bound.
-fn index_tree(tree: &[u8], hasher: &RandomState) -> Result<(Vec<Record>, Index)> {
+fn index_tree(
+    tree: &[u8],
+    hasher: &RandomState,
+    budget: &mut Budget,
+) -> Result<(Vec<Record>, Index)> {
     let mut files = Vec::new();
     let mut index = HashTable::new();
     let mut c = Cursor::new(tree, "VPK directory");
@@ -241,6 +292,13 @@ fn index_tree(tree: &[u8], hasher: &RandomState) -> Result<(Vec<Record>, Index)>
                 if name.is_empty() {
                     break;
                 }
+                if files.len() >= MAX_FILES {
+                    return Err(malformed(
+                        "VPK directory",
+                        format!("more than {MAX_FILES} entries"),
+                    ));
+                }
+                budget.slots::<(Record, (u64, u32))>(1)?;
                 let info = c.pos() as u32;
                 let mut record = Cursor::new(c.take(RECORD_LEN)?, "VPK entry");
                 record.take(4)?;

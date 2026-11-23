@@ -25,9 +25,8 @@ impl EntityLump {
 
     /// The lump of a decoded `DATA` block.
     pub(crate) fn from_data(data: &Value) -> Result<Self> {
-        let list = |key| data.get(key).and_then(Value::as_array).unwrap_or_default();
         let mut entities = Vec::new();
-        for entity in list("m_entityKeyValues") {
+        for entity in data.array("m_entityKeyValues") {
             match entity.get("keyValues3Data").and_then(|k| k.get("values")) {
                 Some(values) => entities.push(values.clone()),
                 None if entity
@@ -43,7 +42,8 @@ impl EntityLump {
                 None => {}
             }
         }
-        let children = list("m_childLumps")
+        let children = data
+            .array("m_childLumps")
             .iter()
             .filter_map(Value::as_str)
             .map(str::to_owned)
@@ -57,7 +57,7 @@ impl EntityLump {
         let mut seen = std::collections::HashSet::new();
         self.entities
             .iter()
-            .filter_map(|e| e.get("model")?.as_str())
+            .filter_map(|e| e.str_field("model"))
             .filter(|m| !m.is_empty() && seen.insert(*m))
             .collect()
     }

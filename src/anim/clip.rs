@@ -5,9 +5,11 @@
 use std::collections::{HashMap, HashSet};
 
 use super::segment::{Attribute, BonePose, Segment};
+use crate::budget::Budget as MemBudget;
+use crate::coords::{bone_to_gltf, finite, multiply, rotate};
 use crate::error::{Result, malformed};
 use crate::kv3::{self, Value};
-use crate::model::{SourceBone, array, floats, multiply, rotate, source_skeleton, to_gltf};
+use crate::model::{SourceBone, floats, source_skeleton};
 use crate::resource::Resource;
 
 /// Most bone-frames one call decodes (each becomes up to three keyframes); the largest
@@ -84,33 +86,50 @@ pub fn read_clips_in_place(
     if names.is_empty() {
         return Ok(Vec::new());
     }
+    let mut mem_budget = MemBudget::named("animation");
     let ctrl = resource
-        .kv3(b"CTRL")
+        .kv3_in(b"CTRL", &mut mem_budget)
         .ok_or_else(|| malformed("animation", "no CTRL"))??
         .root;
+    if ctrl.get("embedded_animation").is_none() {
+        return Ok(Vec::new());
+    }
+    let data = resource
+        .data_in(&mut mem_budget)
+        .ok_or_else(|| malformed("animation", "no DATA"))??;
+    read_clips_with_ctrl(resource, &data, &ctrl, names, activities, &mut mem_budget)
+}
+
+/// Like [`read_clips_in_place`], reusing already-decoded `DATA` and `CTRL` blocks and charging
+/// animation blocks to `mem_budget`.
+pub(crate) fn read_clips_with_ctrl(
+    resource: &Resource,
+    data: &Value,
+    ctrl: &Value,
+    names: &[&str],
+    activities: &[&str],
+    mem_budget: &mut MemBudget,
+) -> Result<Vec<Clip>> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
     let Some(embedded) = ctrl.get("embedded_animation") else {
         return Ok(Vec::new());
     };
-    let data = resource
-        .data()
-        .ok_or_else(|| malformed("animation", "no DATA"))??;
-    let bones = source_skeleton(&data)?;
-    let group = block(resource, embedded, "group_data_block")?
+    let bones = source_skeleton(data)?;
+    let group = block(resource, embedded, "group_data_block", mem_budget)?
         .ok_or_else(|| malformed("animation", "no group block"))?;
-    let anim = block(resource, embedded, "anim_data_block")?
+    let anim = block(resource, embedded, "anim_data_block", mem_budget)?
         .ok_or_else(|| malformed("animation", "no animation block"))?;
-    let sequences = block(resource, embedded, "seqgroup_data_block")?;
+    let sequences = block(resource, embedded, "seqgroup_data_block", mem_budget)?;
     let channels = channels(group.get("m_decodeKey"), &bones)?;
-    let descs = array(anim.get("m_animArray"));
+    let descs = anim.array("m_animArray");
     let mut segments = Segments {
-        list: array(anim.get("m_segmentArray")),
-        codecs: array(anim.get("m_decoderArray"))
+        list: anim.array("m_segmentArray"),
+        codecs: anim
+            .array("m_decoderArray")
             .iter()
-            .map(|d| {
-                d.get("m_szName")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-            })
+            .map(|d| d.str_field("m_szName").unwrap_or_default())
             .collect(),
         channels: &channels,
         built: HashMap::new(),
@@ -150,7 +169,7 @@ fn in_place_for(activities: &[&str], entries: Option<&Value>, budget: &mut Budge
     if activities.is_empty() {
         return Ok(false);
     }
-    let names = array(entries);
+    let names = entries.map_or(&[][..], Value::slice);
     Budget::spend(&mut budget.work, names.len(), "activity entries")?;
     if !names
         .iter()
@@ -215,18 +234,20 @@ mod in_place_tests {
 }
 
 /// The KV3 block `CTRL.embedded_animation.<key>` addresses; none for an index of zero or less.
-pub(super) fn block(resource: &Resource, embedded: &Value, key: &str) -> Result<Option<Value>> {
-    let Some(index) = embedded.get(key).and_then(Value::as_i64) else {
-        return Ok(None);
-    };
-    let Some(block) = usize::try_from(index)
-        .ok()
+pub(super) fn block(
+    resource: &Resource,
+    embedded: &Value,
+    key: &str,
+    budget: &mut MemBudget,
+) -> Result<Option<Value>> {
+    let Some(block) = embedded
+        .usize_field(key)
         .filter(|&i| i > 0)
         .and_then(|i| resource.blocks().get(i))
     else {
         return Ok(None);
     };
-    Ok(Some(kv3::decode(resource.bytes(block))?.root))
+    Ok(Some(kv3::decode_in(resource.bytes(block), budget)?.root))
 }
 
 /// A decode-key channel: what it animates (`None`: nothing a skeleton shows) and, per bone,
@@ -239,11 +260,11 @@ struct Channel {
 /// The decode key's channels; elements find their bone by name, ignoring case.
 fn channels(key: Option<&Value>, bones: &[SourceBone]) -> Result<Vec<Channel>> {
     let key = key.ok_or_else(|| malformed("animation", "no decode key"))?;
-    let count = array(key.get("m_dataChannelArray")).len();
-    if count.saturating_mul(bones.len()) > MAX_REMAP {
+    let raw_channels = key.array("m_dataChannelArray");
+    if raw_channels.len().saturating_mul(bones.len()) > MAX_REMAP {
         return Err(malformed(
             "animation",
-            format!("{count} channels of {} bones", bones.len()),
+            format!("{} channels of {} bones", raw_channels.len(), bones.len()),
         ));
     }
     let mut by_name = HashMap::with_capacity(bones.len());
@@ -251,16 +272,17 @@ fn channels(key: Option<&Value>, bones: &[SourceBone]) -> Result<Vec<Channel>> {
         by_name.entry(bone.name.to_lowercase()).or_insert(i);
     }
     let mut out = Vec::new();
-    for channel in array(key.get("m_dataChannelArray")) {
+    for channel in raw_channels {
         let attribute = channel
-            .get("m_szVariableName")
-            .and_then(Value::as_str)
+            .str_field("m_szVariableName")
             .and_then(Attribute::from_name);
         let mut remap = vec![None; bones.len()];
         if matches!(attribute, Some(a) if a != Attribute::Data) {
-            let names = array(channel.get("m_szElementNameArray"));
-            let ids = array(channel.get("m_nElementIndexArray"));
-            for (name, id) in names.iter().zip(ids) {
+            for (name, id) in channel
+                .array("m_szElementNameArray")
+                .iter()
+                .zip(channel.array("m_nElementIndexArray"))
+            {
                 let bone = name.as_str().and_then(|n| by_name.get(&n.to_lowercase()));
                 if let (Some(&bone), Some(id)) = (bone, id.as_i64()) {
                     remap[bone] = Some(id);
@@ -279,29 +301,32 @@ pub(super) fn listing<'a>(
     sequences: Option<&'a Value>,
     descs: &'a [Value],
 ) -> Vec<(&'a str, &'a Value, Option<&'a Value>)> {
-    let name = |v: &'a Value, key| v.get(key).and_then(Value::as_str).unwrap_or_default();
     let mut out = Vec::new();
     let mut taken = HashSet::new();
     if let Some(sequences) = sequences {
-        let by_name: HashMap<&str, &Value> = descs.iter().map(|d| (name(d, "m_name"), d)).collect();
-        let referenced = array(sequences.get("m_localSequenceNameArray"));
-        for sequence in array(sequences.get("m_localS1SeqDescArray")) {
-            let fetch = sequence.get("m_fetch");
-            let first = array(fetch.and_then(|f| f.get("m_localReferenceArray")))
-                .first()
-                .and_then(Value::as_u64)
-                .and_then(|i| referenced.get(usize::try_from(i).ok()?))
+        let by_name: HashMap<&str, &Value> = descs
+            .iter()
+            .map(|d| (d.str_field("m_name").unwrap_or_default(), d))
+            .collect();
+        let referenced = sequences.array("m_localSequenceNameArray");
+        for sequence in sequences.array("m_localS1SeqDescArray") {
+            let first = sequence
+                .get("m_fetch")
+                .and_then(|f| f.array("m_localReferenceArray").first())
+                .and_then(Value::as_usize)
+                .and_then(|i| referenced.get(i))
                 .and_then(Value::as_str);
             if let Some(&desc) = first.and_then(|f| by_name.get(f)) {
-                let own = name(sequence, "m_sName");
+                let own = sequence.str_field("m_sName").unwrap_or_default();
                 taken.insert(own);
                 out.push((own, desc, Some(sequence)));
             }
         }
     }
     for desc in descs {
-        if !taken.contains(name(desc, "m_name")) {
-            out.push((name(desc, "m_name"), desc, None));
+        let name = desc.str_field("m_name").unwrap_or_default();
+        if !taken.contains(name) {
+            out.push((name, desc, None));
         }
     }
     out
@@ -442,7 +467,7 @@ fn decode(
     if frames == 0 {
         for (bone, writer) in bones.iter().zip(&mut writers) {
             let (translation, rotation) =
-                to_gltf(bone.position, bone.rotation, bone.parent.is_none());
+                bone_to_gltf(bone.position, bone.rotation, bone.parent.is_none());
             writer.rotation.keys.push(0.0, rotation);
             writer.translation.keys.push(0.0, translation);
             writer.scale.keys.push(0.0, [bone.scale; 3]);
@@ -456,7 +481,6 @@ fn decode(
 /// A bone's local transform in glTF's frame: the decoded pose, moved by the root motion on a
 /// root bone. Non-finite values (only a damaged file has them) become zero.
 fn local(pose: &BonePose, motion: Option<([f32; 3], f32)>, root: bool) -> Keyframe {
-    let finite = |v: f32| if v.is_finite() { v } else { 0.0 };
     let (mut position, mut rotation) = (pose.position, pose.rotation);
     if let Some((offset, degrees)) = motion {
         let half = degrees.to_radians() * 0.5;
@@ -465,7 +489,7 @@ fn local(pose: &BonePose, motion: Option<([f32; 3], f32)>, root: bool) -> Keyfra
         position = [0, 1, 2].map(|i| moved[i] + offset[i]);
         rotation = multiply(yaw, rotation);
     }
-    let (translation, rotation) = to_gltf(position.map(finite), rotation.map(finite), root);
+    let (translation, rotation) = bone_to_gltf(position, rotation, root);
     (translation, rotation, [finite(pose.scale); 3])
 }
 
@@ -484,22 +508,21 @@ fn frame_rate(desc: &Value) -> Result<f32> {
 }
 
 fn frame_blocks(data: Option<&Value>, budget: &mut Budget) -> Result<Vec<FrameBlock>> {
-    let index = |v: &Value, key| {
-        v.get(key)
-            .and_then(Value::as_u64)
-            .and_then(|i| usize::try_from(i).ok())
-    };
-    let list = array(data.and_then(|d| d.get("m_frameblockArray")));
+    let list = data.map_or(&[][..], |d| d.array("m_frameblockArray"));
     Budget::spend(&mut budget.work, list.len(), "frame blocks")?;
     list.iter()
         .map(|b| {
-            let raw_segments = array(b.get("m_segmentIndexArray"));
+            let raw_segments = b.array("m_segmentIndexArray");
             Budget::spend(&mut budget.work, raw_segments.len(), "frame block segments")?;
             let segments = raw_segments
                 .iter()
-                .map(|s| s.as_u64().and_then(|s| usize::try_from(s).ok()))
+                .map(Value::as_usize)
                 .collect::<Option<Vec<_>>>();
-            match (index(b, "m_nStartFrame"), index(b, "m_nEndFrame"), segments) {
+            match (
+                b.usize_field("m_nStartFrame"),
+                b.usize_field("m_nEndFrame"),
+                segments,
+            ) {
                 (Some(start), Some(end), Some(segments)) => Ok(FrameBlock {
                     start,
                     end,
@@ -512,7 +535,7 @@ fn frame_blocks(data: Option<&Value>, budget: &mut Budget) -> Result<Vec<FrameBl
 }
 
 fn movements(desc: &Value, budget: &mut Budget) -> Result<Vec<Movement>> {
-    let list = array(desc.get("m_movementArray"));
+    let list = desc.array("m_movementArray");
     Budget::spend(&mut budget.work, list.len(), "movements")?;
     list.iter()
         .map(|m| {

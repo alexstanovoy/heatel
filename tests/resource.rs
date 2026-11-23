@@ -6,34 +6,13 @@
 use heatel::physics::Physics;
 use heatel::{Budget, Resource, kv3};
 
-fn words(values: &[u32]) -> Vec<u8> {
-    values.iter().flat_map(|v| v.to_le_bytes()).collect()
-}
+#[path = "support/wire_builders.rs"]
+mod wire;
+use wire::{resource, words};
 
 /// The offset from the field at `field` to `to`, as the formats write it.
 fn rel(to: usize, field: usize) -> u32 {
     (to as i64 - field as i64) as i32 as u32
-}
-
-/// A compiled resource of `blocks`; each block's offset counts from its own field.
-fn resource(blocks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
-    let table_end = 16 + 12 * blocks.len();
-    let size = table_end + blocks.iter().map(|(_, b)| b.len()).sum::<usize>();
-    let mut out = words(&[size as u32]);
-    out.extend_from_slice(&12u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&words(&[8, blocks.len() as u32]));
-    let mut at = table_end;
-    for (kind, block) in blocks {
-        let field = out.len() + 4;
-        out.extend_from_slice(*kind);
-        out.extend_from_slice(&words(&[rel(at, field), block.len() as u32]));
-        at += block.len();
-    }
-    for (_, block) in blocks {
-        out.extend_from_slice(block);
-    }
-    out
 }
 
 #[test]

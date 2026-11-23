@@ -67,7 +67,7 @@ impl Material {
                 })
                 .sum::<usize>();
         }
-        let shader = data.get("m_shaderName").and_then(Value::as_str);
+        let shader = data.str_field("m_shaderName");
         text += shader.map_or(0, str::len);
         if text > MAX_TEXT {
             return Err(malformed(
@@ -78,12 +78,8 @@ impl Material {
         Ok(Self {
             path: path.to_owned(),
             name: file.trim_end_matches(".vmat").to_owned(),
-            shader: data
-                .get("m_shaderName")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            ints: dictionary(params(data, "m_intParams", "m_nValue"), |v| v.as_i64()),
+            shader: shader.unwrap_or_default().to_owned(),
+            ints: dictionary(params(data, "m_intParams", "m_nValue"), Value::as_i64),
             floats: dictionary(params(data, "m_floatParams", "m_flValue"), |v| {
                 v.as_f64().map(|f| f as f32)
             }),
@@ -162,14 +158,9 @@ fn dictionary<T>(
 
 /// `(name, value)` pairs of one of the material's parameter lists, in file order.
 fn params<'a>(data: &'a Value, list: &str, value: &str) -> Vec<(String, &'a Value)> {
-    data.get(list)
-        .and_then(Value::as_array)
-        .unwrap_or_default()
+    data.array(list)
         .iter()
-        .filter_map(|p| {
-            let name = p.get("m_name")?.as_str()?.to_owned();
-            Some((name, p.get(value)?))
-        })
+        .filter_map(|p| Some((p.str_field("m_name")?.to_owned(), p.get(value)?)))
         .collect()
 }
 
@@ -183,11 +174,11 @@ fn extras(path: &str, data: &Value) -> Json {
     };
     json!({
         "Name": path,
-        "ShaderName": data.get("m_shaderName").and_then(Value::as_str).unwrap_or_default(),
+        "ShaderName": data.str_field("m_shaderName").unwrap_or_default(),
         "IntParams": list("m_intParams", "m_nValue", |v| json!(v.as_i64())),
         "FloatParams": list("m_floatParams", "m_flValue", |v| json!(v.as_f64())),
         "VectorParams": list("m_vectorParams", "m_value", |v| {
-            json!(v.as_array().unwrap_or_default().iter().map(Value::as_f64).collect::<Vec<_>>())
+            json!(v.slice().iter().map(Value::as_f64).collect::<Vec<_>>())
         }),
         "TextureParams": list("m_textureParams", "m_pValue", |v| json!(v.as_str())),
     })

@@ -3,6 +3,7 @@
 //! tangent-space normals. Both are decoded to RGBA8, as the game's tools show them.
 
 use super::format::PixelFormat;
+use crate::budget::Budget;
 use crate::error::Result;
 use crate::resource::Resource;
 
@@ -24,9 +25,9 @@ impl Content {
     /// What the texture compiler was told to do with the image, read from the resource's edit
     /// info: the old `REDI` block lists its special dependencies as plain strings, the new
     /// `RED2` as a KV3 list.
-    pub(super) fn of(resource: &Resource<'_>) -> Result<Self> {
+    pub(super) fn of(resource: &Resource<'_>, budget: &mut Budget) -> Result<Self> {
         let legacy = resource.block(b"REDI");
-        let edit = resource.kv3(b"RED2").transpose()?;
+        let edit = resource.kv3_in(b"RED2", budget).transpose()?;
         let dependencies = edit
             .as_ref()
             .and_then(|doc| doc.root.get("m_SpecialDependencies"))

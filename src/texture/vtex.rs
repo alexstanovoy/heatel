@@ -49,7 +49,12 @@ impl Texture {
     /// Like [`parse`](Self::parse), charging decoded level and PNG buffers to `budget` before
     /// allocating.
     pub fn parse_in(bytes: &[u8], budget: &mut Budget) -> Result<Self> {
-        let resource = Resource::parse(bytes)?;
+        Self::from_resource_in(&Resource::parse(bytes)?, budget)
+    }
+
+    /// Reads the texture from an already-parsed `vtex_c` [`Resource`], charging decoded level and
+    /// PNG buffers to `budget` before allocating.
+    pub fn from_resource_in(resource: &Resource<'_>, budget: &mut Budget) -> Result<Self> {
         let data = resource
             .block(b"DATA")
             .ok_or_else(|| malformed(WHAT, "no DATA block"))?;
@@ -80,7 +85,7 @@ impl Texture {
                 }
             }
             Stored::Plain(PixelFormat::Bc3) => {
-                texture.decode_content(Content::of(&resource)?, budget)?;
+                texture.decode_content(Content::of(resource, budget)?, budget)?;
             }
             _ => {}
         }

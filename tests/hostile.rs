@@ -20,30 +20,10 @@ use heatel::{Model, Resource, SliceSource, Source, Vpk, kv3};
 
 #[path = "common/kv3.rs"]
 mod fixture;
+#[path = "support/wire_builders.rs"]
+mod wire;
 use fixture::{K, kv3_file, s};
-
-/// A compiled resource of `blocks`; each block's offset counts from its own field.
-fn resource(blocks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
-    let table_end = 16 + 12 * blocks.len();
-    let size = table_end + blocks.iter().map(|(_, b)| b.len()).sum::<usize>();
-    let mut out = (size as u32).to_le_bytes().to_vec();
-    out.extend(12u16.to_le_bytes());
-    out.extend(0u16.to_le_bytes());
-    out.extend(8u32.to_le_bytes());
-    out.extend((blocks.len() as u32).to_le_bytes());
-    let mut at = table_end;
-    for (kind, block) in blocks {
-        let field = out.len() + 4;
-        out.extend(*kind);
-        out.extend(((at - field) as u32).to_le_bytes());
-        out.extend((block.len() as u32).to_le_bytes());
-        at += block.len();
-    }
-    for (_, block) in blocks {
-        out.extend(block);
-    }
-    out
-}
+use wire::{resource, vpk_v1 as package};
 
 /// A buffer description of a mesh's `CTRL` entry: `count` elements of `stride` bytes in block
 /// `block`, with `fields` (semantic, format, offset).
@@ -307,32 +287,27 @@ fn operator(class: &str, members: Vec<(&'static str, K)>) -> K {
 }
 
 #[test]
-fn distance_constraints_read_the_shell_and_its_control_point() {
-    let system = particle_lists(vec![(
+fn distance_constraints_and_center_setters_validate_inputs_and_bounds() {
+    use heatel::particle::{Constraint, ControlPoint, FloatInput, Transform, VectorInput};
+
+    let shell = particle_lists(vec![(
         "m_Constraints",
         vec![operator(
             "C_OP_ConstrainDistance",
             vec![
                 ("m_fMinDistance", K::Float(5.0)),
                 ("m_fMaxDistance", K::Float(75.0)),
-                (
-                    "m_CenterOffset",
-                    K::Arr(vec![K::Float(5.0), K::Float(-7.0), K::Float(50.0)]),
-                ),
+                ("m_CenterOffset", particle_vector([5.0, -7.0, 50.0])),
                 ("m_nControlPointNumber", K::Int(63)),
                 ("m_bGlobalCenter", K::Bool(true)),
             ],
         )],
     )])
     .expect("distance constraint");
-    assert!(
-        system.unsupported_classes().is_empty(),
-        "the shell is simulated"
-    );
+    assert!(shell.unsupported_classes().is_empty());
     #[cfg(feature = "serde")]
     {
-        let json =
-            serde_json::to_value(&system.constraints[0].class).expect("serialized definition");
+        let json = serde_json::to_value(&shell.constraints[0].class).expect("serialized");
         assert_eq!(
             json["Distance"]["min_distance"],
             serde_json::json!({"Literal": 5.0})
@@ -351,29 +326,8 @@ fn distance_constraints_read_the_shell_and_its_control_point() {
             serde_json::json!({"Literal": [5.0, -7.0, 50.0]})
         );
     }
-}
 
-#[test]
-fn distance_constraints_reject_control_points_outside_the_table() {
-    let result = particle_lists(vec![(
-        "m_Constraints",
-        vec![operator(
-            "C_OP_ConstrainDistance",
-            vec![("m_nControlPointNumber", K::Int(64))],
-        )],
-    )]);
-    assert_eq!(
-        result
-            .expect_err("control point 64 is outside the table")
-            .to_string(),
-        "vpcf: m_nControlPointNumber 64 is outside -1..=63"
-    );
-}
-
-#[test]
-fn distance_constraints_read_collection_inputs_without_losing_the_transform() {
-    use heatel::particle::{Constraint, ControlPoint, FloatInput, Transform, VectorInput};
-    let system = particle_lists(vec![(
+    let collection = particle_lists(vec![(
         "m_Constraints",
         vec![operator(
             "C_OP_ConstrainDistance",
@@ -391,16 +345,13 @@ fn distance_constraints_read_collection_inputs_without_losing_the_transform() {
                 ),
                 (
                     "m_CenterOffset",
-                    K::Obj(vec![(
-                        "m_vLiteralValue",
-                        K::Arr(vec![K::Float(1.0), K::Float(2.0), K::Float(3.0)]),
-                    )]),
+                    K::Obj(vec![("m_vLiteralValue", particle_vector([1.0, 2.0, 3.0]))]),
                 ),
             ],
         )],
     )])
     .expect("collection inputs");
-    let Constraint::Distance(d) = &system.constraints[0].class else {
+    let Constraint::Distance(d) = &collection.constraints[0].class else {
         panic!("distance");
     };
     assert_eq!(d.max_distance, FloatInput::Literal(75.0));
@@ -413,120 +364,72 @@ fn distance_constraints_read_collection_inputs_without_losing_the_transform() {
         }
     );
     assert_eq!(d.center_offset, VectorInput::Literal([1.0, 2.0, 3.0]));
-}
 
-#[test]
-fn center_control_points_read_offsets_averaging_and_parent_scope() {
-    let system = particle_lists(vec![(
+    let center = particle_lists(vec![(
         "m_PreEmissionOperators",
         vec![operator(
             "C_OP_SetControlPointToCenter",
             vec![
                 ("m_nCP1", K::Int(2)),
-                (
-                    "m_vecCP1Pos",
-                    K::Arr(vec![K::Float(1.0), K::Float(-2.0), K::Float(3.0)]),
-                ),
+                ("m_vecCP1Pos", particle_vector([1.0, -2.0, 3.0])),
                 ("m_bUseAvgParticlePos", K::Bool(true)),
                 ("m_nSetParent", s("PARTICLE_SET_PARENT_ROOT")),
             ],
         )],
     )])
     .expect("centre control point");
-    assert!(
-        system.unsupported_classes().is_empty(),
-        "the centre setter must be simulated"
-    );
+    assert!(center.unsupported_classes().is_empty());
     #[cfg(feature = "serde")]
     {
-        let json = serde_json::to_value(&system.pre_emission[0].class).expect("serialized setter");
+        let json = serde_json::to_value(&center.pre_emission[0].class).expect("serialized");
         let value = &json["SetControlPointToCenter"];
         assert_eq!(value["control_point"], 2);
         assert_eq!(value["offset"], serde_json::json!([1.0, -2.0, 3.0]));
         assert_eq!(value["average"], true);
         assert_eq!(value["target"], "Root");
     }
-}
 
-#[test]
-fn center_control_points_reject_an_output_past_the_table() {
-    let result = particle_lists(vec![(
-        "m_PreEmissionOperators",
-        vec![operator(
+    for (list, class, key) in [
+        (
+            "m_Constraints",
+            "C_OP_ConstrainDistance",
+            "m_nControlPointNumber",
+        ),
+        (
+            "m_PreEmissionOperators",
             "C_OP_SetControlPointToCenter",
-            vec![("m_nCP1", K::Int(64))],
-        )],
-    )]);
-    assert_eq!(
-        result.expect_err("CP64").to_string(),
-        "vpcf: m_nCP1 64 is outside -1..=63"
-    );
+            "m_nCP1",
+        ),
+    ] {
+        let err = particle_lists(vec![(list, vec![operator(class, vec![(key, K::Int(64))])])])
+            .expect_err("CP64")
+            .to_string();
+        assert_eq!(err, format!("vpcf: {key} 64 is outside -1..=63"));
+    }
 }
 
-/// A particle system's lists are bounded (Dota's have up to ~30 functions), and every
-/// function's members are checked: a control point past the 64 a system has, a number that is
-/// not finite or a member of the wrong kind is an error, not a value the simulation trips on.
+/// A particle system's lists and members are bounded and checked across operators, pre-emission
+/// operators, renderers, initializers, and constraints.
 #[test]
-fn a_particle_system_of_hostile_functions_is_an_error() {
+fn hostile_particle_lists_and_members_are_errors() {
     let movement = || operator("C_OP_BasicMovement", vec![]);
-    assert!(particle_system((0..1000).map(|_| movement()).collect()).is_err());
     let lock = |cp: i64| {
         operator(
             "C_OP_PositionLock",
             vec![("m_nControlPointNumber", K::Int(cp))],
         )
     };
-    assert!(particle_system(vec![lock(64)]).is_err());
-    let fade = |time: f64| {
-        operator(
-            "C_OP_FadeOutSimple",
-            vec![("m_flFadeOutTime", K::Float(time))],
-        )
-    };
-    assert!(particle_system(vec![fade(f64::NAN)]).is_err());
-    assert!(particle_system(vec![fade(f64::INFINITY)]).is_err());
-    assert!(
-        particle_system(vec![operator(
-            "C_OP_FadeOutSimple",
-            vec![("m_flFadeOutTime", s("long"))]
-        )])
-        .is_err()
-    );
-    let fine = particle_system(vec![movement(), lock(63), fade(0.5)]).unwrap();
-    assert_eq!(fine.operators.len(), 3);
-    assert!(matches!(
-        fine.operators[2].class,
-        Operator::FadeOutSimple { time: 0.5, .. }
-    ));
-}
-
-/// The pre-emission operators and the projected renderers' materials are bounded and checked
-/// like every other list and member.
-#[test]
-fn a_particle_system_of_hostile_pre_emission_operators_or_materials_is_an_error() {
-    let stop = |duration: K| operator("C_OP_StopAfterCPDuration", vec![("m_flDuration", duration)]);
-    let pre = |list: Vec<K>| particle_lists(vec![("m_PreEmissionOperators", list)]);
-    assert!(pre((0..1000).map(|_| stop(K::Float(1.0))).collect()).is_err());
-    assert!(pre(vec![stop(K::Float(f64::NAN))]).is_err());
+    let fade = |v: K| operator("C_OP_FadeOutSimple", vec![("m_flFadeOutTime", v)]);
+    let stop = |v: K| operator("C_OP_StopAfterCPDuration", vec![("m_flDuration", v)]);
     let projected = |path: String| {
-        let material = K::Obj(vec![("m_hMaterial", K::Str(path))]);
         operator(
             "C_OP_RenderProjected",
-            vec![("m_vecProjectedMaterials", K::Arr(vec![material]))],
+            vec![(
+                "m_vecProjectedMaterials",
+                K::Arr(vec![K::Obj(vec![("m_hMaterial", K::Str(path))])]),
+            )],
         )
     };
-    let renderers = |list: Vec<K>| particle_lists(vec![("m_Renderers", list)]);
-    assert!(renderers(vec![projected("m/".repeat(1000))]).is_err());
-    let fine = pre(vec![stop(K::Float(2.0))]).unwrap();
-    assert!(fine.unsupported_classes().is_empty());
-    let decal = renderers(vec![projected("materials/d.vmat".to_owned())]).unwrap();
-    assert!(decal.materials().any(|m| m == "materials/d.vmat"));
-}
-
-/// The model renderers' lists and paths, the hitbox sets of the functions on a model and the
-/// constraints are bounded and checked like every other list and member.
-#[test]
-fn a_particle_system_of_hostile_models_or_constraints_is_an_error() {
     let models = |count: usize, path: String| {
         let entry = || K::Obj(vec![("m_model", K::Str(path.clone()))]);
         operator(
@@ -534,69 +437,84 @@ fn a_particle_system_of_hostile_models_or_constraints_is_an_error() {
             vec![("m_ModelList", K::Arr((0..count).map(|_| entry()).collect()))],
         )
     };
-    let renderers = |list: Vec<K>| particle_lists(vec![("m_Renderers", list)]);
-    assert!(renderers(vec![models(1000, "models/m.vmdl".to_owned())]).is_err());
-    assert!(renderers(vec![models(1, "m/".repeat(1000))]).is_err());
     let on_model = |set: String| {
         operator(
             "C_INIT_CreateOnModel",
             vec![("m_HitboxSetName", K::Str(set))],
         )
     };
-    let initializers = |list: Vec<K>| particle_lists(vec![("m_Initializers", list)]);
-    assert!(initializers(vec![on_model("s".repeat(1000))]).is_err());
-    let plane = |radius: K| operator("C_OP_PlanarConstraint", vec![("m_flRadiusScale", radius)]);
-    let constraints = |list: Vec<K>| particle_lists(vec![("m_Constraints", list)]);
-    assert!(constraints((0..1000).map(|_| plane(K::Float(1.0))).collect()).is_err());
-    assert!(constraints(vec![plane(K::Float(f64::NAN))]).is_err());
-    let fine = renderers(vec![models(2, "models/m.vmdl".to_owned())]).unwrap();
-    assert_eq!(fine.models().count(), 2);
-    assert!(
-        constraints(vec![plane(K::Float(1.0))])
-            .unwrap()
-            .unsupported_classes()
-            .is_empty()
-    );
-    assert!(
-        initializers(vec![on_model("default".to_owned())])
-            .unwrap()
-            .unsupported_classes()
-            .is_empty()
-    );
-}
+    let plane = |r: K| operator("C_OP_PlanarConstraint", vec![("m_flRadiusScale", r)]);
 
-/// A package (VPK v1) of `files`, their bytes after the directory tree, and where each starts.
-fn package<'a>(files: &[(&'a str, Vec<u8>)]) -> (Vec<u8>, HashMap<u64, &'a str>) {
-    let (mut tree, mut data, mut starts): (Vec<u8>, Vec<u8>, Vec<(u64, &str)>) =
-        (Vec::new(), Vec::new(), Vec::new());
-    for (path, bytes) in files {
-        let (dir, file) = path.rsplit_once('/').unwrap();
-        let (name, ext) = file.rsplit_once('.').unwrap();
-        for part in [ext, dir, name] {
-            tree.extend(part.as_bytes());
-            tree.push(0);
-        }
-        tree.extend(crc32fast::hash(bytes).to_le_bytes());
-        tree.extend([0, 0, 0xFF, 0x7F]);
-        tree.extend((data.len() as u32).to_le_bytes());
-        tree.extend((bytes.len() as u32).to_le_bytes());
-        tree.extend([0xFF, 0xFF, 0, 0]);
-        starts.push((data.len() as u64, *path));
-        data.extend(bytes);
+    for (list, items) in [
+        ("m_Operators", (0..1000).map(|_| movement()).collect()),
+        ("m_Operators", vec![lock(64)]),
+        ("m_Operators", vec![fade(K::Float(f64::NAN))]),
+        ("m_Operators", vec![fade(K::Float(f64::INFINITY))]),
+        ("m_Operators", vec![fade(s("long"))]),
+        (
+            "m_PreEmissionOperators",
+            (0..1000).map(|_| stop(K::Float(1.0))).collect(),
+        ),
+        ("m_PreEmissionOperators", vec![stop(K::Float(f64::NAN))]),
+        ("m_Renderers", vec![projected("m/".repeat(1000))]),
+        (
+            "m_Renderers",
+            vec![models(1000, "models/m.vmdl".to_owned())],
+        ),
+        ("m_Renderers", vec![models(1, "m/".repeat(1000))]),
+        ("m_Initializers", vec![on_model("s".repeat(1000))]),
+        (
+            "m_Constraints",
+            (0..1000).map(|_| plane(K::Float(1.0))).collect(),
+        ),
+        ("m_Constraints", vec![plane(K::Float(f64::NAN))]),
+    ] {
+        assert!(particle_lists(vec![(list, items)]).is_err(), "{list}");
     }
-    tree.push(0);
-    let mut out = Vec::new();
-    for word in [0x55AA_1234, 1, tree.len() as u32] {
-        out.extend(u32::to_le_bytes(word));
-    }
-    let data_start = (12 + tree.len()) as u64;
-    out.extend(tree);
-    out.extend(data);
-    let starts = starts
-        .into_iter()
-        .map(|(at, p)| (data_start + at, p))
-        .collect();
-    (out, starts)
+
+    let fine = particle_system(vec![movement(), lock(63), fade(K::Float(0.5))]).unwrap();
+    assert_eq!(fine.operators.len(), 3);
+    assert!(matches!(
+        fine.operators[2].class,
+        Operator::FadeOutSimple { time: 0.5, .. }
+    ));
+    assert!(
+        particle_lists(vec![("m_PreEmissionOperators", vec![stop(K::Float(2.0))])])
+            .unwrap()
+            .unsupported_classes()
+            .is_empty()
+    );
+    let decal = particle_lists(vec![(
+        "m_Renderers",
+        vec![projected("materials/d.vmat".to_owned())],
+    )])
+    .unwrap();
+    assert!(decal.materials().any(|m| m == "materials/d.vmat"));
+    assert_eq!(
+        particle_lists(vec![(
+            "m_Renderers",
+            vec![models(2, "models/m.vmdl".to_owned())]
+        )])
+        .unwrap()
+        .models()
+        .count(),
+        2
+    );
+    assert!(
+        particle_lists(vec![("m_Constraints", vec![plane(K::Float(1.0))])])
+            .unwrap()
+            .unsupported_classes()
+            .is_empty()
+    );
+    assert!(
+        particle_lists(vec![(
+            "m_Initializers",
+            vec![on_model("default".to_owned())]
+        )])
+        .unwrap()
+        .unsupported_classes()
+        .is_empty()
+    );
 }
 
 /// An install that counts the reads at each offset of its one package.
@@ -1059,80 +977,23 @@ fn synthetic_flagbearer_orientation() -> System {
     .expect("synthetic KV3 definitions")
 }
 
-#[test]
-fn response_rules_reject_a_non_array_response_group_list() {
-    let data = K::Obj(vec![("m_ResponseGroups", s("not an array"))]);
-    let file = resource(&[(b"DATA", kv3_file(&data))]);
-    let resource = Resource::parse(&file).expect("synthetic resource");
-    let error =
-        heatel::talker::read_response_rules(&resource, &mut heatel::Budget::default()).unwrap_err();
-    assert_eq!(error.to_string(), "vrr: m_ResponseGroups is not an array");
+fn response_rules_from(data: &K) -> heatel::Result<heatel::talker::ResponseRules> {
+    let file = resource(&[(b"DATA", kv3_file(data))]);
+    heatel::talker::read_response_rules(
+        &Resource::parse(&file).expect("synthetic resource"),
+        &mut heatel::Budget::default(),
+    )
 }
 
-#[test]
-fn response_rules_read_a_line_respeak_delay() {
-    let data = K::Obj(vec![(
-        "m_ResponseGroups",
-        K::Arr(vec![K::Obj(vec![(
-            "m_responses",
-            K::Arr(vec![K::Obj(vec![
-                ("m_type", s("SPEAK")),
-                ("m_value", s("example")),
-                (
-                    "m_params",
-                    K::Obj(vec![("m_respeakdelay.start", K::Float(42.0))]),
-                ),
-            ])]),
-        )])]),
-    )]);
-    let file = resource(&[(b"DATA", kv3_file(&data))]);
-    let resource = Resource::parse(&file).expect("synthetic resource");
-    let rules = heatel::talker::read_response_rules(&resource, &mut heatel::Budget::default())
-        .expect("response rules");
-    assert_eq!(rules.groups[0].responses[0].respeak_delay, Some(42.0));
-}
-
-#[test]
-fn response_rules_read_nested_delay_ranges() {
-    let data = K::Obj(vec![(
-        "m_ResponseGroups",
-        K::Arr(vec![K::Obj(vec![(
-            "m_responses",
-            K::Arr(vec![K::Obj(vec![
-                ("m_type", s("SPEAK")),
-                (
-                    "m_params",
-                    K::Obj(vec![(
-                        "m_respeakdelay",
-                        K::Obj(vec![("start", K::Float(42.0))]),
-                    )]),
-                ),
-            ])]),
-        )])]),
-    )]);
-    let file = resource(&[(b"DATA", kv3_file(&data))]);
-    let resource = Resource::parse(&file).expect("synthetic resource");
-    let rules = heatel::talker::read_response_rules(&resource, &mut heatel::Budget::default())
-        .expect("response rules");
-    assert_eq!(rules.groups[0].responses[0].respeak_delay, Some(42.0));
-}
-
-/// A response rules file of one group whose embedded rule is `rule` and whose responses are
-/// `responses`.
 fn response_rules_of(rule: K, responses: K) -> heatel::Result<heatel::talker::ResponseRules> {
-    let data = K::Obj(vec![(
+    response_rules_from(&K::Obj(vec![(
         "m_ResponseGroups",
         K::Arr(vec![K::Obj(vec![
             ("m_name", s("group")),
             ("m_responses", responses),
             ("m_pEmbeddedRule", rule),
         ])]),
-    )]);
-    let file = resource(&[(b"DATA", kv3_file(&data))]);
-    heatel::talker::read_response_rules(
-        &Resource::parse(&file).expect("synthetic resource"),
-        &mut heatel::Budget::default(),
-    )
+    )]))
 }
 
 fn one_line() -> K {
@@ -1142,43 +1003,70 @@ fn one_line() -> K {
     ])])
 }
 
-/// A rule whose requirements do not read would match every situation: it is an error, not a
-/// rule without requirements.
 #[test]
-fn response_rules_reject_requirements_that_are_not_a_list() {
-    let rule = K::Obj(vec![("m_name", s("rule")), ("m_Requirements", s("Move"))]);
-    let error = response_rules_of(rule, one_line()).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "vrr: group's m_Requirements is not an array"
-    );
-}
+fn response_rules_read_delays_and_reject_malformed_lists_and_entries() {
+    for params in [
+        K::Obj(vec![("m_respeakdelay.start", K::Float(42.0))]),
+        K::Obj(vec![(
+            "m_respeakdelay",
+            K::Obj(vec![("start", K::Float(42.0))]),
+        )]),
+    ] {
+        let data = K::Obj(vec![(
+            "m_ResponseGroups",
+            K::Arr(vec![K::Obj(vec![(
+                "m_responses",
+                K::Arr(vec![K::Obj(vec![
+                    ("m_type", s("SPEAK")),
+                    ("m_value", s("example")),
+                    ("m_params", params),
+                ])]),
+            )])]),
+        )]);
+        let rules = response_rules_from(&data).expect("response rules");
+        assert_eq!(rules.groups[0].responses[0].respeak_delay, Some(42.0));
+    }
 
-/// A requirement that is not a name is an error, not a requirement dropped.
-#[test]
-fn response_rules_reject_a_requirement_that_is_not_a_name() {
-    let rule = K::Obj(vec![
-        ("m_name", s("rule")),
-        ("m_Requirements", K::Arr(vec![s("Move"), K::Int(7)])),
-    ]);
-    let error = response_rules_of(rule, one_line()).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "vrr: group's m_Requirements holds something that is not a name"
-    );
-}
+    let err =
+        response_rules_from(&K::Obj(vec![("m_ResponseGroups", s("not an array"))])).unwrap_err();
+    assert_eq!(err.to_string(), "vrr: m_ResponseGroups is not an array");
 
-#[test]
-fn response_rules_reject_responses_that_are_not_a_list() {
-    let rule = K::Obj(vec![
-        ("m_name", s("rule")),
-        ("m_Requirements", K::Arr(vec![s("Move")])),
-    ]);
-    let error = response_rules_of(rule, s("line")).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "vrr: group's m_responses is not an array"
-    );
+    let valid_rule = || {
+        K::Obj(vec![
+            ("m_name", s("rule")),
+            ("m_Requirements", K::Arr(vec![s("Move")])),
+        ])
+    };
+    for (rule, responses, expected) in [
+        (
+            K::Obj(vec![("m_name", s("rule")), ("m_Requirements", s("Move"))]),
+            one_line(),
+            "vrr: group's m_Requirements is not an array",
+        ),
+        (
+            K::Obj(vec![
+                ("m_name", s("rule")),
+                ("m_Requirements", K::Arr(vec![s("Move"), K::Int(7)])),
+            ]),
+            one_line(),
+            "vrr: group's m_Requirements holds something that is not a name",
+        ),
+        (
+            valid_rule(),
+            s("line"),
+            "vrr: group's m_responses is not an array",
+        ),
+        (
+            valid_rule(),
+            K::Arr(vec![K::Int(0)]),
+            "vrr: group's m_responses holds something that is not a response",
+        ),
+    ] {
+        assert_eq!(
+            response_rules_of(rule, responses).unwrap_err().to_string(),
+            expected
+        );
+    }
 }
 
 /// A legacy KV3 compressed with LZ4: a table of `count` empty strings, then an empty object.
@@ -1296,21 +1184,6 @@ fn lz4_kv3(stored: Vec<u8>) -> Vec<u8> {
     out.extend((body.len() as u32).to_le_bytes());
     out.extend(lz4_flex::block::compress(body));
     out
-}
-
-/// A response that is not an object says nothing a rule can play: refused, not read as an
-/// empty response.
-#[test]
-fn response_rules_reject_a_response_that_is_not_an_object() {
-    let rule = K::Obj(vec![
-        ("m_name", s("rule")),
-        ("m_Requirements", K::Arr(vec![s("Move")])),
-    ]);
-    let error = response_rules_of(rule, K::Arr(vec![K::Int(0)])).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "vrr: group's m_responses holds something that is not a response"
-    );
 }
 
 /// The rules' own lists are charged as they are built: a small file of a million empty

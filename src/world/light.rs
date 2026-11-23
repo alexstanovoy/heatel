@@ -85,8 +85,7 @@ pub fn lighting(entities: &[Value]) -> Result<Lighting> {
     let turn = entities
         .iter()
         .find(|e| class(e) == "env_fog_controller")
-        .and_then(|e| e.get("foglerptime")?.as_f64())
-        .filter(|t| t.is_finite())
+        .and_then(|e| e.get("foglerptime")?.finite_f64())
         .ok_or_else(|| malformed("lighting", "no fog controller"))?;
     let sun = light("color", "light_scale")?;
     let ambient = light("ambient_color", "ambient_scale")?;
@@ -98,9 +97,9 @@ pub fn lighting(entities: &[Value]) -> Result<Lighting> {
 fn weight(light: &Value) -> Option<f64> {
     let at = numbers(light, "origin")?;
     let distance = at.first()?.hypot(*at.get(1)?);
-    let inner = light.get("inner_radius")?.as_f64()?;
-    let outer = light.get("outer_radius")?.as_f64()?;
-    if !distance.is_finite() || !inner.is_finite() || !outer.is_finite() {
+    let inner = light.get("inner_radius")?.finite_f64()?;
+    let outer = light.get("outer_radius")?.finite_f64()?;
+    if !distance.is_finite() {
         return None;
     }
     let raw = (outer - distance) / (outer - inner).max(f64::EPSILON);
@@ -110,10 +109,9 @@ fn weight(light: &Value) -> Option<f64> {
 /// The numbers of the array (or the one number) `key`.
 fn numbers(entity: &Value, key: &str) -> Option<Vec<f64>> {
     let value = entity.get(key)?;
-    let finite = |v: &Value| v.as_f64().filter(|n| n.is_finite());
     match value.as_array() {
-        Some(list) => list.iter().map(finite).collect(),
-        None => Some(vec![finite(value)?]),
+        Some(list) => list.iter().map(Value::finite_f64).collect(),
+        None => Some(vec![value.finite_f64()?]),
     }
 }
 

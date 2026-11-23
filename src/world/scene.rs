@@ -13,7 +13,7 @@ use super::export::SkippedModel;
 use super::place::{self, Affine, IDENTITY};
 use crate::budget::Budget;
 use crate::error::{Error, Result, malformed};
-use crate::export::read_from;
+use crate::export::read_from_in;
 use crate::kv3::Value;
 use crate::material::{GltfMaterial, Images, Material, convert_world, linear_tint};
 use crate::model::Model;
@@ -27,8 +27,10 @@ use crate::vpk::Vpk;
 pub(super) const OVERLAY_LIFT: f32 = 0.01;
 /// Most nodes, meshes and materials a world may have.
 const MAX_ITEMS: usize = 1 << 20;
-/// Most bytes the scene's names and materials may take; Dota's map takes ~2 MB.
-const MAX_SCENE_BYTES: usize = 256 << 20;
+/// Most bytes the scene's retained state (or any single file read) may take.
+pub(super) const MAX_SCENE_BYTES: usize = 256 << 20;
+/// Most cumulative bytes read and decoded across an entire world export.
+pub(super) const MAX_WORLD_READ_BYTES: u64 = 8 << 30;
 
 /// Smallest and largest corner.
 pub(super) type Bounds = [[f32; 3]; 2];
@@ -165,8 +167,11 @@ pub(super) struct Builder<'a, S: Source + ?Sized> {
     /// Materials read so far by path, each read once whatever tints it is drawn with.
     material_files: HashMap<String, WorldMaterial>,
     sets: usize,
-    /// What the names and materials take.
+    /// Retained scene state (names, meshes, materials, infos, skipped models).
     budget: Budget,
+    /// Cumulative bytes read and decoded across transient files and models.
+    total_read: u64,
+    max_read: u64,
 }
 
 impl<'a, S: Source + ?Sized> Builder<'a, S> {
@@ -194,18 +199,31 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
             material_files: HashMap::new(),
             sets: 0,
             budget: Budget::with_limit("world", MAX_SCENE_BYTES),
+            total_read: 0,
+            max_read: MAX_WORLD_READ_BYTES,
         }
     }
 
-    /// The scene of the world at `path` (`maps/.../world.vwrld_c`).
-    pub(super) fn build(mut self, path: &str) -> Result<Scene> {
+    fn charge_read(&mut self, bytes: usize) -> Result<()> {
+        self.total_read = self.total_read.saturating_add(bytes as u64);
+        if self.total_read > self.max_read {
+            return Err(malformed(
+                "world",
+                format!("reading more than {} bytes", self.max_read),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The scene of the world at `path` (`maps/.../world.vwrld_c`) and cumulative read bytes.
+    pub(super) fn build(mut self, path: &str) -> Result<(Scene, u64)> {
         let world = self
             .data(path)?
             .ok_or_else(|| Error::NotFound(path.to_owned()))?;
         // A node or lump listed again would place the same things again: each is read once.
         let mut read = HashSet::new();
-        for node in array(world.get("m_worldNodes")) {
-            let Some(prefix) = node.get("m_worldNodePrefix").and_then(Value::as_str) else {
+        for node in world.array("m_worldNodes") {
+            let Some(prefix) = node.str_field("m_worldNodePrefix") else {
                 continue;
             };
             let file = format!("{prefix}.vwnod_c");
@@ -215,7 +233,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                 self.world_node(&node)?;
             }
         }
-        for lump in array(world.get("m_entityLumps")) {
+        for lump in world.array("m_entityLumps") {
             let Some(lump) = lump.as_str() else {
                 continue;
             };
@@ -226,29 +244,35 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                 self.entities(&lump)?;
             }
         }
-        Ok(self.scene)
+        Ok((self.scene, self.total_read))
     }
 
     /// The decoded `DATA` of file `path`; `None` when no package has it.
-    fn data(&self, path: &str) -> Result<Option<Value>> {
-        let bytes = match read_from(self.src, self.packages, path) {
+    fn data(&mut self, path: &str) -> Result<Option<Value>> {
+        let mut file_budget = Budget::with_limit("world", MAX_SCENE_BYTES);
+        let bytes = match read_from_in(self.src, self.packages, path, &mut file_budget) {
             Ok(bytes) => bytes,
             Err(Error::NotFound(_)) => return Ok(None),
-            Err(e) => return Err(e),
+            Err(e) => {
+                self.charge_read(file_budget.spent())?;
+                return Err(e);
+            }
         };
-        let resource = Resource::parse(&bytes)?;
-        let data = resource
-            .data()
-            .ok_or_else(|| malformed("world", format!("{path} has no DATA")))??;
-        Ok(Some(data))
+        let decoded = Resource::parse(&bytes).and_then(|resource| {
+            resource
+                .data_in(&mut file_budget)
+                .ok_or_else(|| malformed("world", format!("{path} has no DATA")))?
+        });
+        self.charge_read(file_budget.spent())?;
+        Ok(Some(decoded?))
     }
 
     fn world_node(&mut self, node: &Value) -> Result<()> {
         self.budget
-            .slots::<(usize, usize, &str)>(array(node.get("m_materialOverrides")).len())?;
+            .slots::<(usize, usize, &str)>(node.array("m_materialOverrides").len())?;
         let overrides = world_material_overrides(node)?;
-        for (object_index, object) in array(node.get("m_sceneObjects")).iter().enumerate() {
-            let Some(model) = object.get("m_renderableModel").and_then(Value::as_str) else {
+        for (object_index, object) in node.array("m_sceneObjects").iter().enumerate() {
+            let Some(model) = object.str_field("m_renderableModel") else {
                 continue;
             };
             let Some(model) = self.model(model)? else {
@@ -263,18 +287,18 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                 model,
                 &affine,
                 linear_tint(tint),
-                object.get("m_skin").and_then(Value::as_str),
+                object.str_field("m_skin"),
                 overrides.get(&object_index),
             )?;
         }
-        for object in array(node.get("m_aggregateSceneObjects")) {
-            let Some(model) = object.get("m_renderableModel").and_then(Value::as_str) else {
+        for object in node.array("m_aggregateSceneObjects") {
+            let Some(model) = object.str_field("m_renderableModel") else {
                 continue;
             };
             let Some(model) = self.model(model)? else {
                 continue;
             };
-            let fragments = array(object.get("m_aggregateMeshes"));
+            let fragments = object.array("m_aggregateMeshes");
             if fragments
                 .first()
                 .is_some_and(|f| f.get("m_nDrawCallIndex").is_none())
@@ -299,7 +323,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
             ));
         }
         let name = stem(&self.scene.models[model]).to_owned();
-        let transforms = array(object.get("m_fragmentTransforms"));
+        let transforms = object.array("m_fragmentTransforms");
         let (mut next_transform, set) = (0, self.new_set());
         for (id, fragment) in fragments.iter().enumerate() {
             let mut affine = IDENTITY;
@@ -323,9 +347,7 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
                 None => [1.0; 4],
             };
             let draw_call = fragment
-                .get("m_nDrawCallIndex")
-                .and_then(Value::as_u64)
-                .and_then(|i| usize::try_from(i).ok())
+                .usize_field("m_nDrawCallIndex")
                 .filter(|&i| i < self.infos[model].meshes[0].draw_calls.len())
                 .ok_or_else(|| malformed("world", format!("{name}: fragment draw call")))?;
             let mesh = self.make_mesh(MeshSpec {
@@ -372,9 +394,11 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
             return Ok(known);
         }
         self.budget.bytes(path.len())?;
-        let decoded = read_from(self.src, self.packages, &compiled(path))
-            .and_then(|bytes| Model::read(&Resource::parse(&bytes)?))
+        let mut model_budget = Budget::with_limit("world", MAX_SCENE_BYTES);
+        let decoded = read_from_in(self.src, self.packages, &compiled(path), &mut model_budget)
+            .and_then(|bytes| Model::read_in(&Resource::parse(&bytes)?, &mut model_budget))
             .and_then(|model| info(&model));
+        self.charge_read(model_budget.spent())?;
         let index = match decoded {
             Ok(info) => {
                 self.infos.push(info);
@@ -572,9 +596,9 @@ impl<'a, S: Source + ?Sized> Builder<'a, S> {
 
 /// The editor marks navigation surfaces, triggers and other tool geometry with this attribute.
 fn is_tool_material(data: &Value) -> bool {
-    array(data.get("m_intAttributes")).iter().any(|attribute| {
-        attribute.get("m_name").and_then(Value::as_str) == Some("tools.toolsmaterial")
-    })
+    data.array("m_intAttributes")
+        .iter()
+        .any(|attribute| attribute.str_field("m_name") == Some("tools.toolsmaterial"))
 }
 
 /// What the scene needs of a model.
@@ -673,18 +697,14 @@ fn check_count(count: usize, what: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn array(value: Option<&Value>) -> &[Value] {
-    value.and_then(Value::as_array).unwrap_or_default()
-}
-
 fn vector4(value: Option<&Value>) -> [f32; 4] {
-    let items = array(value);
+    let items = value.map_or(&[][..], Value::slice);
     std::array::from_fn(|i| items.get(i).and_then(Value::as_f64).unwrap_or(0.0) as f32)
 }
 
 /// The scene object index addresses the regular placements, separately from aggregates.
 fn world_material_overrides(node: &Value) -> Result<HashMap<usize, PlacementOverrides<'_>>> {
-    let rows = array(node.get("m_materialOverrides"));
+    let rows = node.array("m_materialOverrides");
     check_count(rows.len(), "material overrides")?;
     let mut by_object = HashMap::<usize, PlacementOverrides<'_>>::new();
     for row in rows {
@@ -695,8 +715,7 @@ fn world_material_overrides(node: &Value) -> Result<HashMap<usize, PlacementOver
                 .ok_or_else(|| malformed("world", format!("material override has no valid {key}")))
         };
         let material = row
-            .get("m_pMaterial")
-            .and_then(Value::as_str)
+            .str_field("m_pMaterial")
             .filter(|path| !path.is_empty())
             .ok_or_else(|| malformed("world", "material override has no material"))?;
         let object = index("m_nSceneObjectIndex")? as usize;
@@ -737,53 +756,68 @@ mod tests {
     use crate::kv3::Object;
     use crate::source::SliceSource;
 
-    #[test]
-    fn world_meshes_keep_visible_draw_calls_and_omit_editor_surfaces() {
-        let mut attribute = Object::default();
-        attribute.push(
-            "m_name".to_owned(),
-            Value::String("tools.toolsmaterial".to_owned()),
-        );
-        attribute.push("m_nValue".to_owned(), Value::Int(1));
-        let mut data = Object::default();
-        data.push(
-            "m_intAttributes".to_owned(),
-            Value::Array(vec![Value::Object(attribute)]),
-        );
-        assert!(is_tool_material(&Value::Object(data)));
-        let source = SliceSource::<Vec<u8>>::default();
-        let texture_name = |name: &str| name.to_owned();
-        let mut builder = Builder::new(&source, &[], &texture_name);
-        builder
-            .material_files
-            .insert("tool.vmat".to_owned(), WorldMaterial::Tool);
-        builder.infos.push(ModelInfo {
+    fn mesh_info(name: &str, draw_calls: Vec<DrawCall>) -> ModelInfo {
+        ModelInfo {
             meshes: vec![MeshInfo {
-                name: "surface".to_owned(),
-                draw_calls: ["tool.vmat", "visible.vmat"]
-                    .map(|material| DrawCall {
-                        vertices: 0,
-                        material: material.to_owned(),
-                        tint: None,
-                    })
-                    .into(),
+                name: name.into(),
+                draw_calls,
                 buffers: vec![[None, None]],
             }],
             groups: Vec::new(),
-        });
-        let mesh = |draw_calls| MeshSpec {
+        }
+    }
+
+    fn mesh_spec<'a>(
+        name: &str,
+        draw_calls: std::ops::Range<usize>,
+        tint: [f32; 4],
+        overrides: Option<&'a PlacementOverrides<'a>>,
+    ) -> MeshSpec<'a> {
+        MeshSpec {
             model: 0,
             mesh: 0,
-            name: "surface".to_owned(),
+            name: name.into(),
             set: 0,
             draw_calls,
-            tint: [1.0; 4],
+            tint,
             skin: None,
-            overrides: None,
-        };
-        assert!(builder.make_mesh(mesh(0..1)).unwrap().is_none());
+            overrides,
+        }
+    }
+
+    #[test]
+    fn world_meshes_keep_visible_draw_calls_and_omit_editor_surfaces() {
+        let data = override_row(&[(
+            "m_intAttributes",
+            Value::Array(vec![override_row(&[
+                ("m_name", Value::String("tools.toolsmaterial".into())),
+                ("m_nValue", Value::Int(1)),
+            ])]),
+        )]);
+        assert!(is_tool_material(&data));
+        let source = SliceSource::<Vec<u8>>::default();
+        let mut builder = Builder::new(&source, &[], &str::to_owned);
+        builder
+            .material_files
+            .insert("tool.vmat".into(), WorldMaterial::Tool);
+        builder.infos.push(mesh_info(
+            "surface",
+            ["tool.vmat", "visible.vmat"]
+                .map(|m| DrawCall {
+                    vertices: 0,
+                    material: m.into(),
+                    tint: None,
+                })
+                .into(),
+        ));
+        assert!(
+            builder
+                .make_mesh(mesh_spec("surface", 0..1, [1.0; 4], None))
+                .unwrap()
+                .is_none()
+        );
         let kept = builder
-            .make_mesh(mesh(0..2))
+            .make_mesh(mesh_spec("surface", 0..2, [1.0; 4], None))
             .unwrap()
             .expect("a visible surface");
         let draws = &builder.scene.meshes[kept].primitives;
@@ -842,13 +876,8 @@ mod tests {
                 world_material_overrides(&override_table(vec![override_row(&fields)])).is_err()
             );
         }
-        for invalid in [Value::Int(-1), Value::String("".into())] {
+        for (index, invalid) in [(2, Value::Int(-1)), (3, Value::String(String::new()))] {
             let mut fields = valid.clone();
-            let index = if matches!(invalid, Value::Int(_)) {
-                2
-            } else {
-                3
-            };
             fields[index].1 = invalid;
             assert!(
                 world_material_overrides(&override_table(vec![override_row(&fields)])).is_err()
@@ -887,30 +916,17 @@ mod tests {
         builder
             .material_files
             .insert("tool.vmat".into(), WorldMaterial::Tool);
-        builder.infos.push(ModelInfo {
-            meshes: vec![MeshInfo {
-                name: "large".into(),
-                draw_calls: (0..DRAWS)
-                    .map(|_| DrawCall {
-                        vertices: 0,
-                        material: "tool.vmat".into(),
-                        tint: None,
-                    })
-                    .collect(),
-                buffers: vec![[None, None]],
-            }],
-            groups: Vec::new(),
-        });
-        let result = builder.make_mesh(MeshSpec {
-            model: 0,
-            mesh: 0,
-            name: "large".into(),
-            set: 0,
-            draw_calls: 0..DRAWS,
-            tint: [1.0; 4],
-            skin: None,
-            overrides: overrides.get(&0),
-        });
+        builder.infos.push(mesh_info(
+            "large",
+            (0..DRAWS)
+                .map(|_| DrawCall {
+                    vertices: 0,
+                    material: "tool.vmat".into(),
+                    tint: None,
+                })
+                .collect(),
+        ));
+        let result = builder.make_mesh(mesh_spec("large", 0..DRAWS, [1.0; 4], overrides.get(&0)));
         assert!(result.unwrap_err().to_string().contains("more than it may"));
     }
 
@@ -924,29 +940,16 @@ mod tests {
             "surface.vmat".into(),
             WorldMaterial::Visible(Rc::new(material)),
         );
-        builder.infos.push(ModelInfo {
-            meshes: vec![MeshInfo {
-                name: "surface".into(),
-                draw_calls: vec![DrawCall {
-                    vertices: 0,
-                    material: "surface.vmat".into(),
-                    tint: Some([0.5, 0.5, 0.5, 0.5]),
-                }],
-                buffers: vec![[None, None]],
+        builder.infos.push(mesh_info(
+            "surface",
+            vec![DrawCall {
+                vertices: 0,
+                material: "surface.vmat".into(),
+                tint: Some([0.5; 4]),
             }],
-            groups: Vec::new(),
-        });
+        ));
         builder
-            .make_mesh(MeshSpec {
-                model: 0,
-                mesh: 0,
-                name: "surface".into(),
-                set: 0,
-                draw_calls: 0..1,
-                tint: linear_tint([0.5, 0.5, 0.5, 0.5]),
-                skin: None,
-                overrides: None,
-            })
+            .make_mesh(mesh_spec("surface", 0..1, linear_tint([0.5; 4]), None))
             .unwrap();
         let color = builder.scene.materials[0].gltf.base_color;
         for channel in &color[..3] {
@@ -968,5 +971,53 @@ mod tests {
                 .to_string()
                 .contains("different counts")
         );
+    }
+
+    #[test]
+    fn world_read_budget_is_separate_from_scene_budget_and_never_swallowed() {
+        let mut tree = Vec::new();
+        let mut data = Vec::new();
+        for i in 0..5 {
+            let payload = [0u8; 1024];
+            tree.extend(b"vmdl_c\0m\0");
+            tree.extend(format!("m{i}\0").as_bytes());
+            tree.extend(0u32.to_le_bytes());
+            tree.extend(0u16.to_le_bytes());
+            tree.extend(0x7FFFu16.to_le_bytes());
+            tree.extend((data.len() as u32).to_le_bytes());
+            tree.extend((payload.len() as u32).to_le_bytes());
+            tree.extend(0xFFFFu16.to_le_bytes());
+            tree.extend(b"\0\0");
+            data.extend(payload);
+        }
+        tree.push(0);
+        let mut vpk_bytes = Vec::new();
+        for w in [
+            0x55AA_1234u32,
+            2,
+            tree.len() as u32,
+            data.len() as u32,
+            0,
+            0,
+            0,
+        ] {
+            vpk_bytes.extend(w.to_le_bytes());
+        }
+        vpk_bytes.extend(tree);
+        vpk_bytes.extend(data);
+        let mut src = SliceSource::default();
+        src.insert("p_dir.vpk", vpk_bytes);
+        let vpk = Vpk::open(&src, "p_dir.vpk").unwrap();
+        let pkgs = [&vpk];
+        let mut builder = Builder::new(&src, &pkgs, &str::to_owned);
+        builder.budget = Budget::with_limit("world", 2048);
+        builder.max_read = 5000;
+        for i in 0..4 {
+            assert!(builder.model(&format!("m/m{i}.vmdl")).unwrap().is_none());
+        }
+        assert!(builder.total_read > 2048 && builder.scene.skipped_models.len() == 4);
+        let err = builder.model("m/m4.vmdl").unwrap_err().to_string();
+        assert!(err.contains("reading more than 5000 bytes"), "{err}");
+        assert_eq!(builder.scene.skipped_models.len(), 4);
     }
 }

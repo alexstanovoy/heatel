@@ -87,12 +87,12 @@ pub(crate) fn read(
     ntro_at: usize,
     data_at: usize,
     refs: &HashMap<u64, String>,
+    budget: &mut Budget,
 ) -> Result<Value> {
     // One budget for the manifest and the tree: lists and strings may overlap, so a small file
     // can describe far more than it holds.
-    let mut budget = Budget::named("NTRO");
-    let structs = read_structs(file, ntro_at, &mut budget)?;
-    let enums = read_enums(file, ntro_at, &mut budget)?;
+    let structs = read_structs(file, ntro_at, budget)?;
+    let enums = read_enums(file, ntro_at, budget)?;
     let root = structs
         .first()
         .ok_or_else(|| malformed("NTRO", "no structs"))?;
@@ -234,7 +234,7 @@ struct Reader<'a> {
     by_id: HashMap<u32, &'a DiskStruct>,
     enums: HashMap<(u32, i32), String>,
     refs: &'a HashMap<u64, String>,
-    budget: Budget,
+    budget: &'a mut Budget,
 }
 
 impl<'a> Reader<'a> {
@@ -244,7 +244,7 @@ impl<'a> Reader<'a> {
 
     /// A string written as an offset at `at`, charged.
     fn string_at(&mut self, at: usize) -> Result<Value> {
-        let text = offset_string(self.file, &mut self::at(self.file, at)?, &mut self.budget)?;
+        let text = offset_string(self.file, &mut self::at(self.file, at)?, self.budget)?;
         Ok(Value::String(text))
     }
 

@@ -408,28 +408,42 @@ mod tests {
     }
 
     #[test]
-    fn linux_finds_dota_in_a_second_library_of_the_native_steam() {
-        let tree = Tree::new("linux");
+    fn steam_layouts_find_dota_across_os_libraries() {
+        for (name, os, steam_rel, dota_rel) in [
+            ("linux", Os::Linux, "home/.local/share/Steam", "games"),
+            (
+                "flatpak",
+                Os::Linux,
+                "home/.var/app/com.valvesoftware.Steam/.local/share/Steam",
+                "home/.var/app/com.valvesoftware.Steam/.local/share/Steam",
+            ),
+            (
+                "macos",
+                Os::MacOs,
+                "home/Library/Application Support/Steam",
+                "Volumes/External/SteamLibrary",
+            ),
+        ] {
+            let tree = Tree::new(name);
+            let home = tree.0.join("home");
+            let root = tree.0.join(steam_rel);
+            let lib = tree.0.join(dota_rel);
+            tree.list(&root, &[&root, &lib]);
+            let dota = tree.dota(&lib);
+            let found = find_installs(&steam_roots(os, Some(&home), &[]));
+            assert_eq!(folders(&found), vec![dota.clone()], "{name}");
+            assert_eq!(found[0].game, dota.join("game/dota"), "{name}");
+        }
+        let tree = Tree::new("windows");
+        let registered = tree.0.join("Program Files (x86)/Steam");
+        let second = tree.0.join("D/SteamLibrary");
+        let third = tree.0.join("E/Games/Steam");
+        tree.list(&registered, &[&registered, &second, &third]);
+        let dota = tree.dota(&third);
         let home = tree.0.join("home");
-        let root = home.join(".local/share/Steam");
-        let games = tree.0.join("games");
-        tree.list(&root, &[&root, &games]);
-        let dota = tree.dota(&games);
-        let roots = steam_roots(Os::Linux, Some(&home), &[]);
+        tree.dota(&home.join(".local/share/Steam"));
+        let roots = steam_roots(Os::Windows, Some(&home), &[registered]);
         assert_eq!(folders(&find_installs(&roots)), vec![dota]);
-    }
-
-    #[test]
-    fn linux_finds_dota_in_the_flatpak_steam() {
-        let tree = Tree::new("flatpak");
-        let home = tree.0.join("home");
-        let root = home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam");
-        tree.list(&root, &[&root]);
-        let dota = tree.dota(&root);
-        let roots = steam_roots(Os::Linux, Some(&home), &[]);
-        let found = find_installs(&roots);
-        assert_eq!(folders(&found), vec![dota.clone()]);
-        assert_eq!(found[0].game, dota.join("game/dota"));
     }
 
     #[cfg(unix)]
@@ -447,80 +461,38 @@ mod tests {
     }
 
     #[test]
-    fn macos_finds_dota_under_application_support() {
-        let tree = Tree::new("macos");
-        let home = tree.0.join("home");
-        let root = home.join("Library/Application Support/Steam");
-        let external = tree.0.join("Volumes/External/SteamLibrary");
-        tree.list(&root, &[&root, &external]);
-        let dota = tree.dota(&external);
-        let roots = steam_roots(Os::MacOs, Some(&home), &[]);
-        assert_eq!(folders(&find_installs(&roots)), vec![dota]);
-    }
-
-    #[test]
-    fn windows_follows_the_registered_steam_folder_to_every_library() {
-        let tree = Tree::new("windows");
-        let registered = tree.0.join("Program Files (x86)/Steam");
-        let second = tree.0.join("D/SteamLibrary");
-        let third = tree.0.join("E/Games/Steam");
-        tree.list(&registered, &[&registered, &second, &third]);
-        let dota = tree.dota(&third);
-        // A home folder's Linux places are not Windows places.
-        let home = tree.0.join("home");
-        tree.dota(&home.join(".local/share/Steam"));
-        let roots = steam_roots(Os::Windows, Some(&home), &[registered]);
-        assert_eq!(folders(&find_installs(&roots)), vec![dota]);
-    }
-
-    #[test]
-    fn a_windows_library_list_has_its_backslashes_unescaped() {
-        let vdf = br#""libraryfolders"
-{
-	"0"
-	{
-		"path"		"C:\\Program Files (x86)\\Steam"
-		"label"		""
-	}
-	"1"
-	{
-		"path"		"D:\\Games\\Steam \"Library\""
-	}
-}"#;
+    fn library_lists_unescape_handle_old_format_reject_damage_and_cap_count() {
+        let vdf = list_of(&[
+            ("0", Some(r"C:\\Program Files (x86)\\Steam")),
+            ("1", Some(r#"D:\\Games\\Steam \"Library\""#)),
+        ]);
         assert_eq!(
-            library_paths(vdf),
+            library_paths(vdf.as_bytes()),
             vec![
                 PathBuf::from(r"C:\Program Files (x86)\Steam"),
                 PathBuf::from(r#"D:\Games\Steam "Library""#),
             ]
         );
-    }
-
-    #[test]
-    fn an_old_style_library_list_names_its_folders_directly() {
-        let vdf = br#""LibraryFolders" { "TimeNextStatsReport" "1" "ContentStatsID" "2" "1" "D:\\SteamLibrary" }"#;
-        assert_eq!(library_paths(vdf), vec![PathBuf::from(r"D:\SteamLibrary")]);
-    }
-
-    #[test]
-    fn a_damaged_library_list_names_no_library() {
-        for vdf in [
+        let old = br#""LibraryFolders" { "TimeNextStatsReport" "1" "ContentStatsID" "2" "1" "D:\\SteamLibrary" }"#;
+        assert_eq!(library_paths(old), vec![PathBuf::from(r"D:\SteamLibrary")]);
+        for bad in [
             &b"\xff\xfe not text"[..],
             b"{{{{",
             b"\"other\" { \"0\" \"x\" }",
         ] {
-            assert!(library_paths(vdf).is_empty(), "{vdf:?}");
+            assert!(library_paths(bad).is_empty(), "{bad:?}");
         }
-    }
-
-    #[test]
-    fn a_library_list_names_at_most_the_bounded_number_of_libraries() {
-        let mut vdf = String::from("\"libraryfolders\" {");
-        for n in 0..MAX_LIBRARIES * 2 {
-            vdf.push_str(&format!(" \"{n}\" {{ \"path\" \"/l/{n}\" }}"));
-        }
-        vdf.push('}');
-        assert_eq!(library_paths(vdf.as_bytes()).len(), MAX_LIBRARIES);
+        let many: Vec<(String, String)> = (0..MAX_LIBRARIES * 2)
+            .map(|n| (n.to_string(), format!("/l/{n}")))
+            .collect();
+        let pairs: Vec<(&str, Option<&str>)> = many
+            .iter()
+            .map(|(k, p)| (k.as_str(), Some(p.as_str())))
+            .collect();
+        assert_eq!(
+            library_paths(list_of(&pairs).as_bytes()).len(),
+            MAX_LIBRARIES
+        );
     }
 
     /// A library list with one block entry per `(key, path)`; a `None` path leaves `"path"` out.

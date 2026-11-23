@@ -9,10 +9,9 @@
 //! normal delta (and a wrinkle weight).
 
 use crate::budget::Budget;
+use crate::coords::{self, finite};
 use crate::error::{Result, malformed};
 use crate::kv3::Value;
-use crate::model::{array, finite, rotate};
-use crate::vertices::{SCALE, TO_GLTF};
 
 const WHAT: &str = "morph set";
 /// Most texels of a morph set's grid (its vertices), of flexes and of rectangles per flex; a hero
@@ -127,27 +126,9 @@ pub struct MorphSet {
     pub flex: Flex,
 }
 
-fn float(v: Option<&Value>) -> Option<f32> {
-    v.and_then(Value::as_f64)
-        .map(|f| f as f32)
-        .filter(|f| f.is_finite())
-}
-
-fn index(v: Option<&Value>) -> Option<usize> {
-    v.and_then(Value::as_u64)
-        .and_then(|i| usize::try_from(i).ok())
-}
-
 fn four(v: Option<&Value>) -> Result<[f32; 4]> {
-    let items = array(v);
-    let mut out = [0.0; 4];
-    if items.len() != 4 {
-        return Err(malformed(WHAT, "a bundle's range of other than four"));
-    }
-    for (o, i) in out.iter_mut().zip(items) {
-        *o = float(Some(i)).ok_or_else(|| malformed(WHAT, "a bundle's range"))?;
-    }
-    Ok(out)
+    v.and_then(Value::f32_array)
+        .ok_or_else(|| malformed(WHAT, "a bundle's range"))
 }
 
 impl MorphSet {
@@ -159,14 +140,16 @@ impl MorphSet {
     /// rectangle or controller without its numbers, and a rule that reads past the controllers
     /// or flexes. A rule with an operation not known here is left out.
     pub fn read(data: &Value, atlas: &str) -> Result<Self> {
-        let (width, height) = (index(data.get("m_nWidth")), index(data.get("m_nHeight")));
-        let (Some(width), Some(height)) = (width, height) else {
+        let (Some(width), Some(height)) =
+            (data.usize_field("m_nWidth"), data.usize_field("m_nHeight"))
+        else {
             return Err(malformed(WHAT, "no grid size"));
         };
         if width.saturating_mul(height) > MAX_TEXELS {
             return Err(malformed(WHAT, format!("a grid of {width} x {height}")));
         }
-        let bundles = array(data.get("m_bundleTypes"))
+        let bundles = data
+            .array("m_bundleTypes")
             .iter()
             .map(|b| match b.as_str() {
                 Some("MORPH_BUNDLE_TYPE_POSITION_SPEED") => Bundle::PositionSpeed,
@@ -174,7 +157,7 @@ impl MorphSet {
                 _ => Bundle::Other,
             })
             .collect();
-        let datas = array(data.get("m_morphDatas"));
+        let datas = data.array("m_morphDatas");
         if datas.len() > MAX_FLEXES {
             return Err(malformed(WHAT, format!("{} flexes", datas.len())));
         }
@@ -293,10 +276,9 @@ impl MorphSet {
                         source.offsets[c] + source.ranges[c] * f32::from(atlas[at + c]) / 255.0
                     });
                     *slot = match kind {
-                        Bundle::PositionSpeed => rotate(TO_GLTF, delta.map(|d| d * SCALE)),
-                        _ => rotate(TO_GLTF, delta),
-                    }
-                    .map(finite);
+                        Bundle::PositionSpeed => coords::position(delta),
+                        _ => coords::direction(delta),
+                    };
                 }
             }
         }
@@ -306,7 +288,7 @@ impl MorphSet {
 
 /// A flex's rectangles (`m_morphRectDatas`).
 fn rects(data: &Value, grid_width: usize, grid_height: usize) -> Result<Vec<Rect>> {
-    let list = array(data.get("m_morphRectDatas"));
+    let list = data.array("m_morphRectDatas");
     if list.len() > MAX_RECTS {
         return Err(malformed(
             WHAT,
@@ -315,11 +297,8 @@ fn rects(data: &Value, grid_width: usize, grid_height: usize) -> Result<Vec<Rect
     }
     list.iter()
         .map(|r| {
-            let at = (index(r.get("m_nXLeftDst")), index(r.get("m_nYTopDst")));
-            let size = (
-                float(r.get("m_flUWidthSrc")),
-                float(r.get("m_flVHeightSrc")),
-            );
+            let at = (r.usize_field("m_nXLeftDst"), r.usize_field("m_nYTopDst"));
+            let size = (r.f32_field("m_flUWidthSrc"), r.f32_field("m_flVHeightSrc"));
             let ((Some(x), Some(y)), (Some(width), Some(height))) = (at, size) else {
                 return Err(malformed(WHAT, "a rectangle without its place or size"));
             };
@@ -327,11 +306,12 @@ fn rects(data: &Value, grid_width: usize, grid_height: usize) -> Result<Vec<Rect
                 return Err(malformed(WHAT, "a rectangle past the grid"));
             }
             let fraction = |f: f32| (0.0..=1.0).contains(&f);
-            let sources = array(r.get("m_bundleDatas"))
+            let sources = r
+                .array("m_bundleDatas")
                 .iter()
                 .map(|b| {
                     let (Some(u), Some(v)) =
-                        (float(b.get("m_flULeftSrc")), float(b.get("m_flVTopSrc")))
+                        (b.f32_field("m_flULeftSrc"), b.f32_field("m_flVTopSrc"))
                     else {
                         return Err(malformed(WHAT, "a bundle without its place"));
                     };
@@ -365,24 +345,23 @@ impl Flex {
     /// does not know are left out whole (their flex keeps its rest weight); a malformed one is
     /// an error.
     fn read(data: &Value) -> Result<Self> {
-        let descs: Vec<String> = array(data.get("m_FlexDesc"))
+        let descs: Vec<String> = data
+            .array("m_FlexDesc")
             .iter()
-            .map(|d| {
-                d.get("m_szFacs")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned()
-            })
+            .map(|d| d.str_field("m_szFacs").unwrap_or_default().to_owned())
             .collect();
-        let list = array(data.get("m_FlexControllers"));
+        let list = data.array("m_FlexControllers");
         if descs.len() > MAX_FLEXES || list.len() > MAX_CONTROLLERS {
             return Err(malformed(WHAT, "too many flexes or controllers"));
         }
         let controllers = list
             .iter()
             .map(|c| {
-                let name = c.get("m_szName").and_then(Value::as_str);
-                match (name, float(c.get("min")), float(c.get("max"))) {
+                match (
+                    c.str_field("m_szName"),
+                    c.f32_field("min"),
+                    c.f32_field("max"),
+                ) {
                     (Some(name), Some(min), Some(max)) if min <= max => Ok(Controller {
                         name: name.to_owned(),
                         min,
@@ -392,14 +371,14 @@ impl Flex {
                 }
             })
             .collect::<Result<Vec<_>>>()?;
-        let rules_list = array(data.get("m_FlexRules"));
+        let rules_list = data.array("m_FlexRules");
         if rules_list.len() > MAX_FLEXES {
             return Err(malformed(WHAT, "too many flex rules"));
         }
         let mut rules = Vec::new();
         for rule in rules_list {
-            let flex = index(rule.get("m_nFlex")).filter(|&f| f < descs.len());
-            let ops = array(rule.get("m_FlexOps"));
+            let flex = rule.usize_field("m_nFlex").filter(|&f| f < descs.len());
+            let ops = rule.array("m_FlexOps");
             let (Some(flex), true) = (flex, ops.len() <= MAX_OPS) else {
                 return Err(malformed(WHAT, "a rule of no flex, or too long"));
             };

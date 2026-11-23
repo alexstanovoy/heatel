@@ -6,14 +6,10 @@
 use std::collections::HashMap;
 
 use crate::budget::Budget;
+use crate::coords::{self, TO_GLTF, finite, rotate};
 use crate::error::{Result, malformed};
-use crate::model::rotate;
 use crate::vbib::{self, Buffer, Field};
 
-/// Inches to metres.
-pub(crate) const SCALE: f32 = 0.0254;
-/// Source's Z-up frame to glTF's Y-up one: a rotation taking (x, y, z) to (y, z, x).
-pub(crate) const TO_GLTF: [f32; 4] = [-0.5, -0.5, -0.5, 0.5];
 /// How far a normal or tangent may be from unit length before it counts as broken (the glTF
 /// validator's threshold).
 const UNIT_LENGTH: f32 = 0.00674;
@@ -110,13 +106,13 @@ pub(crate) fn convert(
         match (name.as_str(), width) {
             ("POSITION", 3) => {
                 out.positions = values
-                    .map(|v| finite3(position([v[0], v[1], v[2]])))
+                    .map(|v| coords::position([v[0], v[1], v[2]]))
                     .collect();
             }
             ("TANGENT", 4) => out.tangents = Some(values.map(tangent).collect()),
             (uv, 2) if uv.starts_with("TEXCOORD_") => {
                 out.uvs
-                    .push(values.map(|v| [v[0], v[1]].map(finite_or_zero)).collect());
+                    .push(values.map(|v| [v[0], v[1]].map(finite)).collect());
             }
             ("POSITION" | "TANGENT", _) => {
                 return Err(malformed(
@@ -127,7 +123,7 @@ pub(crate) fn convert(
             _ => out.extra.push(Attribute {
                 name,
                 width,
-                values: values.map(|v| v.map(finite_or_zero)).collect(),
+                values: values.map(|v| v.map(finite)).collect(),
             }),
         }
     }
@@ -170,11 +166,6 @@ fn attribute_name(
     }
 }
 
-/// A position in glTF's frame.
-pub(crate) fn position(v: [f32; 3]) -> [f32; 3] {
-    rotate(TO_GLTF, v.map(|c| c * SCALE))
-}
-
 /// A unit vector in glTF's frame; one that is not of unit length becomes straight down.
 fn direction(v: [f32; 3]) -> [f32; 3] {
     let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
@@ -183,22 +174,13 @@ fn direction(v: [f32; 3]) -> [f32; 3] {
     } else {
         v
     };
-    finite3(rotate(TO_GLTF, unit))
+    rotate(TO_GLTF, unit).map(finite)
 }
 
 /// A tangent (w the bitangent's sign) in glTF's frame, fixed as [`direction`] fixes normals.
 fn tangent(t: [f32; 4]) -> [f32; 4] {
     let [x, y, z] = direction([t[0], t[1], t[2]]);
-    [x, y, z, finite_or_zero(t[3])]
-}
-
-/// NaN and infinities become 0, as glTF requires finite values.
-fn finite_or_zero(c: f32) -> f32 {
-    if c.is_finite() { c } else { 0.0 }
-}
-
-fn finite3(v: [f32; 3]) -> [f32; 3] {
-    v.map(finite_or_zero)
+    [x, y, z, finite(t[3])]
 }
 
 fn skin(buffer: &Buffer, table: &[u16], indices: &Field, weight_count: usize) -> Result<Skin> {

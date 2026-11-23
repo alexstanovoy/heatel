@@ -3,8 +3,9 @@
 
 use std::collections::HashMap;
 
-use crate::anim::read_clips_in_place;
-use crate::error::{Error, Result};
+use crate::anim::read_clips_with_ctrl;
+use crate::budget::Budget;
+use crate::error::{Error, Result, malformed};
 use crate::gltf::{GltfOptions, write_glb};
 use crate::material::{Material, Pack};
 use crate::model::Model;
@@ -61,6 +62,19 @@ pub fn read_from(src: &(impl Source + ?Sized), packages: &[&Vpk], path: &str) ->
     vpk.read_file(src, path)
 }
 
+pub(crate) fn read_from_in(
+    src: &(impl Source + ?Sized),
+    packages: &[&Vpk],
+    path: &str,
+    budget: &mut Budget,
+) -> Result<Vec<u8>> {
+    let vpk = packages
+        .iter()
+        .find(|vpk| vpk.get(path).is_some())
+        .ok_or_else(|| Error::NotFound(path.to_owned()))?;
+    vpk.read_file_in(src, path, budget)
+}
+
 /// What [`export_model`] writes besides the model itself.
 #[derive(Clone, Copy)]
 pub struct ModelOptions<'a> {
@@ -101,6 +115,7 @@ fn morph_targets(
     packages: &[&Vpk],
     model: &mut Model,
     meshes: Option<&[&str]>,
+    budget: &mut Budget,
 ) -> Result<()> {
     let kept = model
         .meshes
@@ -110,9 +125,18 @@ fn morph_targets(
         let (Some(set), [vertices]) = (&mesh.morph, mesh.vertices.as_slice()) else {
             continue;
         };
-        let atlas = Texture::parse(&read_from(src, packages, &format!("{}_c", set.atlas))?)?;
+        let atlas = Texture::parse_in(
+            &read_from_in(src, packages, &format!("{}_c", set.atlas), budget)?,
+            budget,
+        )?;
         let size = (atlas.width() as usize, atlas.height() as usize);
-        mesh.targets = set.targets(&atlas.to_rgba8()?, size, vertices.len())?;
+        let rgba_len = size
+            .0
+            .checked_mul(size.1)
+            .and_then(|px| px.checked_mul(4))
+            .ok_or_else(|| malformed("morph set", "atlas size overflow"))?;
+        budget.charge(rgba_len)?;
+        mesh.targets = set.targets_in(&atlas.to_rgba8()?, size, vertices.len(), budget)?;
     }
     Ok(())
 }
@@ -150,15 +174,30 @@ pub fn export_model_in_group(
         texture_uri,
         generator,
     } = *options;
-    let bytes = read_from(src, packages, path)?;
+    let mut budget = Budget::named("export");
+    let bytes = read_from_in(src, packages, path, &mut budget)?;
     let resource = Resource::parse(&bytes)?;
-    let mut model = Model::read(&resource)?;
+    let data = resource
+        .data_in(&mut budget)
+        .ok_or_else(|| malformed("model", "no DATA"))??;
+    let ctrl = resource
+        .kv3_in(b"CTRL", &mut budget)
+        .ok_or_else(|| malformed("model", "no CTRL"))??
+        .root;
+    let mut model = Model::read_parts(&resource, &data, &ctrl, &mut budget)?;
     if let Some(group) = group {
         model.use_material_group(group)?;
     }
-    morph_targets(src, packages, &mut model, meshes)?;
+    morph_targets(src, packages, &mut model, meshes, &mut budget)?;
     let clips = if skeleton {
-        read_clips_in_place(&resource, anims, in_place_activities)?
+        read_clips_with_ctrl(
+            &resource,
+            &data,
+            &ctrl,
+            anims,
+            in_place_activities,
+            &mut budget,
+        )?
     } else {
         Vec::new()
     };
@@ -173,9 +212,9 @@ pub fn export_model_in_group(
         if materials.contains_key(material) || material.is_empty() {
             continue;
         }
-        let bytes = read_from(src, packages, &format!("{material}_c"))?;
+        let bytes = read_from_in(src, packages, &format!("{material}_c"), &mut budget)?;
         let resource = Resource::parse(&bytes)?;
-        if let Some(data) = resource.data() {
+        if let Some(data) = resource.data_in(&mut budget) {
             materials.insert(material.to_owned(), Material::from_vmat(material, &data?)?);
         }
     }

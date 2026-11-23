@@ -4,36 +4,88 @@ mod fixture;
 use fixture::{K, kv3_file, s};
 use heatel::{
     kv3,
-    particle::{Constraint, FloatInput, ParentSet, PreEmission, System, Transform, VectorInput},
+    particle::{
+        Constraint, ControlPoint, ControlPointRemap, EndCap, Field, FloatInput, Initializer,
+        Operator, ParentSet, ParticleNoise, PreEmission, Renderer, System, Transform, VectorInput,
+    },
 };
 
-fn system(fields: Vec<(&'static str, K)>) -> System {
+fn read_system(fields: Vec<(&'static str, K)>) -> Result<System, String> {
     let root = K::Obj(
         [("_class", s("CParticleSystemDefinition"))]
             .into_iter()
             .chain(fields)
             .collect(),
     );
-    System::from_document(&kv3::decode(&kv3_file(&root)).expect("synthetic KV3"))
-        .expect("particle system")
+    let document = kv3::decode(&kv3_file(&root)).map_err(|e| e.to_string())?;
+    System::from_document(&document).map_err(|e| e.to_string())
 }
+
+fn system(fields: Vec<(&'static str, K)>) -> System {
+    read_system(fields).expect("particle system")
+}
+
 fn operator(class: &str, fields: Vec<(&'static str, K)>) -> K {
     K::Obj([("_class", s(class))].into_iter().chain(fields).collect())
 }
 
-fn rigid_attachment(fields: Vec<(&'static str, K)>) -> Result<System, String> {
-    read_system(vec![(
-        "m_Operators",
-        K::Arr(vec![operator("C_OP_MovementRigidAttachToCP", fields)]),
-    )])
+fn with_op(
+    list: &'static str,
+    class: &str,
+    fields: Vec<(&'static str, K)>,
+) -> Vec<(&'static str, K)> {
+    vec![(list, K::Arr(vec![operator(class, fields)]))]
+}
+
+fn literal_input(value: f64) -> K {
+    K::Obj(vec![
+        ("m_nType", s("PF_TYPE_LITERAL")),
+        ("m_flLiteralValue", K::Float(value)),
+    ])
+}
+
+fn distance(fields: Vec<(&'static str, K)>) -> heatel::particle::Distance {
+    let sys = system(with_op("m_Constraints", "C_OP_ConstrainDistance", fields));
+    let Constraint::Distance(distance) = &sys.constraints[0].class else {
+        panic!("distance class")
+    };
+    *distance.clone()
+}
+
+fn sequential_path(
+    class: &str,
+    fields: Vec<(&'static str, K)>,
+) -> heatel::particle::SequentialPath {
+    let sys = system(with_op("m_Initializers", class, fields));
+    let Initializer::CreateSequentialPath(path) = &sys.initializers[0].class else {
+        panic!("{class} is a supported sequential path");
+    };
+    *path.clone()
+}
+
+fn noise_initializer(fields: Vec<(&'static str, K)>) -> Vec<(&'static str, K)> {
+    let input = K::Obj(
+        [("m_nType", s("PF_TYPE_PARTICLE_NOISE"))]
+            .into_iter()
+            .chain(fields)
+            .collect(),
+    );
+    with_op(
+        "m_Initializers",
+        "C_INIT_InitFloat",
+        vec![("m_InputValue", input)],
+    )
 }
 
 #[test]
-fn rigid_attachment_defaults_to_translating_the_previous_position_in_cp0s_basis() {
-    use heatel::particle::{ControlPoint, Field, Operator};
-    let system = rigid_attachment(Vec::new()).expect("the rigid attachment");
+fn rigid_attachment_defaults_and_rejects_invalid_properties() {
+    let sys = system(with_op(
+        "m_Operators",
+        "C_OP_MovementRigidAttachToCP",
+        vec![],
+    ));
     assert_eq!(
-        system.operators[0].class,
+        sys.operators[0].class,
         Operator::RigidAttachToControlPoint {
             control_point: ControlPoint::new(0).unwrap(),
             scale: None,
@@ -42,10 +94,6 @@ fn rigid_attachment_defaults_to_translating_the_previous_position_in_cp0s_basis(
             local: true,
         }
     );
-}
-
-#[test]
-fn rigid_attachment_rejects_invalid_properties_with_the_field_named() {
     for (field, value, detail) in [
         ("m_nControlPointNumber", K::Int(64), "64 is outside -1..=63"),
         ("m_nScaleControlPoint", K::Int(-2), "-2 is outside -1..=63"),
@@ -59,24 +107,19 @@ fn rigid_attachment_rejects_invalid_properties_with_the_field_named() {
         ("m_nFieldOutput", s("wrong"), "is not a particle field"),
         ("m_bOffsetLocal", s("wrong"), "is not a boolean"),
     ] {
-        let error = rigid_attachment(vec![(field, value)]).expect_err("the bad property");
+        let error = read_system(with_op(
+            "m_Operators",
+            "C_OP_MovementRigidAttachToCP",
+            vec![(field, value)],
+        ))
+        .expect_err("the bad property");
         assert_eq!(error, format!("vpcf: {field} {detail}"));
     }
-}
-fn distance(fields: Vec<(&'static str, K)>) -> heatel::particle::Distance {
-    let system = system(vec![(
-        "m_Constraints",
-        K::Arr(vec![operator("C_OP_ConstrainDistance", fields)]),
-    )]);
-    let Constraint::Distance(distance) = &system.constraints[0].class else {
-        panic!("distance class")
-    };
-    *distance.clone()
 }
 
 #[test]
 fn infinite_bounds_preserves_explicit_values_and_the_finite_default() {
-    assert!(!system(Vec::new()).infinite_bounds);
+    assert!(!system(vec![]).infinite_bounds);
     for value in [false, true] {
         assert_eq!(
             system(vec![("m_bInfiniteBounds", K::Bool(value))]).infinite_bounds,
@@ -86,50 +129,29 @@ fn infinite_bounds_preserves_explicit_values_and_the_finite_default() {
 }
 
 #[test]
-fn distance_defaults_keep_the_inner_outer_and_oriented_cp0_contract() {
-    let distance = distance(Vec::new());
-    assert_eq!(distance.min_distance, FloatInput::Literal(0.0));
-    assert_eq!(distance.max_distance, FloatInput::Literal(100.0));
-    let Transform::ControlPoint {
-        control_point,
-        orientation,
-        range_max,
-    } = distance.transform
-    else {
-        panic!("CP0 transform")
-    };
-    assert_eq!(control_point.index(), 0);
-    assert!(
-        orientation,
-        "offsets rotate with the default control-point frame"
+fn distance_defaults_radii_and_transform_contract() {
+    let d = distance(vec![]);
+    assert_eq!(d.min_distance, FloatInput::Literal(0.0));
+    assert_eq!(d.max_distance, FloatInput::Literal(100.0));
+    assert_eq!(
+        d.transform,
+        Transform::ControlPoint {
+            control_point: ControlPoint::new(0).unwrap(),
+            orientation: true,
+            range_max: None,
+        }
     );
-    assert_eq!(range_max, None);
-    assert_eq!(distance.center_offset, VectorInput::Literal([0.0; 3]));
-    assert!(!distance.global_center);
-}
+    assert_eq!(d.center_offset, VectorInput::Literal([0.0; 3]));
+    assert!(!d.global_center);
 
-#[test]
-fn distance_literal_outer_radius_is_at_least_the_inner_radius() {
-    for inner in [-10.0, 10.0] {
+    for (inner, outer, expected) in [(-10.0, 5.0, 10.0), (10.0, 5.0, 10.0), (10.0, -1.0, -1.0)] {
         let shell = distance(vec![
             ("m_fMinDistance", K::Float(inner)),
-            ("m_fMaxDistance", K::Float(5.0)),
+            ("m_fMaxDistance", K::Float(outer)),
         ]);
-        assert_eq!(shell.max_distance, FloatInput::Literal(10.0));
+        assert_eq!(shell.max_distance, FloatInput::Literal(expected));
     }
-    let disabled = self::distance(vec![
-        ("m_fMinDistance", K::Float(10.0)),
-        ("m_fMaxDistance", K::Float(-1.0)),
-    ]);
-    assert_eq!(
-        disabled.max_distance,
-        FloatInput::Literal(-1.0),
-        "negative remains the disabled-outer sentinel"
-    );
-}
 
-#[test]
-fn distance_transform_preserves_explicit_orientation_and_control_point() {
     for orientation in [false, true] {
         let shell = distance(vec![(
             "m_nControlPointNumber",
@@ -138,56 +160,45 @@ fn distance_transform_preserves_explicit_orientation_and_control_point() {
                 ("m_bUseOrientation", K::Bool(orientation)),
             ]),
         )]);
-        let Transform::ControlPoint {
-            control_point,
-            orientation: actual,
-            ..
-        } = shell.transform
-        else {
-            panic!("control-point frame")
-        };
-        assert_eq!(control_point.index(), 3);
-        assert_eq!(actual, orientation);
+        assert_eq!(
+            shell.transform,
+            Transform::ControlPoint {
+                control_point: ControlPoint::new(3).unwrap(),
+                orientation,
+                range_max: None,
+            }
+        );
     }
 }
 
 #[test]
-fn center_setter_default_is_cp1_in_its_own_tree_without_an_offset_or_average() {
-    let system = system(vec![(
+fn center_setter_defaults_and_parent_modes() {
+    let sys = system(with_op(
         "m_PreEmissionOperators",
-        K::Arr(vec![operator("C_OP_SetControlPointToCenter", Vec::new())]),
-    )]);
-    let PreEmission::SetControlPointToCenter {
-        control_point,
-        offset,
-        average,
-        target,
-    } = system.pre_emission[0].class
-    else {
-        panic!("center setter")
-    };
-    assert_eq!(control_point.index(), 1);
-    assert_eq!(offset, [0.0; 3]);
-    assert!(!average);
-    assert_eq!(target, ParentSet::Own);
-}
-
-#[test]
-fn center_parent_modes_preserve_numeric_order_and_symbolic_spellings() {
+        "C_OP_SetControlPointToCenter",
+        vec![],
+    ));
+    assert_eq!(
+        sys.pre_emission[0].class,
+        PreEmission::SetControlPointToCenter {
+            control_point: ControlPoint::new(1).unwrap(),
+            offset: [0.0; 3],
+            average: false,
+            target: ParentSet::Own,
+        }
+    );
     for (number, text, expected) in [
         (0, "PARTICLE_SET_PARENT_NO", ParentSet::Own),
         (1, "PARTICLE_SET_PARENT_IMMEDIATE", ParentSet::Parent),
         (2, "PARTICLE_SET_PARENT_ROOT", ParentSet::Root),
     ] {
         for value in [K::Int(number), s(text)] {
-            let system = system(vec![(
+            let sys = system(with_op(
                 "m_PreEmissionOperators",
-                K::Arr(vec![operator(
-                    "C_OP_SetControlPointToCenter",
-                    vec![("m_nSetParent", value)],
-                )]),
-            )]);
-            let PreEmission::SetControlPointToCenter { target, .. } = system.pre_emission[0].class
+                "C_OP_SetControlPointToCenter",
+                vec![("m_nSetParent", value)],
+            ));
+            let PreEmission::SetControlPointToCenter { target, .. } = sys.pre_emission[0].class
             else {
                 panic!("center setter")
             };
@@ -197,80 +208,12 @@ fn center_parent_modes_preserve_numeric_order_and_symbolic_spellings() {
 }
 
 #[test]
-fn sequential_path_v2_reads_its_input_count_and_endpoints() {
-    let system = system(vec![(
-        "m_Initializers",
-        K::Arr(vec![operator(
-            "C_INIT_CreateSequentialPathV2",
-            vec![
-                (
-                    "m_flNumToAssign",
-                    K::Obj(vec![
-                        ("m_nType", s("PF_TYPE_LITERAL")),
-                        ("m_flLiteralValue", K::Float(16.0)),
-                    ]),
-                ),
-                (
-                    "m_PathParams",
-                    K::Obj(vec![
-                        ("m_nStartControlPointNumber", K::Int(3)),
-                        ("m_nEndControlPointNumber", K::Int(4)),
-                    ]),
-                ),
-            ],
-        )]),
-    )]);
-    let heatel::particle::Initializer::CreateSequentialPath(path) = &system.initializers[0].class
-    else {
-        panic!("the V2 sequential path is supported, not omitted");
-    };
-    assert_eq!(path.count, FloatInput::Literal(16.0));
-    assert_eq!(path.path.start.index(), 3);
-    assert_eq!(path.path.end.index(), 4);
-}
-
-#[test]
-fn legacy_sequential_path_scalars_are_preserved_as_literal_inputs() {
-    let system = system(vec![(
-        "m_Initializers",
-        K::Arr(vec![operator(
-            "C_INIT_CreateSequentialPath",
-            vec![
-                ("m_flNumToAssign", K::Float(4.0)),
-                ("m_fMaxDistance", K::Float(2.0)),
-            ],
-        )]),
-    )]);
-    let heatel::particle::Initializer::CreateSequentialPath(path) = &system.initializers[0].class
-    else {
-        panic!("the legacy sequential path is supported");
-    };
-    assert_eq!(path.count, FloatInput::Literal(4.0));
-    assert_eq!(path.max_distance, FloatInput::Literal(2.0));
-}
-
-fn sequential_path(
-    class: &str,
-    fields: Vec<(&'static str, K)>,
-) -> heatel::particle::SequentialPath {
-    let system = system(vec![(
-        "m_Initializers",
-        K::Arr(vec![operator(class, fields)]),
-    )]);
-    let heatel::particle::Initializer::CreateSequentialPath(path) = &system.initializers[0].class
-    else {
-        panic!("{class} is a supported sequential path");
-    };
-    *path.clone()
-}
-
-#[test]
-fn sequential_path_absent_keys_default_to_a_hundred_points_looped_without_offset() {
+fn sequential_path_v1_and_v2_defaults_inputs_and_raw_passthrough() {
     for class in [
         "C_INIT_CreateSequentialPath",
         "C_INIT_CreateSequentialPathV2",
     ] {
-        let path = sequential_path(class, Vec::new());
+        let path = sequential_path(class, vec![]);
         assert_eq!(path.count, FloatInput::Literal(100.0), "{class} count");
         assert_eq!(
             path.max_distance,
@@ -281,11 +224,34 @@ fn sequential_path_absent_keys_default_to_a_hundred_points_looped_without_offset
         assert!(!path.pairs, "{class} pairs");
         assert!(!path.save_offset, "{class} saves no offset");
     }
-}
 
-#[test]
-fn sequential_path_v2_keeps_input_driven_count_and_distance() {
-    let path = sequential_path(
+    let v2 = sequential_path(
+        "C_INIT_CreateSequentialPathV2",
+        vec![
+            ("m_flNumToAssign", literal_input(16.0)),
+            (
+                "m_PathParams",
+                K::Obj(vec![
+                    ("m_nStartControlPointNumber", K::Int(3)),
+                    ("m_nEndControlPointNumber", K::Int(4)),
+                ]),
+            ),
+        ],
+    );
+    assert_eq!(v2.count, FloatInput::Literal(16.0));
+    assert_eq!((v2.path.start.index(), v2.path.end.index()), (3, 4));
+
+    let legacy = sequential_path(
+        "C_INIT_CreateSequentialPath",
+        vec![
+            ("m_flNumToAssign", K::Float(4.0)),
+            ("m_fMaxDistance", K::Float(2.0)),
+        ],
+    );
+    assert_eq!(legacy.count, FloatInput::Literal(4.0));
+    assert_eq!(legacy.max_distance, FloatInput::Literal(2.0));
+
+    let driven = sequential_path(
         "C_INIT_CreateSequentialPathV2",
         vec![
             (
@@ -307,7 +273,7 @@ fn sequential_path_v2_keeps_input_driven_count_and_distance() {
         ],
     );
     assert_eq!(
-        path.count,
+        driven.count,
         FloatInput::Random {
             min: 4.0,
             max: 8.0,
@@ -320,20 +286,13 @@ fn sequential_path_v2_keeps_input_driven_count_and_distance() {
         control_point,
         component,
         ..
-    } = path.max_distance
+    } = driven.max_distance
     else {
-        panic!(
-            "distance follows a control point component: {:?}",
-            path.max_distance
-        );
+        panic!("expected ControlPointComponent: {:?}", driven.max_distance);
     };
-    assert_eq!(control_point.index(), 2);
-    assert_eq!(component, 1);
-}
+    assert_eq!((control_point.index(), component), (2, 1));
 
-#[test]
-fn sequential_path_unsupported_input_kind_is_named_not_read_as_zero() {
-    let path = sequential_path(
+    let unsupported = sequential_path(
         "C_INIT_CreateSequentialPathV2",
         vec![(
             "m_flNumToAssign",
@@ -344,123 +303,46 @@ fn sequential_path_unsupported_input_kind_is_named_not_read_as_zero() {
         )],
     );
     assert_eq!(
-        path.count,
+        unsupported.count,
         FloatInput::Unsupported {
             kind: "PF_TYPE_PARTICLE_DETAIL_LEVEL".to_owned(),
             literal: 7.0,
         }
     );
-}
 
-#[test]
-fn sequential_path_count_and_distance_pass_through_raw_for_the_consumer_to_clamp() {
     for value in [-3.0_f64, 2.5, 1.0e30] {
-        let legacy = sequential_path(
+        let p = sequential_path(
             "C_INIT_CreateSequentialPath",
             vec![
                 ("m_flNumToAssign", K::Float(value)),
                 ("m_fMaxDistance", K::Float(value)),
             ],
         );
-        assert_eq!(legacy.count, FloatInput::Literal(value as f32));
-        assert_eq!(legacy.max_distance, FloatInput::Literal(value as f32));
+        assert_eq!(p.count, FloatInput::Literal(value as f32));
+        assert_eq!(p.max_distance, FloatInput::Literal(value as f32));
     }
 }
 
 #[test]
-fn control_point_component_remaps_are_executable_in_the_imported_program() {
-    let program = system(vec![(
+fn component_remap_fields_defaults_validation_and_flood_limits() {
+    let program = system(with_op(
         "m_PreEmissionOperators",
-        K::Arr(vec![operator(
-            "C_OP_RemapCPtoCP",
-            vec![
-                ("m_nInputControlPoint", K::Int(3)),
-                ("m_nOutputControlPoint", K::Int(9)),
-                ("m_nInputField", K::Int(2)),
-                ("m_nOutputField", K::Int(0)),
-                ("m_flInputMin", K::Float(-4.0)),
-                ("m_flInputMax", K::Float(12.0)),
-                ("m_flOutputMin", K::Float(20.0)),
-                ("m_flOutputMax", K::Float(100.0)),
-                ("m_flInterpRate", K::Float(0.25)),
-            ],
-        )]),
-    )]);
-    assert!(
-        program
-            .unsupported_classes()
-            .into_iter()
-            .all(|class| class != "C_OP_RemapCPtoCP"),
-        "the control-point component remap must be executable, not an unsupported operator"
-    );
-}
-
-#[test]
-fn snapshot_placement_is_an_executable_initializer() {
-    let program = system(vec![(
-        "m_Initializers",
-        K::Arr(vec![operator(
-            "C_INIT_InitSkinnedPositionFromCPSnapshot",
-            vec![
-                ("m_nSnapshotControlPointNumber", K::Int(6)),
-                ("m_nSnapShotStartPoint", K::Int(2)),
-            ],
-        )]),
-    )]);
-    assert!(
-        !program
-            .unsupported_classes()
-            .contains(&"C_INIT_InitSkinnedPositionFromCPSnapshot")
-    );
-}
-
-#[test]
-fn particle_noise_is_typed_without_a_zero_literal_fallback() {
-    let program = system(vec![(
-        "m_Initializers",
-        K::Arr(vec![operator(
-            "C_INIT_InitFloat",
-            vec![(
-                "m_InputValue",
-                K::Obj(vec![
-                    ("m_nType", s("PF_TYPE_PARTICLE_NOISE")),
-                    ("m_flNoiseOutputMin", K::Float(12.0)),
-                    ("m_flNoiseOutputMax", K::Float(24.0)),
-                ]),
-            )],
-        )]),
-    )]);
-    let heatel::particle::Initializer::InitFloat { value, .. } = &program.initializers[0].class
-    else {
-        panic!("float initializer")
-    };
-    assert!(
-        !matches!(value, FloatInput::Unsupported { .. }),
-        "noise must retain its spatial input instead of becoming zero"
-    );
-}
-
-#[test]
-fn component_remap_keeps_distinct_components_ranges_and_timing() {
-    let program = system(vec![(
-        "m_PreEmissionOperators",
-        K::Arr(vec![operator(
-            "C_OP_RemapCPtoCP",
-            vec![
-                ("m_nInputControlPoint", K::Int(3)),
-                ("m_nOutputControlPoint", K::Int(9)),
-                ("m_nInputField", K::Int(2)),
-                ("m_nOutputField", K::Int(0)),
-                ("m_flInputMin", K::Float(-4.0)),
-                ("m_flInputMax", K::Float(12.0)),
-                ("m_flOutputMin", K::Float(20.0)),
-                ("m_flOutputMax", K::Float(100.0)),
-                ("m_flInterpRate", K::Float(0.25)),
-                ("m_bDerivative", K::Bool(true)),
-                ("m_bRunOnce", K::Bool(true)),
-            ],
-        )]),
-    )]);
+        "C_OP_RemapCPtoCP",
+        vec![
+            ("m_nInputControlPoint", K::Int(3)),
+            ("m_nOutputControlPoint", K::Int(9)),
+            ("m_nInputField", K::Int(2)),
+            ("m_nOutputField", K::Int(0)),
+            ("m_flInputMin", K::Float(-4.0)),
+            ("m_flInputMax", K::Float(12.0)),
+            ("m_flOutputMin", K::Float(20.0)),
+            ("m_flOutputMax", K::Float(100.0)),
+            ("m_flInterpRate", K::Float(0.25)),
+            ("m_bDerivative", K::Bool(true)),
+            ("m_bRunOnce", K::Bool(true)),
+        ],
+    ));
+    assert!(!program.unsupported_classes().contains(&"C_OP_RemapCPtoCP"));
     let PreEmission::RemapControlPoint(remap) = &program.pre_emission[0].class else {
         panic!("typed remap")
     };
@@ -479,143 +361,17 @@ fn component_remap_keeps_distinct_components_ranges_and_timing() {
     assert_eq!(remap.interpolation, 0.25);
     assert!(remap.derivative);
     assert!(program.pre_emission[0].timing.run_once);
-}
 
-#[test]
-fn snapshot_and_noise_defaults_keep_resource_and_spatial_controls_distinct() {
-    let program = system(vec![
-        ("m_hSnapshot", s("particles/test.vsnap")),
-        ("m_nSnapshotControlPoint", K::Int(6)),
-        (
-            "m_Initializers",
-            K::Arr(vec![operator(
-                "C_INIT_InitSkinnedPositionFromCPSnapshot",
-                vec![("m_nSnapshotControlPointNumber", K::Int(6))],
-            )]),
-        ),
-    ]);
-    assert_eq!(
-        program.snapshot_file.as_deref(),
-        Some("particles/test.vsnap")
-    );
-    assert_eq!(program.snapshot_control_point.index(), 6);
-    let heatel::particle::Initializer::SkinnedSnapshot {
-        control_point,
-        snapshot_control_point,
-        start,
-        random,
-        set_normal,
-    } = &program.initializers[0].class
-    else {
-        panic!("typed snapshot")
-    };
-    assert_eq!(
-        (
-            control_point.index(),
-            snapshot_control_point.index(),
-            *start
-        ),
-        (0, 6, 0)
-    );
-    assert!(!random);
-    assert!(!set_normal);
-}
-
-#[test]
-fn hostile_component_counts_and_nonfinite_inputs_are_rejected() {
-    for (class, key, value) in [
-        ("C_OP_RemapCPtoCP", "m_nInputField", K::Int(3)),
-        (
-            "C_OP_RemapCPtoCP",
-            "m_flInterpRate",
-            K::Float(f64::INFINITY),
-        ),
-    ] {
-        let root = K::Obj(vec![(
-            "m_PreEmissionOperators",
-            K::Arr(vec![operator(class, vec![(key, value)])]),
-        )]);
-        let doc = kv3::decode(&kv3_file(&root)).expect("synthetic KV3");
-        assert!(System::from_document(&doc).is_err(), "{class} {key}");
-    }
-}
-
-fn read_system(fields: Vec<(&'static str, K)>) -> Result<System, String> {
-    let root = K::Obj(
-        [("_class", s("CParticleSystemDefinition"))]
-            .into_iter()
-            .chain(fields)
-            .collect(),
-    );
-    let document = kv3::decode(&kv3_file(&root)).map_err(|e| e.to_string())?;
-    System::from_document(&document).map_err(|e| e.to_string())
-}
-fn noise_initializer(field: &'static str, value: K) -> Vec<(&'static str, K)> {
-    let input = K::Obj(vec![
-        ("m_nType", s("PF_TYPE_PARTICLE_NOISE")),
-        (field, value),
-    ]);
-    vec![(
-        "m_Initializers",
-        K::Arr(vec![operator(
-            "C_INIT_InitFloat",
-            vec![("m_InputValue", input)],
-        )]),
-    )]
-}
-fn remap(fields: Vec<(&'static str, K)>) -> Vec<(&'static str, K)> {
-    vec![(
+    let default_remap = system(with_op(
         "m_PreEmissionOperators",
-        K::Arr(vec![operator("C_OP_RemapCPtoCP", fields)]),
-    )]
-}
+        "C_OP_RemapCPtoCP",
+        vec![],
+    ));
+    assert_eq!(
+        default_remap.pre_emission[0].class,
+        PreEmission::RemapControlPoint(Box::<ControlPointRemap>::default())
+    );
 
-#[test]
-fn particle_noise_numbers_that_are_not_finite_or_not_f32_are_errors() {
-    for (key, value) in [
-        ("m_flNoiseScale", f64::NAN),
-        ("m_flNoiseScale", f64::INFINITY),
-        ("m_flNoiseOutputMax", f64::NEG_INFINITY),
-        ("m_flNoiseOffset", f64::NAN),
-        ("m_flNoiseScale", 1e300),
-        ("m_flNoiseOutputMin", 3.5e38),
-    ] {
-        let error = read_system(noise_initializer(key, K::Float(value))).expect_err(key);
-        assert!(
-            error.contains(&format!("{key} is not a finite number")),
-            "{key}={value}: {error}"
-        );
-    }
-}
-
-#[test]
-fn particle_noise_octaves_outside_one_to_eight_are_errors() {
-    for octaves in [0, 9, -1, 1 << 40] {
-        let error = read_system(noise_initializer("m_nNoiseOctaves", K::Int(octaves)))
-            .expect_err("octaves");
-        assert!(error.contains("m_nNoiseOctaves"), "{octaves}: {error}");
-    }
-}
-
-#[test]
-fn particle_noise_types_the_reader_does_not_evaluate_stay_named_unsupported() {
-    for kind in ["PF_NOISE_TYPE_VALUE", "PF_NOISE_TYPE_SIMPLEX"] {
-        let system = read_system(noise_initializer("m_nNoiseType", s(kind))).expect("read");
-        assert!(
-            !matches!(
-                &system.initializers[0].class,
-                heatel::particle::Initializer::InitFloat {
-                    value: FloatInput::ParticleNoise(_),
-                    ..
-                }
-            ),
-            "{kind} must not read as Perlin"
-        );
-    }
-}
-
-#[test]
-fn control_point_remaps_with_bad_indices_or_interpolation_are_errors() {
     for (key, value, expected) in [
         (
             "m_nInputControlPoint",
@@ -658,13 +414,15 @@ fn control_point_remaps_with_bad_indices_or_interpolation_are_errors() {
             "m_flInterpRate is not a finite number",
         ),
     ] {
-        let error = read_system(remap(vec![(key, value)])).expect_err(key);
+        let error = read_system(with_op(
+            "m_PreEmissionOperators",
+            "C_OP_RemapCPtoCP",
+            vec![(key, value)],
+        ))
+        .expect_err(key);
         assert!(error.contains(expected), "{key}: {error}");
     }
-}
 
-#[test]
-fn self_referential_remaps_are_read_and_a_flood_of_them_is_an_error() {
     let ops = (0..60)
         .map(|i| {
             operator(
@@ -676,9 +434,10 @@ fn self_referential_remaps_are_read_and_a_flood_of_them_is_an_error() {
             )
         })
         .collect();
-    let system = read_system(vec![("m_PreEmissionOperators", K::Arr(ops))]).expect("60 remaps");
-    assert_eq!(system.pre_emission.len(), 60);
-    assert!(system.validate().is_ok());
+    let self_ref = system(vec![("m_PreEmissionOperators", K::Arr(ops))]);
+    assert_eq!(self_ref.pre_emission.len(), 60);
+    assert!(self_ref.validate().is_ok());
+
     let flood = (0..100_000)
         .map(|_| operator("C_OP_RemapCPtoCP", vec![]))
         .collect();
@@ -687,7 +446,48 @@ fn self_referential_remaps_are_read_and_a_flood_of_them_is_an_error() {
 }
 
 #[test]
-fn snapshot_paths_that_escape_or_are_absolute_are_errors_and_plain_ones_are_kept() {
+fn snapshot_placement_paths_and_start_point_bounds() {
+    let program = system(vec![
+        ("m_hSnapshot", s("particles/test.vsnap")),
+        ("m_nSnapshotControlPoint", K::Int(6)),
+        (
+            "m_Initializers",
+            K::Arr(vec![operator(
+                "C_INIT_InitSkinnedPositionFromCPSnapshot",
+                vec![("m_nSnapshotControlPointNumber", K::Int(6))],
+            )]),
+        ),
+    ]);
+    assert!(
+        !program
+            .unsupported_classes()
+            .contains(&"C_INIT_InitSkinnedPositionFromCPSnapshot")
+    );
+    assert_eq!(
+        program.snapshot_file.as_deref(),
+        Some("particles/test.vsnap")
+    );
+    assert_eq!(program.snapshot_control_point.index(), 6);
+    let Initializer::SkinnedSnapshot {
+        control_point,
+        snapshot_control_point,
+        start,
+        random,
+        set_normal,
+    } = &program.initializers[0].class
+    else {
+        panic!("typed snapshot")
+    };
+    assert_eq!(
+        (
+            control_point.index(),
+            snapshot_control_point.index(),
+            *start
+        ),
+        (0, 6, 0)
+    );
+    assert!(!random && !set_normal);
+
     for path in [
         "../x.vsnap",
         "/abs",
@@ -699,112 +499,119 @@ fn snapshot_paths_that_escape_or_are_absolute_are_errors_and_plain_ones_are_kept
         let error = read_system(vec![("m_hSnapshot", s(path))]).expect_err(path);
         assert!(error.contains("invalid snapshot path"), "{error}");
     }
-    let system = read_system(vec![("m_hSnapshot", s("ok/x.vsnap_c"))]).expect("plain path");
-    assert_eq!(system.snapshot_file.as_deref(), Some("ok/x.vsnap_c"));
-}
+    assert_eq!(
+        system(vec![("m_hSnapshot", s("ok/x.vsnap_c"))])
+            .snapshot_file
+            .as_deref(),
+        Some("ok/x.vsnap_c")
+    );
 
-#[test]
-fn snapshot_start_points_past_the_limit_or_negative_are_errors() {
-    let start = |value: i64| {
-        read_system(vec![(
+    let start_res = |value: i64| {
+        read_system(with_op(
             "m_Initializers",
-            K::Arr(vec![operator(
-                "C_INIT_InitSkinnedPositionFromCPSnapshot",
-                vec![("m_nSnapShotStartPoint", K::Int(value))],
-            )]),
-        )])
+            "C_INIT_InitSkinnedPositionFromCPSnapshot",
+            vec![("m_nSnapShotStartPoint", K::Int(value))],
+        ))
     };
     for value in [-1, 5001, i64::MAX] {
-        assert!(start(value).is_err(), "{value}");
+        assert!(start_res(value).is_err(), "{value}");
     }
-    assert!(start(5000).expect("limit itself").validate().is_ok());
+    assert!(start_res(5000).expect("limit itself").validate().is_ok());
 }
 
 #[test]
-fn default_remaps_and_noise_inputs_equal_what_the_reader_gives_for_absent_keys() {
-    use heatel::particle::{ControlPointRemap, ParticleNoise};
-    let remap = read_system(remap(vec![])).expect("remap");
-    assert_eq!(
-        remap.pre_emission[0].class,
-        PreEmission::RemapControlPoint(Box::<ControlPointRemap>::default())
-    );
-    let noise = read_system(noise_initializer("m_nNoiseOctaves", K::Int(1))).expect("noise");
-    let heatel::particle::Initializer::InitFloat { value, .. } = &noise.initializers[0].class
-    else {
+fn particle_noise_typing_defaults_and_validation() {
+    let program = system(noise_initializer(vec![
+        ("m_flNoiseOutputMin", K::Float(12.0)),
+        ("m_flNoiseOutputMax", K::Float(24.0)),
+    ]));
+    let Initializer::InitFloat { value, .. } = &program.initializers[0].class else {
+        panic!("float initializer")
+    };
+    assert!(!matches!(value, FloatInput::Unsupported { .. }));
+
+    let default_noise = system(noise_initializer(vec![("m_nNoiseOctaves", K::Int(1))]));
+    let Initializer::InitFloat { value, .. } = &default_noise.initializers[0].class else {
         panic!("InitFloat")
     };
     assert_eq!(
         *value,
         FloatInput::ParticleNoise(Box::<ParticleNoise>::default())
     );
+
+    for (key, value) in [
+        ("m_flNoiseScale", f64::NAN),
+        ("m_flNoiseScale", f64::INFINITY),
+        ("m_flNoiseOutputMax", f64::NEG_INFINITY),
+        ("m_flNoiseOffset", f64::NAN),
+        ("m_flNoiseScale", 1e300),
+        ("m_flNoiseOutputMin", 3.5e38),
+    ] {
+        let error = read_system(noise_initializer(vec![(key, K::Float(value))])).expect_err(key);
+        assert!(
+            error.contains(&format!("{key} is not a finite number")),
+            "{key}={value}: {error}"
+        );
+    }
+
+    for octaves in [0, 9, -1, 1 << 40] {
+        let error = read_system(noise_initializer(vec![(
+            "m_nNoiseOctaves",
+            K::Int(octaves),
+        )]))
+        .expect_err("octaves");
+        assert!(error.contains("m_nNoiseOctaves"), "{octaves}: {error}");
+    }
+
+    for kind in ["PF_NOISE_TYPE_VALUE", "PF_NOISE_TYPE_SIMPLEX"] {
+        let sys = system(noise_initializer(vec![("m_nNoiseType", s(kind))]));
+        assert!(
+            !matches!(
+                &sys.initializers[0].class,
+                Initializer::InitFloat {
+                    value: FloatInput::ParticleNoise(_),
+                    ..
+                }
+            ),
+            "{kind} must not read as Perlin"
+        );
+    }
 }
 
 #[test]
-fn renderers_read_their_depth_bias_and_default_to_none() {
-    use heatel::particle::Renderer;
-    let bias = K::Obj(vec![
-        ("m_nType", s("PF_TYPE_LITERAL")),
-        ("m_flLiteralValue", K::Float(5.0)),
-    ]);
-    let renderers = |fields: Vec<(&'static str, K)>| {
-        read_system(vec![(
-            "m_Renderers",
-            K::Arr(vec![operator("C_OP_RenderRopes", fields)]),
-        )])
-        .expect("renderer")
-    };
-    let look = |system: &System| match &system.renderers[0].class {
-        Renderer::Ropes(ropes) => ropes.look.depth_bias.clone(),
-        other => panic!("{other:?}"),
+fn renderer_depth_bias_and_end_cap_states() {
+    let look = |fields: Vec<(&'static str, K)>| {
+        let sys = system(with_op("m_Renderers", "C_OP_RenderRopes", fields));
+        match &sys.renderers[0].class {
+            Renderer::Ropes(ropes) => ropes.look.depth_bias.clone(),
+            other => panic!("{other:?}"),
+        }
     };
     assert_eq!(
-        look(&renderers(vec![("m_flDepthBias", bias)])),
+        look(vec![("m_flDepthBias", literal_input(5.0))]),
         FloatInput::Literal(5.0)
     );
-    assert_eq!(look(&renderers(vec![])), FloatInput::Literal(0.0));
-}
+    assert_eq!(look(vec![]), FloatInput::Literal(0.0));
 
-/// An operator's end cap state is a name, a number from -1, or (as Dota 7.42's packages write it
-/// in chaos_knight_armageddon_ribbon) an empty name, which sets none: the default, always. A name
-/// the reader does not know is still refused, by name.
-#[test]
-fn an_empty_end_cap_state_is_the_default_and_an_unknown_one_is_refused() {
     let end_cap = |state: K| {
-        read_system(vec![(
+        read_system(with_op(
             "m_Operators",
-            K::Arr(vec![operator(
-                "C_OP_Decay",
-                vec![("m_nOpEndCapState", state)],
-            )]),
-        )])
-        .map(|system| system.operators[0].timing.end_cap)
+            "C_OP_Decay",
+            vec![("m_nOpEndCapState", state)],
+        ))
+        .map(|sys| sys.operators[0].timing.end_cap)
     };
-    assert_eq!(end_cap(s("")), Ok(heatel::particle::EndCap::Always));
-    assert_eq!(
-        end_cap(s("PARTICLE_ENDCAP_ENDCAP_ON")),
-        Ok(heatel::particle::EndCap::On)
-    );
+    for (input, expected) in [
+        (s(""), EndCap::Always),
+        (s("PARTICLE_ENDCAP_ENDCAP_ON"), EndCap::On),
+        (K::Int(i64::MIN), EndCap::Always),
+        (K::Int(i64::MAX), EndCap::On),
+    ] {
+        assert_eq!(end_cap(input), Ok(expected));
+    }
     let refused = end_cap(s("PARTICLE_ENDCAP_SOMETIMES")).expect_err("an unknown name");
     assert!(
         refused.contains("m_nOpEndCapState \"PARTICLE_ENDCAP_SOMETIMES\" is not known"),
         "{refused}"
     );
-}
-
-#[test]
-fn numeric_end_cap_limits_are_clamped_without_overflow() {
-    for (number, expected) in [
-        (i64::MIN, heatel::particle::EndCap::Always),
-        (i64::MAX, heatel::particle::EndCap::On),
-    ] {
-        let system = read_system(vec![(
-            "m_Operators",
-            K::Arr(vec![operator(
-                "C_OP_Decay",
-                vec![("m_nOpEndCapState", K::Int(number))],
-            )]),
-        )])
-        .expect("numeric end-cap limits are clamped");
-        assert_eq!(system.operators[0].timing.end_cap, expected);
-    }
 }

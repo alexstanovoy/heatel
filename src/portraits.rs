@@ -1,7 +1,10 @@
 //! The portrait framings of Dota's `scripts/npc/portraits.txt`: where the HUD portrait's camera
 //! and light stand for a model, and the background behind it.
 
+use std::collections::HashMap;
+
 use crate::error::{Result, malformed};
+use crate::kv1::{Token, line_end, next_strict, only_comments};
 
 /// Deepest nesting read; the file has four levels.
 const DEPTH_LIMIT: usize = 8;
@@ -49,56 +52,21 @@ impl Kv {
     }
 }
 
-struct Tokens<'a> {
-    rest: &'a str,
-}
-
-impl<'a> Tokens<'a> {
-    fn next(&mut self) -> Result<Option<(bool, &'a str)>> {
-        loop {
-            self.rest = self.rest.trim_start();
-            if let Some(after) = self.rest.strip_prefix("//") {
-                self.rest = after.split_once('\n').map_or("", |(_, tail)| tail);
-            } else {
-                break;
-            }
-        }
-        let mut chars = self.rest.chars();
-        match chars.next() {
-            None => Ok(None),
-            Some(c @ ('{' | '}')) => {
-                let (head, tail) = self.rest.split_at(c.len_utf8());
-                self.rest = tail;
-                Ok(Some((false, head)))
-            }
-            Some('"') => {
-                let body = &self.rest[1..];
-                let end = body
-                    .find('"')
-                    .ok_or_else(|| malformed("portraits", "an unterminated string"))?;
-                self.rest = &body[end + 1..];
-                Ok(Some((true, &body[..end])))
-            }
-            Some(_) => Err(malformed("portraits", "an unquoted token")),
-        }
-    }
-}
-
-fn block(tokens: &mut Tokens<'_>, depth: usize) -> Result<Vec<(String, Kv)>> {
+fn block(rest: &mut &str, depth: usize) -> Result<Vec<(String, Kv)>> {
     if depth > DEPTH_LIMIT {
         return Err(malformed("portraits", "blocks nested too deep"));
     }
     let mut items = Vec::new();
     loop {
-        let key = match tokens.next()? {
+        let key = match next_strict(rest, "portraits")? {
             None if depth == 0 => return Ok(items),
-            Some((false, "}")) if depth > 0 => return Ok(items),
-            Some((true, key)) => key.to_owned(),
+            Some(Token::Close) if depth > 0 => return Ok(items),
+            Some(Token::Text(key)) => key.to_owned(),
             _ => return Err(malformed("portraits", "a key was expected")),
         };
-        let value = match tokens.next()? {
-            Some((true, text)) => Kv::Text(text.to_owned()),
-            Some((false, "{")) => Kv::Block(block(tokens, depth + 1)?),
+        let value = match next_strict(rest, "portraits")? {
+            Some(Token::Text(text)) => Kv::Text(text.to_owned()),
+            Some(Token::Open) => Kv::Block(block(rest, depth + 1)?),
             _ => return Err(malformed("portraits", "a value was expected")),
         };
         items.push((key, value));
@@ -142,7 +110,7 @@ fn entries(text: &str) -> Result<std::collections::HashMap<String, &str>> {
     while i < bytes.len() {
         match bytes[i] {
             b'/' if bytes.get(i + 1) == Some(&b'/') => {
-                i = text[i..].find('\n').map_or(bytes.len(), |n| i + n);
+                i = line_end(bytes, i);
                 continue;
             }
             b'"' => {
@@ -212,17 +180,9 @@ fn entries(text: &str) -> Result<std::collections::HashMap<String, &str>> {
     ))
 }
 
-/// Whether `text` holds nothing but white space and `//` comments.
-fn only_comments(text: &str) -> bool {
-    text.lines().all(|line| {
-        let line = line.trim_start();
-        line.is_empty() || line.starts_with("//")
-    })
-}
-
 /// An entry's text as KeyValues, or why it is not.
-fn read_entry(body: &str) -> Result<Kv> {
-    Ok(Kv::Block(block(&mut Tokens { rest: body }, 0)?))
+fn read_entry(mut body: &str) -> Result<Kv> {
+    Ok(Kv::Block(block(&mut body, 0)?))
 }
 
 /// A model's entry of the file and the file's `default` entry: what the model's entry leaves out
@@ -544,23 +504,28 @@ pub fn framings(portraits: &[u8], wanted: &[(&str, &str)]) -> Result<Framed> {
         }
         None => None,
     };
+    let mut parsed: HashMap<String, std::result::Result<Kv, String>> = HashMap::new();
     for (label, vmdl) in wanted {
-        let Some(body) = index.get(&vmdl.to_lowercase()) else {
+        let key = vmdl.to_lowercase();
+        let Some(body) = index.get(&key) else {
             continue;
         };
-        let own = match read_entry(body) {
+        let own = match parsed
+            .entry(key)
+            .or_insert_with(|| read_entry(body).map_err(|why| format!("is no KeyValues: {why}")))
+        {
             Ok(kv) => kv,
             Err(why) => {
                 out.refused.push(Refusal {
                     label: (*label).to_owned(),
-                    why: format!("is no KeyValues: {why}"),
+                    why: why.clone(),
                 });
                 continue;
             }
         };
         let entry = Entry {
             label,
-            own: &own,
+            own,
             default: default.as_ref(),
         };
         match entry.framing() {
@@ -686,11 +651,9 @@ mod tests {
         );
     }
 
-    /// An entry of a wanted model saying a number out of its bounds is refused, named with the
-    /// model and the key; one of a model nobody wants is not read.
     #[test]
     fn out_of_bounds_numbers_are_refused_by_model_and_key() {
-        let cases = [
+        for (from, to, key) in [
             (
                 "\"PortraitFOV\" \"25\"",
                 "\"PortraitFOV\" \"25\" \"PortraitFar\" \"8\"",
@@ -736,12 +699,14 @@ mod tests {
                 "\"PortraitAmbientColor\" \"NaN 0 0\"",
                 "PortraitAmbientColor",
             ),
-        ];
-        for (from, to, key) in cases {
+        ] {
             let file = SPARSE.replacen(from, to, 1);
             assert_ne!(file, SPARSE, "{to}");
-            let both = [("s", "models/sparse.vmdl"), ("d", "default")];
-            let read = framings(file.as_bytes(), &both).unwrap();
+            let read = framings(
+                file.as_bytes(),
+                &[("s", "models/sparse.vmdl"), ("d", "default")],
+            )
+            .unwrap();
             let said: Vec<String> = read.refused.iter().map(ToString::to_string).collect();
             assert!(
                 said.len() == 1 && said[0].contains("s: ") && said[0].contains(key),
@@ -758,21 +723,27 @@ mod tests {
         let framed = framings(bright.as_bytes(), &[("s", "models/sparse.vmdl")])
             .unwrap()
             .framings;
-        let tints = framed[0].background.as_ref().unwrap().tints;
         assert_eq!(
-            tints[0],
-            [2.0, 2.0, 0.5],
-            "a tint past 1 brightens, as Dota's do"
+            framed[0].background.as_ref().unwrap().tints[0],
+            [2.0, 2.0, 0.5]
         );
         let first_three = SPARSE.replacen("\"97 114 0\"", "\"97 114 0 1e30 x\"", 1);
         let framed = framings(first_three.as_bytes(), &[("s", "models/sparse.vmdl")])
             .unwrap()
             .framings;
-        assert_eq!(
-            framed[0].light.ambient,
-            [97.0, 114.0, 0.0],
-            "only the first three are read"
-        );
+        assert_eq!(framed[0].light.ambient, [97.0, 114.0, 0.0]);
+    }
+
+    #[test]
+    fn duplicate_wanted_models_reuse_cached_entry() {
+        let read = framings(
+            FILE.as_bytes(),
+            &[("first", "models/a.vmdl"), ("second", "MODELS/A.VMDL")],
+        )
+        .unwrap();
+        assert_eq!(read.framings.len(), 2);
+        assert_eq!(read.framings[0].camera, read.framings[1].camera);
+        assert_eq!(read.framings[0].light, read.framings[1].light);
     }
 
     /// A background that does not read (no material, a tint past 4) is left out alone: the model

@@ -148,31 +148,41 @@ impl<'a> Resource<'a> {
     /// The `DATA` block as a tree: KV3, or the struct an `NTRO` block describes in older
     /// resources. `None` when `DATA` is plain binary (textures, sounds) or absent.
     pub fn data(&self) -> Option<Result<Value>> {
+        self.data_in(&mut Budget::named("DATA"))
+    }
+
+    /// [`Resource::data`], decoded within `budget`.
+    pub fn data_in(&self, budget: &mut Budget) -> Option<Result<Value>> {
         let data = self.blocks.iter().find(|b| &b.kind == b"DATA")?;
         let bytes = self.bytes(data);
         if kv3::is_kv3(bytes) {
-            return Some(kv3::decode(bytes).map(|doc| doc.root));
+            return Some(kv3::decode_in(bytes, budget).map(|doc| doc.root));
         }
         let ntro = self.blocks.iter().find(|b| &b.kind == b"NTRO")?;
-        Some(self.external_refs().and_then(|refs| {
+        Some(self.external_refs_in(budget).and_then(|refs| {
             let names = refs.into_iter().map(|r| (r.id, r.name)).collect();
             ntro::read(
                 self.bytes,
                 ntro.offset as usize,
                 data.offset as usize,
                 &names,
+                budget,
             )
         }))
     }
 
     /// The files this resource references (`RERL`), empty when it has none.
     pub fn external_refs(&self) -> Result<Vec<ExternalRef>> {
+        self.external_refs_in(&mut Budget::named("RERL"))
+    }
+
+    /// [`Resource::external_refs`], charging copied names to `budget`.
+    pub fn external_refs_in(&self, budget: &mut Budget) -> Result<Vec<ExternalRef>> {
         let Some(block) = self.blocks.iter().find(|b| &b.kind == b"RERL") else {
             return Ok(Vec::new());
         };
         // Offsets count from their own field and may point anywhere in the file, so names may
         // overlap: their copies are charged, or a small file would name gigabytes.
-        let mut budget = Budget::named("RERL");
         let mut c = Cursor::new(self.bytes, "RERL");
         c.take(block.offset as usize)?;
         let list_at = c.offset32()?;
@@ -182,6 +192,7 @@ impl<'a> Resource<'a> {
         }
         let mut c = Cursor::new(self.bytes, "RERL");
         c.take(list_at)?;
+        budget.slots::<ExternalRef>(count)?;
         let mut refs = Vec::with_capacity(count);
         for _ in 0..count {
             let id = c.u64()?;
@@ -189,9 +200,7 @@ impl<'a> Resource<'a> {
             c.take(4)?;
             let mut name = Cursor::new(self.bytes, "RERL name");
             name.take(name_at)?;
-            let name = name.cstr()?;
-            budget.bytes(name.len())?;
-            let name = String::from_utf8_lossy(name).into_owned();
+            let name = budget.text(name.cstr()?)?;
             refs.push(ExternalRef { id, name });
         }
         Ok(refs)

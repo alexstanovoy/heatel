@@ -2,12 +2,13 @@
 //! of detail, in glTF's frame (Y up, metres; Source is Z up, inches).
 
 use crate::budget::Budget;
+use crate::coords::{bone_to_gltf, finite, rotate, unit_rotation, valid_bone_scale};
 use crate::error::{Result, malformed};
 use crate::face::{MorphSet, Target};
 use crate::kv3::{self, Value};
 use crate::resource::Resource;
 use crate::vbib::{self, Buffer};
-use crate::vertices::{SCALE, TO_GLTF, Vertices, convert};
+use crate::vertices::{Vertices, convert};
 
 /// Most bytes a model's meshes may take as they are read: decoded buffers, converted vertices
 /// and draw calls' indices. The largest of the install's models takes ~20 MB.
@@ -111,28 +112,41 @@ impl Model {
 
     /// Reads the model of a parsed `vmdl_c`: its embedded meshes (meshopt, zstd or `VBIB` buffers), skeleton and skins. One larger than any of the game's is an error.
     pub fn read(resource: &Resource) -> Result<Self> {
+        Self::read_in(resource, &mut Budget::with_limit("model", MAX_MODEL_BYTES))
+    }
+
+    /// Like [`read`](Self::read), charging decoded KV3 blocks, buffers and vertices to `budget`.
+    pub fn read_in(resource: &Resource, budget: &mut Budget) -> Result<Self> {
         let data = resource
-            .data()
+            .data_in(budget)
             .ok_or_else(|| malformed("model", "no DATA"))??;
         let ctrl = resource
-            .kv3(b"CTRL")
+            .kv3_in(b"CTRL", budget)
             .ok_or_else(|| malformed("model", "no CTRL"))??
             .root;
-        let bones = skeleton(&data)?;
-        let masks = integers(data.get("m_refLODGroupMasks"));
+        Self::read_parts(resource, &data, &ctrl, budget)
+    }
+
+    pub(crate) fn read_parts(
+        resource: &Resource,
+        data: &Value,
+        ctrl: &Value,
+        budget: &mut Budget,
+    ) -> Result<Self> {
+        let bones = skeleton(data)?;
+        let masks = integers(data.array("m_refLODGroupMasks"));
         let lowest = masks
             .iter()
             .fold(0, |all, m| all | m)
             .trailing_zeros()
             .min(63);
         let remap = Remap {
-            starts: integers(data.get("m_remappingTableStarts")),
-            table: integers(data.get("m_remappingTable")),
+            starts: integers(data.array("m_remappingTableStarts")),
+            table: integers(data.array("m_remappingTable")),
         };
         let mut meshes = Vec::new();
         let mut attachments = Vec::new();
-        let mut budget = Budget::with_limit("model", MAX_MODEL_BYTES);
-        for (i, embedded) in array(ctrl.get("embedded_meshes")).iter().enumerate() {
+        for (i, embedded) in ctrl.array("embedded_meshes").iter().enumerate() {
             let index = number(embedded, &["m_nMeshIndex", "mesh_index"]).unwrap_or(i as i64);
             let in_lod = usize::try_from(index)
                 .ok()
@@ -140,16 +154,18 @@ impl Model {
                 .is_none_or(|mask| mask >> lowest & 1 != 0);
             if in_lod {
                 let joints = remap.of(index, bones.len());
-                let (mesh, data) = read_mesh(resource, embedded, joints.as_deref(), &mut budget)?;
+                let (mesh, data) = read_mesh(resource, embedded, joints.as_deref(), budget)?;
                 add_attachments(&data, &bones, &mut attachments)?;
                 meshes.push(mesh);
             }
         }
-        let material_groups = array(data.get("m_materialGroups"))
+        let material_groups = data
+            .array("m_materialGroups")
             .iter()
             .map(|g| {
-                let name = g.get("m_name").and_then(Value::as_str).unwrap_or_default();
-                let materials = array(g.get("m_materials"))
+                let name = g.str_field("m_name").unwrap_or_default();
+                let materials = g
+                    .array("m_materials")
                     .iter()
                     .filter_map(Value::as_str)
                     .map(str::to_owned)
@@ -186,12 +202,8 @@ impl Model {
     }
 }
 
-pub(crate) fn array(value: Option<&Value>) -> &[Value] {
-    value.and_then(Value::as_array).unwrap_or_default()
-}
-
-fn integers(value: Option<&Value>) -> Vec<i64> {
-    array(value).iter().filter_map(Value::as_i64).collect()
+fn integers(values: &[Value]) -> Vec<i64> {
+    values.iter().filter_map(Value::as_i64).collect()
 }
 
 /// The first of `keys` present as an integer (newer and older models name fields differently).
@@ -244,7 +256,7 @@ pub(crate) struct SourceBone {
 /// come before its bone makes the bone a root.
 pub(crate) fn source_skeleton(data: &Value) -> Result<Vec<SourceBone>> {
     let skeleton = data.get("m_modelSkeleton");
-    let get = |key| array(skeleton.and_then(|s| s.get(key)));
+    let get = |key| skeleton.map_or(&[][..], |s| s.array(key));
     let (names, parents) = (get("m_boneName"), get("m_nParent"));
     let (positions, rotations) = (get("m_bonePosParent"), get("m_boneRotParent"));
     let scales = get("m_boneScaleParent");
@@ -279,23 +291,12 @@ pub(crate) fn source_skeleton(data: &Value) -> Result<Vec<SourceBone>> {
     Ok(bones)
 }
 
-/// A bone-local transform in glTF's frame: the translation scaled to metres and, on a root
-/// bone, the frame change baked in (children inherit it through the hierarchy).
-pub(crate) fn to_gltf(position: [f32; 3], rotation: [f32; 4], root: bool) -> ([f32; 3], [f32; 4]) {
-    let translation = position.map(|v| v * SCALE);
-    if root {
-        (rotate(TO_GLTF, translation), multiply(TO_GLTF, rotation))
-    } else {
-        (translation, rotation)
-    }
-}
-
 fn skeleton(data: &Value) -> Result<Vec<Bone>> {
     Ok(source_skeleton(data)?
         .into_iter()
         .map(|bone| {
             let (translation, rotation) =
-                to_gltf(bone.position, bone.rotation, bone.parent.is_none());
+                bone_to_gltf(bone.position, bone.rotation, bone.parent.is_none());
             Bone {
                 name: bone.name,
                 parent: bone.parent,
@@ -308,7 +309,7 @@ fn skeleton(data: &Value) -> Result<Vec<Bone>> {
 }
 
 pub(crate) fn floats<const N: usize>(value: Option<&Value>) -> Result<[f32; N]> {
-    let items = array(value);
+    let items = value.map_or(&[][..], Value::slice);
     let mut out = [0.0; N];
     if items.len() != N {
         return Err(malformed(
@@ -322,73 +323,21 @@ pub(crate) fn floats<const N: usize>(value: Option<&Value>) -> Result<[f32; N]> 
     Ok(out)
 }
 
-/// A number as glTF may hold it: NaN and infinities (only a damaged file has them) are 0.
-pub(crate) fn finite(v: f32) -> f32 {
-    if v.is_finite() { v } else { 0.0 }
-}
-
-pub(crate) fn valid_bone_scale(scale: f32) -> bool {
-    scale.is_finite() && scale != 0.0 && scale.recip().is_finite()
-}
-
-fn unit_rotation(rotation: [f32; 4]) -> Option<[f32; 4]> {
-    let length = rotation
-        .into_iter()
-        .map(|value| f64::from(value).powi(2))
-        .sum::<f64>()
-        .sqrt();
-    (length.is_finite() && length > 0.0)
-        .then(|| rotation.map(|value| (f64::from(value) / length) as f32))
-}
-
-/// Rotates `v` by the unit quaternion `q` (x, y, z, w).
-pub(crate) fn rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
-    let [x, y, z, w] = q;
-    let t = [
-        2.0 * (y * v[2] - z * v[1]),
-        2.0 * (z * v[0] - x * v[2]),
-        2.0 * (x * v[1] - y * v[0]),
-    ];
-    [
-        v[0] + w * t[0] + (y * t[2] - z * t[1]),
-        v[1] + w * t[1] + (z * t[0] - x * t[2]),
-        v[2] + w * t[2] + (x * t[1] - y * t[0]),
-    ]
-}
-
-/// The quaternion product `a * b` (apply `b`, then `a`).
-pub(crate) fn multiply(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
-    let [ax, ay, az, aw] = a;
-    let [bx, by, bz, bw] = b;
-    [
-        aw * bx + ax * bw + ay * bz - az * by,
-        aw * by - ax * bz + ay * bw + az * bx,
-        aw * bz + ax * by - ay * bx + az * bw,
-        aw * bw - ax * bx - ay * by - az * bz,
-    ]
-}
-
 /// The attachments of a mesh's data block (`m_attachments`) that `out` lacks, carried by the
 /// strongest influence of each.
 fn add_attachments(data: &Value, bones: &[Bone], out: &mut Vec<Attachment>) -> Result<()> {
-    for entry in array(data.get("m_attachments")) {
+    for entry in data.array("m_attachments") {
         let value = entry.get("value").unwrap_or(entry);
-        let name = value
-            .get("m_name")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let name = value.str_field("m_name").unwrap_or_default();
         if name.is_empty() || out.iter().any(|a| a.name == name) {
             continue;
         }
         if out.len() == MAX_ATTACHMENTS {
             return Err(malformed("model", "more attachments than any model has"));
         }
-        let names = array(value.get("m_influenceNames"));
-        let weights = array(value.get("m_influenceWeights"));
-        let count = value
-            .get("m_nInfluences")
-            .and_then(Value::as_u64)
-            .unwrap_or(1) as usize;
+        let names = value.array("m_influenceNames");
+        let weights = value.array("m_influenceWeights");
+        let count = value.usize_field("m_nInfluences").unwrap_or(1);
         let strongest = (0..count.min(names.len()).max(1))
             .max_by(|&a, &b| {
                 let weight = |i: usize| weights.get(i).and_then(Value::as_f64).unwrap_or(1.0);
@@ -402,9 +351,9 @@ fn add_attachments(data: &Value, bones: &[Bone], out: &mut Vec<Attachment>) -> R
         let bone = bones
             .iter()
             .position(|b| !bone_name.is_empty() && b.name == bone_name);
-        let offset = floats::<3>(array(value.get("m_vInfluenceOffsets")).get(strongest))?;
-        let turn = floats::<4>(array(value.get("m_vInfluenceRotations")).get(strongest))?;
-        let (translation, rotation) = to_gltf(offset, turn, bone.is_none());
+        let offset = floats::<3>(value.array("m_vInfluenceOffsets").get(strongest))?;
+        let turn = floats::<4>(value.array("m_vInfluenceRotations").get(strongest))?;
+        let (translation, rotation) = bone_to_gltf(offset, turn, bone.is_none());
         out.push(Attachment {
             name: name.to_owned(),
             bone,
@@ -442,12 +391,11 @@ fn read_mesh(
     };
     let data = block(&["m_nDataBlock", "data_block"])
         .ok_or_else(|| malformed("model", format!("mesh {name} has no data block")))?;
-    let data = kv3::decode(resource.bytes(data))?.root;
+    let data = kv3::decode_in(resource.bytes(data), budget)?.root;
     let weight_count = data
         .get("m_skeleton")
-        .and_then(|s| s.get("m_nBoneWeightCount"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
+        .and_then(|s| s.usize_field("m_nBoneWeightCount"))
+        .unwrap_or(0);
     let vertices = vertex_buffers
         .iter()
         .map(|b| convert(b, joints.filter(|_| weight_count > 0), weight_count, budget))
@@ -460,15 +408,15 @@ fn read_mesh(
         })
         .collect::<Result<Vec<_>>>()?;
     let mut primitives = Vec::new();
-    for object in array(data.get("m_sceneObjects")) {
-        for call in array(object.get("m_drawCalls")) {
+    for object in data.array("m_sceneObjects") {
+        for call in object.array("m_drawCalls") {
             primitives.push(draw_call(call, &index_lists, &vertex_buffers, budget)?);
         }
     }
-    let atlas = embedded.get("morph_texture").and_then(Value::as_str);
+    let atlas = embedded.str_field("morph_texture");
     let morph = match (block(&["m_nMorphBlock"]), atlas) {
         (Some(set), Some(atlas)) => Some(MorphSet::read(
-            &kv3::decode(resource.bytes(set))?.root,
+            &kv3::decode_in(resource.bytes(set), budget)?.root,
             atlas,
         )?),
         _ => None,
@@ -491,7 +439,7 @@ fn buffers(
     vertex: bool,
     budget: &mut Budget,
 ) -> Result<Vec<Buffer>> {
-    array(list)
+    list.map_or(&[][..], Value::slice)
         .iter()
         .map(|desc| vbib::from_ctrl(resource, desc, vertex, budget))
         .collect()
@@ -505,18 +453,17 @@ fn draw_call(
     vertex_buffers: &[Buffer],
     budget: &mut Budget,
 ) -> Result<Primitive> {
-    let int = |v: Option<&Value>| {
-        v.and_then(Value::as_i64)
-            .and_then(|v| usize::try_from(v).ok())
+    let field = |key| {
+        call.usize_field(key)
+            .ok_or_else(|| malformed("draw call", format!("no {key}")))
     };
-    let field = |key| int(call.get(key)).ok_or_else(|| malformed("draw call", format!("no {key}")));
     let handle = |key: &str| {
         let slot = call.get(key);
         let slot = slot
             .and_then(Value::as_array)
             .and_then(|a| a.first())
             .or(slot);
-        int(slot.and_then(|s| s.get("m_hBuffer"))).unwrap_or(0)
+        slot.and_then(|s| s.usize_field("m_hBuffer")).unwrap_or(0)
     };
     if let Some(kind) = call.get("m_nPrimitiveType").and_then(Value::as_str)
         && kind != "RENDER_PRIM_TRIANGLES"
@@ -556,7 +503,7 @@ fn draw_call(
         .find_map(|k| call.get(k).and_then(Value::as_str))
         .unwrap_or_default();
     let tint = call.get("m_vTintColor").map(|t| {
-        let rgb = array(Some(t));
+        let rgb = t.slice();
         let c = |i: usize| finite(rgb.get(i).and_then(Value::as_f64).unwrap_or(0.0) as f32);
         let alpha = call.get("m_flAlpha").and_then(Value::as_f64).unwrap_or(1.0);
         [c(0), c(1), c(2), finite(alpha as f32)]

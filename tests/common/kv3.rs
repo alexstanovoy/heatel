@@ -2,6 +2,7 @@
 use std::collections::HashMap;
 
 #[allow(dead_code)] // Each integration target uses only some value shapes.
+#[derive(Clone)]
 pub enum K {
     Bool(bool),
     Int(i64),

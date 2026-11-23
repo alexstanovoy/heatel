@@ -1,9 +1,9 @@
 //! Where the world puts things: Source's placements (a 3 x 4 rotation-and-translation, or an
 //! entity's origin, angles and scales) as glTF node matrices, and entities' tints.
 
+use crate::coords::SCALE;
 use crate::kv3::Value;
 use crate::material::linear_tint;
-use crate::vertices::SCALE;
 
 /// A placement in Source's frame: rotation-scale rows with the translation as fourth column
 /// (a point goes to `R p + t`).

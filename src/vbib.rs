@@ -94,7 +94,7 @@ fn decode(
     let unzipped;
     let mut bytes = stored;
     if packing.zstd {
-        unzipped = kv3::zstd_to_vec(stored, len)?;
+        unzipped = kv3::zstd_to_vec(stored, len, budget)?;
         bytes = &unzipped;
     }
     if !packing.meshopt {
@@ -121,15 +121,14 @@ pub(crate) fn from_ctrl(
     vertex: bool,
     budget: &mut Budget,
 ) -> Result<Buffer> {
-    let number = |key: &str| {
-        desc.get(key)
-            .and_then(Value::as_u64)
+    let field_usize = |key: &str| {
+        desc.usize_field(key)
             .ok_or_else(|| malformed("mesh buffer", format!("no {key}")))
     };
-    let count = number("m_nElementCount")? as usize;
-    let stride = number("m_nElementSizeInBytes")? as usize;
+    let count = field_usize("m_nElementCount")?;
+    let stride = field_usize("m_nElementSizeInBytes")?;
     let flag = |key: &str| desc.get(key).and_then(Value::as_bool).unwrap_or(false);
-    let block = number("m_nBlockIndex")? as usize;
+    let block = field_usize("m_nBlockIndex")?;
     let block = resource
         .blocks()
         .get(block)
@@ -146,9 +145,7 @@ pub(crate) fn from_ctrl(
         budget,
     )?;
     let fields = desc
-        .get("m_inputLayoutFields")
-        .and_then(Value::as_array)
-        .unwrap_or_default()
+        .array("m_inputLayoutFields")
         .iter()
         .map(field_from_kv3)
         .collect::<Result<_>>()?;
@@ -168,12 +165,18 @@ fn field_from_kv3(field: &Value) -> Result<Field> {
             .to_owned(),
         _ => return Err(malformed("mesh buffer", "a field without a semantic")),
     };
-    let number = |key: &str| field.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let u32_field = |key: &str| field.get(key).and_then(Value::as_u64).unwrap_or(0) as u32;
+    let offset = match field.get("m_nOffset") {
+        None => 0,
+        Some(v) => v
+            .as_usize()
+            .ok_or_else(|| malformed("mesh buffer", "a field offset out of range"))?,
+    };
     Ok(Field {
         semantic: semantic.to_uppercase(),
-        index: number("m_nSemanticIndex") as u32,
-        format: number("m_Format") as u32,
-        offset: number("m_nOffset") as usize,
+        index: u32_field("m_nSemanticIndex"),
+        format: u32_field("m_Format"),
+        offset,
     })
 }
 

@@ -4,9 +4,10 @@
 use std::rc::Rc;
 
 use super::crop::{Band, Cut, crop};
-use super::scene::Builder;
+use super::scene::{Builder, MAX_SCENE_BYTES, MAX_WORLD_READ_BYTES};
+use crate::budget::Budget;
 use crate::error::{Result, malformed};
-use crate::export::{ExportedTexture, read_from};
+use crate::export::{ExportedTexture, read_from_in};
 use crate::model::Model;
 use crate::resource::Resource;
 use crate::source::Source;
@@ -17,6 +18,8 @@ use crate::vpk::Vpk;
 const LAYERED: [&str; 2] = ["multiblend.vfx", "water_dota.vfx"];
 /// Decoded models kept while the band is written (its nodes come model by model).
 const MODEL_CACHE: usize = 8;
+/// Most live decoded bytes held in the model cache at once.
+const MAX_CACHE_BYTES: usize = 512 << 20;
 
 /// What [`export_world`] keeps of the world and how it names its files.
 #[derive(Clone, Copy)]
@@ -71,19 +74,36 @@ pub fn export_world(
     path: &str,
     options: &WorldOptions<'_>,
 ) -> Result<ExportedWorld> {
-    let scene = Builder::new(src, packages, options.texture_uri).build(path)?;
-    let mut cache: Vec<(usize, Rc<Model>)> = Vec::new();
+    let (scene, mut total_read) = Builder::new(src, packages, options.texture_uri).build(path)?;
+    let mut cache: Vec<(usize, Rc<Model>, usize)> = Vec::new();
+    let mut cache_bytes: usize = 0;
     let mut load = |index: usize| -> Result<Rc<Model>> {
-        if let Some((_, model)) = cache.iter().find(|(i, _)| *i == index) {
+        if let Some((_, model, _)) = cache.iter().find(|(i, _, _)| *i == index) {
             return Ok(Rc::clone(model));
         }
         let model_path = &scene.models[index];
-        let bytes = read_from(src, packages, &format!("{model_path}_c"))?;
-        let model = Rc::new(Model::read(&Resource::parse(&bytes)?)?);
-        if cache.len() == MODEL_CACHE {
-            cache.remove(0);
+        let mut model_budget = Budget::with_limit("world", MAX_SCENE_BYTES);
+        let decoded = read_from_in(src, packages, &format!("{model_path}_c"), &mut model_budget)
+            .and_then(|bytes| Model::read_in(&Resource::parse(&bytes)?, &mut model_budget));
+        let spent = model_budget.spent();
+        total_read = total_read.saturating_add(spent as u64);
+        if total_read > MAX_WORLD_READ_BYTES {
+            return Err(malformed(
+                "world",
+                format!("reading more than {MAX_WORLD_READ_BYTES} bytes"),
+            ));
         }
-        cache.push((index, Rc::clone(&model)));
+        let model = Rc::new(decoded?);
+        while !cache.is_empty()
+            && (cache.len() == MODEL_CACHE || cache_bytes.saturating_add(spent) > MAX_CACHE_BYTES)
+        {
+            let (_, _, evicted) = cache.remove(0);
+            cache_bytes = cache_bytes.saturating_sub(evicted);
+        }
+        if spent <= MAX_CACHE_BYTES {
+            cache_bytes += spent;
+            cache.push((index, Rc::clone(&model), spent));
+        }
         Ok(model)
     };
     let cut = Cut {

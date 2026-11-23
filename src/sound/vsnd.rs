@@ -173,7 +173,7 @@ impl Info {
                 .and_then(Value::as_u64)
                 .ok_or_else(|| malformed(WHAT, format!("no {key}")))
         };
-        let pcm_bits = match sound.get("m_nFormat").and_then(Value::as_str) {
+        let pcm_bits = match sound.str_field("m_nFormat") {
             Some("PCM16") => Some(16),
             Some("PCM8") => Some(8),
             Some("MP3") => None,
@@ -193,8 +193,9 @@ impl Info {
                 .get("m_nLoopStart")
                 .and_then(Value::as_i64)
                 .is_some_and(|start| start >= 0),
-            size: usize::try_from(number("m_nStreamingSize")?)
-                .map_err(|_| malformed(WHAT, "size"))?,
+            size: sound
+                .usize_field("m_nStreamingSize")
+                .ok_or_else(|| malformed(WHAT, "size"))?,
         })
     }
 

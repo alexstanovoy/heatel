@@ -7,7 +7,6 @@
 
 use crate::error::{Result, malformed};
 use crate::kv3::Value;
-use crate::model::array;
 
 const WHAT: &str = "vcd";
 /// Most events, tracks of an event, keys of a curve; a hero's idle scene has 3 events of up to
@@ -68,10 +67,7 @@ pub struct FlexTrack {
 }
 
 fn float(v: &Value, key: &str) -> Option<f32> {
-    v.get(key)
-        .and_then(Value::as_f64)
-        .map(|f| f as f32)
-        .filter(|f| f.is_finite() && f.abs() <= MAX_NUMBER)
+    v.f32_field(key).filter(|f| f.abs() <= MAX_NUMBER)
 }
 
 fn bounded<'a>(list: &'a [Value], max: usize, what: &str) -> Result<&'a [Value]> {
@@ -91,8 +87,8 @@ impl Scene {
     /// tracks of an event, or 16384 keys of a curve.
     pub fn read(data: &Value) -> Result<Self> {
         let mut scene = Self::default();
-        for event in bounded(array(data.get("events")), MAX_EVENTS, "scene events")? {
-            let looping = event.get("type").and_then(Value::as_str) == Some("loop")
+        for event in bounded(data.array("events"), MAX_EVENTS, "scene events")? {
+            let looping = event.str_field("type") == Some("loop")
                 && event.get("loopcount").and_then(Value::as_i64) == Some(-1);
             if let (true, Some(from), Some(to)) = (
                 looping,
@@ -104,10 +100,10 @@ impl Scene {
                 break;
             }
         }
-        for actor in bounded(array(data.get("actors")), MAX_EVENTS, "actors")? {
-            for channel in bounded(array(actor.get("channels")), MAX_EVENTS, "channels")? {
-                for event in array(channel.get("events")) {
-                    if event.get("type").and_then(Value::as_str) != Some("flexanimation") {
+        for actor in bounded(data.array("actors"), MAX_EVENTS, "actors")? {
+            for channel in bounded(actor.array("channels"), MAX_EVENTS, "channels")? {
+                for event in channel.array("events") {
+                    if event.str_field("type") != Some("flexanimation") {
                         continue;
                     }
                     if scene.events.len() >= MAX_EVENTS {
@@ -130,8 +126,8 @@ fn flex_event(event: &Value) -> Result<FlexEvent> {
     }
     let keys = event
         .get("event_ramp_curve")
-        .map(|r| array(r.get("m_spline")));
-    let ramp = bounded(keys.unwrap_or_default(), MAX_KEYS, "ramp keys")?
+        .map_or(&[][..], |r| r.array("m_spline"));
+    let ramp = bounded(keys, MAX_KEYS, "ramp keys")?
         .iter()
         .map(|key| {
             let n = ["x", "y", "m_flSlopeIncoming", "m_flSlopeOutgoing"].map(|k| float(key, k));
@@ -147,7 +143,7 @@ fn flex_event(event: &Value) -> Result<FlexEvent> {
         })
         .collect::<Result<_>>()?;
     let mut tracks = Vec::new();
-    for track in bounded(array(event.get("flexanimations")), MAX_TRACKS, "tracks")? {
+    for track in bounded(event.array("flexanimations"), MAX_TRACKS, "tracks")? {
         if track.get("disabled").and_then(Value::as_bool) != Some(true) {
             tracks.push(flex_track(track)?);
         }
@@ -173,7 +169,7 @@ fn flex_track(track: &Value) -> Result<FlexTrack> {
         return Err(malformed(WHAT, "a track's controller or range"));
     }
     let mut samples = Vec::new();
-    for sample in bounded(array(track.get("samples")), MAX_KEYS, "samples")? {
+    for sample in bounded(track.array("samples"), MAX_KEYS, "samples")? {
         let (Some(t), Some(v)) = (float(sample, "time"), float(sample, "value")) else {
             return Err(malformed(WHAT, "a sample"));
         };
