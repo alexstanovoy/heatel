@@ -6,7 +6,7 @@ use heatel::anim::read_clips;
 use heatel::face::MorphSet;
 use heatel::sound::Lipsync;
 use heatel::texture::Texture;
-use heatel::world::lighting;
+use heatel::world::{MAX_LIGHT_ZONES, lighting, lighting_in};
 use heatel::{Budget, Error, Resource, Source, Vpk, kv3};
 
 #[path = "common/kv3.rs"]
@@ -577,8 +577,9 @@ fn particle_system_deserialize_enforces_validate() {
     assert!(serde_json::from_value::<System>(huge_gradient).is_err());
 }
 
-/// P0 #5b & LOW-1: `world::lighting` must reject `NaN` across all numeric fields and reject
-/// `f64::MAX` weighted-sum overflow in `blend()`.
+/// P0 #5b & LOW-1: `world::lighting` must reject `NaN` across all numeric fields, reject invalid
+/// zone radii and counts above `MAX_LIGHT_ZONES`, enforce `Budget`, and reject `f64::MAX`
+/// weighted-sum overflow in centre blending.
 #[test]
 fn world_lighting_rejects_nan_fields_and_blend_overflow() {
     let make_light = |origin_x: f64, inner: f64, outer: f64, color_r: f64| {
@@ -611,12 +612,69 @@ fn world_lighting_rejects_nan_fields_and_blend_overflow() {
                 K::Arr(vec![K::Float(64.0), K::Float(64.0), K::Float(64.0)]),
             ),
             ("ambient_scale_night", K::Float(1.0)),
+            (
+                "shadow_color_day",
+                K::Arr(vec![K::Float(200.0), K::Float(180.0), K::Float(170.0)]),
+            ),
+            (
+                "shadow_color_night",
+                K::Arr(vec![K::Float(120.0), K::Float(130.0), K::Float(190.0)]),
+            ),
+            ("shadow_scale_day", K::Float(1.0)),
+            ("shadow_scale_night", K::Float(1.5)),
+            ("shadow_ground_scale_day", K::Float(1.0)),
+            ("shadow_ground_scale_night", K::Float(1.5)),
+            (
+                "specular_color_day",
+                K::Arr(vec![K::Float(80.0), K::Float(190.0), K::Float(230.0)]),
+            ),
+            (
+                "specular_color_night",
+                K::Arr(vec![K::Float(95.0), K::Float(160.0), K::Float(220.0)]),
+            ),
+            (
+                "light_direction_day",
+                K::Arr(vec![K::Float(66.0), K::Float(0.0), K::Float(0.0)]),
+            ),
+            (
+                "specular_direction_day",
+                K::Arr(vec![K::Float(64.0), K::Float(283.0), K::Float(0.0)]),
+            ),
+            (
+                "fog_color_day",
+                K::Arr(vec![K::Float(149.0), K::Float(239.0), K::Float(255.0)]),
+            ),
+            (
+                "fog_color_night",
+                K::Arr(vec![K::Float(99.0), K::Float(140.0), K::Float(206.0)]),
+            ),
+            ("fog_start_day", K::Float(1250.0)),
+            ("fog_start_night", K::Float(1250.0)),
+            ("fog_end_day", K::Float(4500.0)),
+            ("fog_end_night", K::Float(4500.0)),
+            ("fow_darkess_day", K::Float(2.7)),
+            ("fow_darkess_night", K::Float(2.7)),
+            ("fow_color_r_day", K::Float(1.0)),
+            ("fow_color_g_day", K::Float(2.0)),
+            ("fow_color_b_day", K::Float(4.0)),
+            ("fow_color_r_night", K::Float(2.0)),
+            ("fow_color_g_night", K::Float(2.0)),
+            ("fow_color_b_night", K::Float(5.0)),
+            (
+                "skybox_tint_color_day",
+                K::Arr(vec![K::Float(255.0), K::Float(255.0), K::Float(255.0)]),
+            ),
+            (
+                "skybox_tint_color_night",
+                K::Arr(vec![K::Float(127.0), K::Float(143.0), K::Float(197.0)]),
+            ),
         ])
     };
     let decode_entities = |mut list: Vec<K>, fog: f64| {
         list.push(K::Obj(vec![
             ("classname", s("env_fog_controller")),
             ("foglerptime", K::Float(fog)),
+            ("fogexponent", K::Float(2.0)),
         ]));
         let kv = kv3::decode(&kv3_file(&K::Obj(vec![("entities", K::Arr(list))]))).unwrap();
         kv.root
@@ -625,6 +683,19 @@ fn world_lighting_rejects_nan_fields_and_blend_overflow() {
             .unwrap()
             .to_vec()
     };
+
+    // Baseline valid entity succeeds.
+    let valid = decode_entities(vec![make_light(0.0, 0.0, 100.0, 255.0)], 5.0);
+    let parsed = lighting(&valid).expect("valid lighting zone must succeed");
+    assert_eq!(parsed.zones.len(), 1);
+    assert_eq!(parsed.sun_dir, [66.0, 0.0]);
+    assert_eq!(parsed.spec_dir, [64.0, 283.0]);
+    assert_eq!(parsed.fog_exponent, 2.0);
+    assert_eq!(parsed.turn_secs, 5.0);
+
+    // Budget enforcement rejects allocation when budget is too small.
+    let mut tiny_budget = Budget::new(1);
+    assert!(lighting_in(&valid, &mut tiny_budget).is_err());
 
     for (label, entities) in [
         (
@@ -646,6 +717,23 @@ fn world_lighting_rejects_nan_fields_and_blend_overflow() {
         (
             "nan fog",
             decode_entities(vec![make_light(0.0, 0.0, 100.0, 255.0)], f64::NAN),
+        ),
+        (
+            "negative inner",
+            decode_entities(vec![make_light(0.0, -1.0, 100.0, 255.0)], 5.0),
+        ),
+        (
+            "outer <= inner",
+            decode_entities(vec![make_light(0.0, 100.0, 100.0, 255.0)], 5.0),
+        ),
+        (
+            "too many zones",
+            decode_entities(
+                (0..=MAX_LIGHT_ZONES)
+                    .map(|_| make_light(0.0, 0.0, 100.0, 255.0))
+                    .collect(),
+                5.0,
+            ),
         ),
     ] {
         assert!(lighting(&entities).is_err(), "{label} must return Err");

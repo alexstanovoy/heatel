@@ -206,3 +206,156 @@ impl Shapes {
         shapes
     }
 }
+
+fn env_game_dir() -> Option<std::path::PathBuf> {
+    let raw = std::env::var_os("DOTA_DIR").or_else(|| std::env::var_os("HEATEL_DOTA_PATH"))?;
+    find_game_dir(Some(&std::path::PathBuf::from(raw)))
+}
+
+#[test]
+fn fresnel_lut_round_trips_synthetic_256x16_texture() {
+    let expected: [[u8; 3]; 17] = [
+        [139, 207, 255],
+        [222, 195, 239],
+        [218, 175, 218],
+        [148, 155, 194],
+        [75, 135, 169],
+        [25, 118, 143],
+        [4, 100, 114],
+        [2, 82, 89],
+        [0, 67, 69],
+        [0, 53, 52],
+        [0, 38, 39],
+        [0, 27, 31],
+        [0, 14, 24],
+        [0, 7, 19],
+        [0, 4, 16],
+        [0, 2, 14],
+        [0, 0, 12],
+    ];
+    let (w, h) = (256usize, 16usize);
+    let mut rgba = vec![0u8; w * h * 4];
+    let row = h / 2;
+    for (i, rgb) in expected.iter().enumerate() {
+        let x = if i == 16 { w - 1 } else { i * w / 16 };
+        let offset = (row * w + x) * 4;
+        rgba[offset..offset + 4].copy_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+    }
+    let texture = heatel::Texture::from_rgba8(w as u32, h as u32, rgba).unwrap();
+    assert_eq!(
+        heatel::material::sample_fresnel_lut(&texture).unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn real_maps_export_lighting_zones_water_ground_and_fresnel_lut() {
+    let Some(game) = env_game_dir() else {
+        return;
+    };
+
+    // Main map: 4 zones, RF sun (216,208,207)x5, Dire sky (73,94,200), fog end 4500.
+    let maps_src = DirSource::new(game.join("maps"));
+    let dota_vpk = Vpk::open(&maps_src, "dota.vpk").unwrap();
+    let dota_bytes = dota_vpk
+        .read_file(&maps_src, "maps/dota/entities/default_ents.vents_c")
+        .unwrap();
+    let dota_lump =
+        heatel::world::EntityLump::read(&Resource::parse(&dota_bytes).unwrap()).unwrap();
+    let dota_light = heatel::world::lighting(&dota_lump.entities).unwrap();
+    assert_eq!(dota_light.zones.len(), 4);
+    assert_eq!(dota_light.sun_dir, [66.0, 0.0]);
+    assert_eq!(dota_light.spec_dir, [64.0, 283.0]);
+    assert_eq!(dota_light.fog_exponent, 2.0);
+    assert_eq!(dota_light.turn_secs, 5.0);
+    assert_eq!(dota_light.turn, 5.0);
+
+    let rf = &dota_light.zones[0];
+    assert_eq!(rf.center, [-6784.0, -6304.0]);
+    assert_eq!((rf.inner, rf.outer), (7000.0, 13000.0));
+    assert_eq!(rf.day.sun, [216.0, 208.0, 207.0]);
+    assert_eq!(rf.day.sun_scale, 5.0);
+    assert_eq!(rf.day.fog_end, 4500.0);
+
+    let dire = &dota_light.zones[2];
+    assert_eq!(dire.day.sky, [73.0, 94.0, 200.0]);
+    assert_eq!(dire.day.fog_end, 4500.0);
+
+    // Hero demo map: 2 zones (RF and DF).
+    let demo_dir = game.with_file_name("dota_addons").join("hero_demo/maps");
+    let demo_src = DirSource::new(&demo_dir);
+    let demo_vpk = Vpk::open(&demo_src, "hero_demo_main.vpk").unwrap();
+    let demo_bytes = demo_vpk
+        .read_file(
+            &demo_src,
+            "maps/hero_demo_main/entities/default_ents.vents_c",
+        )
+        .unwrap();
+    let demo_lump =
+        heatel::world::EntityLump::read(&Resource::parse(&demo_bytes).unwrap()).unwrap();
+    let demo_light = heatel::world::lighting(&demo_lump.entities).unwrap();
+    assert_eq!(demo_light.zones.len(), 2);
+    assert_eq!(demo_light.zones[0].center, [-2904.0, -2320.0]);
+    assert_eq!(demo_light.zones[1].center, [1920.0, 1216.0]);
+
+    // Real water, ground blend, hero material look & default Fresnel LUT from pak01.
+    let pak_src = DirSource::new(&game);
+    let pak = Vpk::open(&pak_src, "pak01_dir.vpk").unwrap();
+
+    let load_mat = |path: &str| {
+        let bytes = pak.read_file(&pak_src, &format!("{path}_c")).unwrap();
+        let data = Resource::parse(&bytes).unwrap().data().unwrap().unwrap();
+        heatel::material::Material::from_vmat(path, &data).unwrap()
+    };
+
+    let water = load_mat("materials/water/water_generic_000.vmat")
+        .water_look()
+        .unwrap()
+        .expect("water look");
+    assert_eq!(water.normal_uv_scale, 500.0);
+    assert_eq!(water.depth, 35.0);
+    assert!((water.refraction_tint[0] - 0.34902).abs() < 1e-4);
+    assert!((water.fallback_opacity - 0.875).abs() < 1e-4);
+
+    let radiant = load_mat("materials/blends/mod_radiant_000.vmat")
+        .ground_layers()
+        .unwrap()
+        .expect("ground layers");
+    assert_eq!(radiant[0].scale, 5.0);
+    assert_eq!(radiant[1].scale, 3.0);
+    assert_eq!(radiant[1].rotation, 7.0);
+    assert_eq!(radiant[2].rotation, 8.0);
+    assert_eq!(radiant[3].scale, 6.0);
+
+    let hero = load_mat("materials/models/heroes/pudge/pudge2_apron.vmat")
+        .figure_look()
+        .unwrap()
+        .expect("figure look");
+    assert_eq!(hero.rim_scale, 10.0);
+    assert_eq!(hero.spec_exp, 30.0);
+    assert_eq!(hero.spec_scale, 10.0);
+    assert_eq!(hero.blend_full, [0.0; 6]);
+
+    let lut_bytes = pak
+        .read_file(
+            &pak_src,
+            "materials/default/default_fresnelwarprim_tga_d9279d65.vtex_c",
+        )
+        .unwrap();
+    let lut_tex = heatel::Texture::parse(&lut_bytes).unwrap();
+    let lut = heatel::material::sample_fresnel_lut(&lut_tex).unwrap();
+    let expected_r = [139, 222, 218, 148, 75, 25, 4, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let expected_g = [
+        207, 195, 175, 155, 135, 118, 100, 82, 67, 53, 38, 27, 14, 7, 4, 2, 0,
+    ];
+    let expected_b = [
+        255, 239, 218, 194, 169, 143, 114, 89, 69, 52, 39, 31, 24, 19, 16, 14, 12,
+    ];
+    for i in 0..17 {
+        assert_eq!(
+            lut[i],
+            [expected_r[i], expected_g[i], expected_b[i]],
+            "point {i}"
+        );
+    }
+}

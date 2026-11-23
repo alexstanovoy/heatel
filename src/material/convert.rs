@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use serde_json::{Map, Value as Json, json};
 
 use super::inputs::{self, Channels, RGB, RGBA, Remap, Slot};
+use super::look::GroundLayerLook;
 use super::pack::{Pack, orm_uri};
 use super::vmat::{Alpha, Material};
 use crate::error::{Result, malformed};
@@ -33,6 +34,7 @@ pub(crate) struct GltfMaterial {
     pub emissive: Option<[f32; 3]>,
     pub specular_texture: Option<usize>,
     pub extras: Json,
+    pub look: Option<Json>,
 }
 
 /// The images materials use, each made once: the first material that uses a texture decides
@@ -99,6 +101,15 @@ fn convert_with_color(
     let specular = remaps
         .iter()
         .any(|(_, r)| r.iter().any(|r| r.slot == Slot::SpecularFactor));
+    let look = if let Some(figure) = material.figure_look()? {
+        Some(figure.to_json())
+    } else if let Some(water) = material.water_look()? {
+        Some(water.to_json())
+    } else {
+        material
+            .ground_layers()?
+            .map(|layers| GroundLayerLook::layers_to_json(&layers))
+    };
     let mut out = GltfMaterial {
         name: material.name.clone(),
         base_color,
@@ -132,6 +143,7 @@ fn convert_with_color(
         emissive: None,
         specular_texture: None,
         extras: material.extras.clone(),
+        look,
     };
     tie_textures(&mut out, remaps, images, texture_uri)?;
     if out.emissive_texture.is_some() && material.int("F_SELF_ILLUM") > 0 {
@@ -366,7 +378,12 @@ impl GltfMaterial {
         if !extensions.is_empty() {
             out["extensions"] = Json::Object(extensions);
         }
-        out["extras"] = json!({ "vmat": self.extras });
+        let mut extras = Map::new();
+        extras.insert("vmat".into(), self.extras.clone());
+        if let Some(look) = &self.look {
+            extras.insert("look".into(), look.clone());
+        }
+        out["extras"] = Json::Object(extras);
         out
     }
 }
@@ -435,5 +452,72 @@ mod tint_tests {
             assert!((model.base_color[channel] - 0.607_021).abs() < 0.000_01);
             assert!((model.base_color[channel] - world.base_color[channel]).abs() < 0.000_01);
         }
+    }
+
+    #[test]
+    fn hero_water_and_ground_materials_export_neutral_look_extras_and_reject_non_finite() {
+        let mut hero =
+            Material::from_vmat("hero_test.vmat", &Value::Object(Object::default())).unwrap();
+        hero.shader = "hero.vfx".into();
+        hero.floats.extend([
+            ("g_flRimLightScale".into(), 10.0),
+            ("g_flSpecularExponent".into(), 24.0),
+            ("g_flSpecularScale".into(), 5.0),
+            ("g_flAmbientScale".into(), 1.25),
+            ("g_flSelfIllumScale".into(), 2.0),
+            ("g_flMetalnessBlendToFull".into(), 0.5),
+        ]);
+        hero.vectors.extend([
+            ("g_vRimLightColor".into(), [0.5, 0.75, 1.0, 0.0]),
+            ("g_vSpecularColor".into(), [0.8, 0.9, 1.0, 0.0]),
+            ("g_vSelfIllumTint".into(), [1.0, 0.25, 0.0, 0.0]),
+        ]);
+        let mut images = Images::default();
+        let json = convert(&hero, [1.0; 4], &mut images, &str::to_owned)
+            .unwrap()
+            .to_json(|i| i);
+        let look = &json["extras"]["look"];
+        assert_eq!(look["rim"]["scale"], json!(10.0));
+        assert_eq!(look["rim"]["color"], json!([0.5, 0.75, 1.0]));
+        assert_eq!(look["spec"]["exp"], json!(24.0));
+        assert_eq!(look["spec"]["scale"], json!(5.0));
+        assert_eq!(look["glow"]["scale"], json!(2.0));
+        assert_eq!(look["blend_full"], json!([0.0, 0.0, 0.5, 0.0, 0.0, 0.0]));
+
+        hero.floats[0].1 = f32::NAN;
+        assert!(hero.figure_look().is_err());
+
+        let mut water =
+            Material::from_vmat("river.vmat", &Value::Object(Object::default())).unwrap();
+        water.shader = "water_dota.vfx".into();
+        water.floats.push(("g_flWaterDepth".into(), 35.0));
+        water
+            .vectors
+            .push(("g_vRefractionTint".into(), [0.35, 0.66, 0.78, 0.0]));
+        let wjson = convert(&water, [1.0; 4], &mut images, &str::to_owned)
+            .unwrap()
+            .to_json(|i| i);
+        assert_eq!(wjson["extras"]["look"]["water"]["depth"], json!(35.0));
+        water.floats[0].1 = f32::INFINITY;
+        assert!(water.water_look().is_err());
+
+        let mut ground =
+            Material::from_vmat("terrain.vmat", &Value::Object(Object::default())).unwrap();
+        ground.shader = "multiblend.vfx".into();
+        ground.floats.push(("g_flTexCoordScale1".into(), 3.0));
+        ground.floats.push(("g_flTexCoordRotate1".into(), 7.0));
+        let gjson = convert(&ground, [1.0; 4], &mut images, &str::to_owned)
+            .unwrap()
+            .to_json(|i| i);
+        assert_eq!(
+            gjson["extras"]["look"]["ground_layers"][1]["scale"],
+            json!(3.0)
+        );
+        assert_eq!(
+            gjson["extras"]["look"]["ground_layers"][1]["rotation"],
+            json!(7.0)
+        );
+        ground.floats.push(("g_flTexCoordScale0".into(), 0.0));
+        assert!(ground.ground_layers().is_err());
     }
 }

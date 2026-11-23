@@ -10,9 +10,12 @@ mod place;
 mod placements;
 mod scene;
 
+pub use crate::material::{GroundLayerLook, WaterLook};
 pub use crop::Band;
 pub use entities::EntityLump;
 pub use export::{ExportedWorld, SkippedModel, WorldOptions, export_world};
 pub use gridnav::GridNav;
-pub use light::{Light, Lighting, Shade, lighting};
+pub use light::{
+    Light, LightZone, Lighting, MAX_LIGHT_ZONES, Rgb, Shade, ZoneShade, lighting, lighting_in,
+};
 pub use placements::{Placement, placements};
