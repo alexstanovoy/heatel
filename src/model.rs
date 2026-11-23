@@ -413,8 +413,10 @@ fn read_mesh(
             primitives.push(draw_call(call, &index_lists, &vertex_buffers, budget)?);
         }
     }
-    let atlas = embedded.str_field("morph_texture");
-    let morph = match (block(&["m_nMorphBlock"]), atlas) {
+    let atlas = embedded
+        .str_field("morph_texture")
+        .filter(|atlas| !atlas.is_empty());
+    let morph = match (block(&["m_nMorphBlock", "morph_block"]), atlas) {
         (Some(set), Some(atlas)) => Some(MorphSet::read(
             &kv3::decode_in(resource.bytes(set), budget)?.root,
             atlas,
