@@ -4,6 +4,13 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.3] - 2026-11-23
+
+### Added
+
+- **Multi-zone world lighting export.** Added `MAX_LIGHT_ZONES`, `Rgb`, `ZoneShade`, `LightZone` (with `weight_at`), and `lighting_in(&[Value], &mut Budget)` extending `Lighting` with regional day/night lighting zones, global sun/specular directions, and distance fog exponent while preserving existing centre-blended `sun`, `ambient`, and `turn` fields.
+- **Material look & Fresnel LUT export.** Added `WaterLook`, `GroundLayerLook`, `FigureLook`, `Material::{water_look, ground_layers, figure_look}`, `sample_fresnel_lut` (`FRESNEL_LUT_POINTS = 17`), and neutral glTF `extras.look` export (bumping `OUTPUT_REV` from `29` to `30`).
+
 ## [0.2.2] - 2026-11-23
 
 ### Changed
