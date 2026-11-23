@@ -4,6 +4,13 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] - 2026-11-23
+
+### Changed
+
+- **Budget & decode hardening.** Separated cumulative world-read budget (`MAX_WORLD_READ_BYTES`) from retained `Scene` memory budget, added live eviction caps for `MODEL_CACHE`, checked peak zstd allocation bounds via `Budget::check_peak`, eliminated duplicate `CTRL`/`DATA` decoding, and made `GltfBuffer` serialization infallible.
+- **Internal cleanup.** Finished `kv3::Value` migration, deduplicated shared parsers and test harnesses (`-258` net LOC) with zero public API changes.
+
 ## [0.2.1] - 2026-11-22
 
 ### Security
