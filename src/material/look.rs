@@ -404,7 +404,7 @@ pub fn sample_fresnel_lut(texture: &Texture) -> Result<[[u8; 3]; FRESNEL_LUT_POI
     Ok(table)
 }
 
-fn shader_stem(shader: &str) -> &str {
+pub(super) fn shader_stem(shader: &str) -> &str {
     shader.rsplit_once('.').map_or(shader, |(stem, _)| stem)
 }
 

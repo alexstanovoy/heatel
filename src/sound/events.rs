@@ -278,7 +278,7 @@ fn files(value: Option<&Value>, budget: &mut Budget) -> Result<Vec<String>> {
 }
 
 /// The limiter's event name a getter finds, when it names one.
-fn limiter_event_name<'a>(get: impl Fn(&str) -> Option<&'a Value>) -> Option<&'a str> {
+pub(super) fn limiter_event_name<'a>(get: impl Fn(&str) -> Option<&'a Value>) -> Option<&'a str> {
     get("limiter_event_name")
         .and_then(Value::as_str)
         .filter(|name| !name.is_empty() && *name != "0")
@@ -329,12 +329,7 @@ pub fn read_sound_stacks(resource: &Resource, budget: &mut Budget) -> Result<Vec
     budget.slots::<SoundStack>(root.len())?;
     let mut out = Vec::with_capacity(root.len());
     for (name, stack) in root.iter() {
-        let public = stack
-            .array("operators")
-            .iter()
-            .find(|op| op.str_field("name") == Some("public"))
-            .and_then(|op| op.get("operator_variables"));
-        let Some(variables) = public else {
+        let Some(variables) = public_operator_variables(stack) else {
             continue;
         };
         // Each variable is `{data_type, value}`.
@@ -351,6 +346,14 @@ pub fn read_sound_stacks(resource: &Resource, budget: &mut Budget) -> Result<Vec
         });
     }
     Ok(out)
+}
+
+pub(super) fn public_operator_variables(stack: &Value) -> Option<&Value> {
+    stack
+        .array("operators")
+        .iter()
+        .find(|op| op.str_field("name") == Some("public"))?
+        .get("operator_variables")
 }
 
 /// The defaults a stack states under their keys; a stack states its numbers as strings. A number

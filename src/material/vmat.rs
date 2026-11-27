@@ -158,10 +158,19 @@ fn dictionary<T>(
 
 /// `(name, value)` pairs of one of the material's parameter lists, in file order.
 fn params<'a>(data: &'a Value, list: &str, value: &str) -> Vec<(String, &'a Value)> {
+    param_entries(data, list, value)
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect()
+}
+
+pub(super) fn param_entries<'a>(
+    data: &'a Value,
+    list: &str,
+    value: &str,
+) -> impl DoubleEndedIterator<Item = (&'a str, &'a Value)> {
     data.array(list)
         .iter()
-        .filter_map(|p| Some((p.str_field("m_name")?.to_owned(), p.get(value)?)))
-        .collect()
+        .filter_map(move |p| Some((p.str_field("m_name")?, p.get(value)?)))
 }
 
 fn extras(path: &str, data: &Value) -> Json {
