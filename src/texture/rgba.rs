@@ -5,73 +5,118 @@ use crate::error::{Result, malformed};
 
 const WHAT: &str = "texture";
 
-/// The RGBA8 pixels of a level `width` x `height` in `format`: plain RGBA8 as it is, the colour
-/// block formats (BC1, BC3, BC4, BC5, BC7) decoded. Other formats are errors.
+/// RGBA8 decoding used by the existing 2D export API.
 pub(super) fn decode(
     format: PixelFormat,
     level: &[u8],
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>> {
-    let (w, h) = (width as usize, height as usize);
-    let decoder = match format {
-        PixelFormat::Rgba8 => return Ok(level.to_vec()),
-        PixelFormat::Bc1 => texture2ddecoder::decode_bc1,
-        PixelFormat::Bc3 => texture2ddecoder::decode_bc3,
-        PixelFormat::Bc4 => texture2ddecoder::decode_bc4,
-        PixelFormat::Bc5 => texture2ddecoder::decode_bc5,
-        PixelFormat::Bc7 => texture2ddecoder::decode_bc7,
-        other => return Err(malformed(WHAT, format!("no RGBA8 decoding of {other:?}"))),
-    };
-    let px = decode_blocks(format, decoder, level, (w, h))?;
-    Ok(px
-        .iter()
-        .flat_map(|p| {
-            let [b, g, r, a] = p.to_le_bytes();
-            [r, g, b, a]
-        })
-        .collect())
+    match format {
+        PixelFormat::Rgba8 => Ok(level.to_vec()),
+        PixelFormat::Bc1
+        | PixelFormat::Bc3
+        | PixelFormat::Bc4
+        | PixelFormat::Bc5
+        | PixelFormat::Bc7 => Ok(decode_blocks(format, level, width, height, |pixel| pixel)),
+        other => Err(malformed(WHAT, format!("no RGBA8 decoding of {other:?}"))),
+    }
 }
 
-/// texture2ddecoder's block decoders: blocks, width, height, packed pixels out.
-pub(super) type BlockDecoder =
-    fn(&[u8], usize, usize, &mut [u32]) -> std::result::Result<(), &'static str>;
-
-/// The pixels of a block-compressed level as the decoder makes them, packed as it packs them (a
-/// byte each of blue, green, red and alpha from the lowest), with the channels that `fix`
-/// rewrites made whole: texture2ddecoder reads the 48 bits of indices of a BC3 alpha or a BC4 or
-/// BC5 channel into a `usize`, which keeps 32 of them on a 32-bit target (the browser's wasm), so
-/// the last five texels of every block were drawn as the block's first value there.
+/// Decode a block format with only one block of scratch. All callers supply one validated image.
 pub(super) fn decode_blocks(
     format: PixelFormat,
-    decoder: BlockDecoder,
     level: &[u8],
-    (w, h): (usize, usize),
-) -> Result<Vec<u32>> {
-    let mut px = vec![0u32; w * h];
-    decoder(level, w, h, &mut px)
-        .map_err(|e| malformed(WHAT, format!("{format:?} blocks: {e}")))?;
-    // (offset of the channel's 8 bytes in a block, the channel's place in the packed pixel)
-    let channels: &[(usize, u32)] = match format {
-        PixelFormat::Bc3 => &[(0, 3)],
-        PixelFormat::Bc4 => &[(0, 2)],
-        PixelFormat::Bc5 => &[(0, 2), (8, 1)],
-        _ => &[],
-    };
-    let (bytes, blocks_x) = (format.block().2, w.div_ceil(4));
-    for (block, data) in level.chunks_exact(bytes).enumerate() {
-        let (bx, by) = (block % blocks_x * 4, block / blocks_x * 4);
-        for &(at, channel) in channels {
-            for (i, value) in channel_values(&data[at..at + 8]).into_iter().enumerate() {
-                let (x, y) = (bx + i % 4, by + i / 4);
-                if x < w && y < h {
-                    let p = &mut px[y * w + x];
-                    *p = *p & !(0xFF << (channel * 8)) | u32::from(value) << (channel * 8);
-                }
+    width: u32,
+    height: u32,
+    convert: impl Fn([u8; 4]) -> [u8; 4],
+) -> Vec<u8> {
+    let mut out = vec![0; width as usize * height as usize * 4];
+    copy_blocks(
+        level,
+        (width, height),
+        format.block().2,
+        out.as_chunks_mut::<4>().0,
+        |data| block_pixels(format, data),
+        convert,
+    );
+    out
+}
+
+pub(super) fn copy_blocks<P: Copy, T>(
+    level: &[u8],
+    (width, height): (u32, u32),
+    block_size: usize,
+    out: &mut [T],
+    decode: impl Fn(&[u8]) -> [P; 16],
+    convert: impl Fn(P) -> T,
+) {
+    let (w, h) = (width as usize, height as usize);
+    let blocks_x = w.div_ceil(4);
+    for (index, data) in level.chunks_exact(block_size).enumerate() {
+        let (bx, by) = (index % blocks_x * 4, index / blocks_x * 4);
+        let block = decode(data);
+        for (y, row) in block.as_chunks::<4>().0.iter().take(h - by).enumerate() {
+            let at = (by + y) * w + bx;
+            for (target, &pixel) in out[at..at + (w - bx).min(4)].iter_mut().zip(row) {
+                *target = convert(pixel);
             }
         }
     }
-    Ok(px)
+}
+
+fn block_pixels(format: PixelFormat, data: &[u8]) -> [[u8; 4]; 16] {
+    let mut packed = [0; 16];
+    match format {
+        PixelFormat::Bc1 => return bc_colour(data, false),
+        PixelFormat::Bc3 => {
+            let mut pixels = bc_colour(&data[8..], true);
+            for (pixel, alpha) in pixels.iter_mut().zip(channel_values(&data[..8])) {
+                pixel[3] = alpha;
+            }
+            return pixels;
+        }
+        PixelFormat::Bc4 => return channel_values(data).map(|r| [r, 0, 0, 255]),
+        PixelFormat::Bc5 => {
+            let r = channel_values(&data[..8]);
+            let g = channel_values(&data[8..]);
+            return std::array::from_fn(|i| [r[i], g[i], 0, 255]);
+        }
+        PixelFormat::Etc2Rgb => texture2ddecoder::decode_etc2_rgb_block(data, &mut packed),
+        PixelFormat::Etc2Rgba => {
+            texture2ddecoder::decode_etc2_rgb_block(&data[8..], &mut packed);
+            for (pixel, alpha) in packed.iter_mut().zip(super::eac::alpha(&data[..8])) {
+                *pixel = (*pixel & 0x00FF_FFFF) | u32::from(alpha) << 24;
+            }
+        }
+        PixelFormat::Bc7 => texture2ddecoder::decode_bc7_block(data, &mut packed),
+        _ => unreachable!("8-bit block format"),
+    }
+    packed.map(|p| {
+        let [b, g, r, a] = p.to_le_bytes();
+        [r, g, b, a]
+    })
+}
+
+/// DXT5 always uses the four-color palette, even when the endpoints are in ascending order.
+fn bc_colour(data: &[u8], four_colors: bool) -> [[u8; 4]; 16] {
+    let a = u16::from_le_bytes([data[0], data[1]]);
+    let b = u16::from_le_bytes([data[2], data[3]]);
+    let expand = |n: u16| -> [u16; 4] {
+        let (r, g, b) = (n >> 11, (n >> 5) & 63, n & 31);
+        [r << 3 | r >> 2, g << 2 | g >> 4, b << 3 | b >> 2, 255]
+    };
+    let (first, second) = (expand(a), expand(b));
+    let mix =
+        |x, y, denominator| std::array::from_fn(|i| (x * first[i] + y * second[i]) / denominator);
+    let (third, fourth) = if four_colors || a > b {
+        (mix(2, 1, 3), mix(1, 2, 3))
+    } else {
+        (mix(1, 1, 2), [0; 4])
+    };
+    let palette = [first, second, third, fourth].map(|pixel| pixel.map(|v| v as u8));
+    let indices = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+    std::array::from_fn(|i| palette[((indices >> (2 * i)) & 3) as usize])
 }
 
 /// The 16 values of a block's 8-byte channel (the alpha of BC3, BC4's red, each of BC5's two), in
@@ -117,22 +162,6 @@ pub(super) fn png(width: u32, height: u32, pixels: &[u8]) -> Result<Vec<u8>> {
 pub(super) fn halve(pixels: &[u8], width: u32, height: u32, srgb: bool) -> Vec<u8> {
     let (w, h) = (width as usize, height as usize);
     let (hw, hh) = ((w / 2).max(1), (h / 2).max(1));
-    let to_light = |v: u8| {
-        let c = f32::from(v) / 255.0;
-        if c <= 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    let from_light = |l: f32| {
-        let c = if l <= 0.003_130_8 {
-            l * 12.92
-        } else {
-            1.055 * l.powf(1.0 / 2.4) - 0.055
-        };
-        (c * 255.0).round().clamp(0.0, 255.0) as u8
-    };
     let mut out = vec![0u8; hw * hh * 4];
     for y in 0..hh {
         for x in 0..hw {
@@ -143,7 +172,12 @@ pub(super) fn halve(pixels: &[u8], width: u32, height: u32, srgb: bool) -> Vec<u
                     .iter()
                     .flat_map(|r| cols.iter().map(move |col| pixels[(r * w + col) * 4 + c]));
                 out[(y * hw + x) * 4 + c] = if srgb && c < 3 {
-                    from_light(texels.map(to_light).sum::<f32>() / 4.0)
+                    unorm8(linear_to_srgb(
+                        texels
+                            .map(|v| srgb_to_linear(f32::from(v) / 255.0))
+                            .sum::<f32>()
+                            / 4.0,
+                    ))
                 } else {
                     (texels.map(u32::from).sum::<u32>() as f32 / 4.0).round() as u8
                 };
@@ -151,4 +185,24 @@ pub(super) fn halve(pixels: &[u8], width: u32, height: u32, srgb: bool) -> Vec<u
         }
     }
     out
+}
+
+pub(super) fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+pub(super) fn linear_to_srgb(c: f32) -> f32 {
+    if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+pub(super) fn unorm8(c: f32) -> u8 {
+    (c * 255.0).round().clamp(0.0, 255.0) as u8
 }

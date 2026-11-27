@@ -131,14 +131,24 @@ pub fn lighting(entities: &[Value]) -> Result<Lighting> {
 
 /// Like [`lighting`], charging allocated zone storage against `budget`.
 pub fn lighting_in(entities: &[Value], budget: &mut Budget) -> Result<Lighting> {
-    let raw_zones: Vec<&Value> = entities
-        .iter()
-        .filter(|e| class(e) == "ent_dota_lightinfo")
-        .filter(|e| {
-            e.get("targetname")
-                .and_then(Value::as_str)
-                .is_some_and(|n| n.starts_with(WEATHER))
-        })
+    read_lighting(entities.iter(), budget)
+}
+
+pub(super) fn default_zone(entity: &Value) -> bool {
+    class(entity) == "ent_dota_lightinfo"
+        && entity
+            .str_field("targetname")
+            .is_some_and(|name| name.starts_with(WEATHER))
+}
+
+pub(super) fn read_lighting<'a>(
+    mut entities: impl Iterator<Item = &'a Value> + Clone,
+    budget: &mut Budget,
+) -> Result<Lighting> {
+    let raw_zones: Vec<_> = entities
+        .clone()
+        .filter(|entity| default_zone(entity))
+        .take(MAX_LIGHT_ZONES + 1)
         .collect();
     if raw_zones.is_empty() {
         return Err(malformed("lighting", "no light zones"));
@@ -156,7 +166,7 @@ pub fn lighting_in(entities: &[Value], budget: &mut Budget) -> Result<Lighting> 
         zones.push(read_zone(entity, index)?);
     }
 
-    let global_light = entities.iter().find(|e| class(e) == "env_global_light");
+    let global_light = entities.clone().find(|e| class(e) == "env_global_light");
     let sun_dir = vec2(raw_zones[0], "light_direction_day")
         .or_else(|| global_light.and_then(|e| vec2(e, "angles")))
         .ok_or_else(|| malformed("lighting", "light zone 0: sun direction"))?;
@@ -165,7 +175,6 @@ pub fn lighting_in(entities: &[Value], budget: &mut Budget) -> Result<Lighting> 
         .ok_or_else(|| malformed("lighting", "light zone 0: specular direction"))?;
 
     let fog_ctrl = entities
-        .iter()
         .find(|e| class(e) == "env_fog_controller")
         .ok_or_else(|| malformed("lighting", "missing fog controller"))?;
     let turn_secs = fog_ctrl

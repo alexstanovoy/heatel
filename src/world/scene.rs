@@ -60,19 +60,27 @@ pub fn active_entity_lumps_in(
     path: &str,
     budget: &mut Budget,
 ) -> Result<Vec<EntityLump>> {
-    let mut load = |file: &str, budget: &mut Budget| -> Result<Option<Value>> {
-        let bytes = match read_from_in(src, packages, file, budget) {
-            Ok(bytes) => bytes,
-            Err(Error::NotFound(_)) => return Ok(None),
-            Err(e) => return Err(e),
-        };
-        let resource = Resource::parse(&bytes)?;
-        let data = resource
-            .data_in(budget)
-            .ok_or_else(|| malformed("world", format!("{file} has no DATA")))??;
-        Ok(Some(data))
+    active_entity_lumps_with(path, budget, &mut |file, budget| {
+        data_in(src, packages, file, budget)
+    })
+}
+
+pub(super) fn data_in(
+    src: &(impl Source + ?Sized),
+    packages: &[&Vpk],
+    file: &str,
+    budget: &mut Budget,
+) -> Result<Option<Value>> {
+    let bytes = match read_from_in(src, packages, file, budget) {
+        Ok(bytes) => bytes,
+        Err(Error::NotFound(_)) => return Ok(None),
+        Err(e) => return Err(e),
     };
-    active_entity_lumps_with(path, budget, &mut load)
+    let resource = Resource::parse(&bytes)?;
+    let data = resource
+        .data_in(budget)
+        .ok_or_else(|| malformed("world", format!("{file} has no DATA")))??;
+    Ok(Some(data))
 }
 
 fn active_entity_lumps_with(
@@ -81,6 +89,14 @@ fn active_entity_lumps_with(
     load: &mut impl FnMut(&str, &mut Budget) -> Result<Option<Value>>,
 ) -> Result<Vec<EntityLump>> {
     let world = load(path, budget)?.ok_or_else(|| Error::NotFound(path.to_owned()))?;
+    active_entity_lumps_from_world(&world, budget, load)
+}
+
+pub(super) fn active_entity_lumps_from_world(
+    world: &Value,
+    budget: &mut Budget,
+    load: &mut impl FnMut(&str, &mut Budget) -> Result<Option<Value>>,
+) -> Result<Vec<EntityLump>> {
     let mut visited = HashSet::new();
     let mut queue = VecDeque::new();
     for lump in world.array("m_entityLumps") {
@@ -151,7 +167,7 @@ fn check_lump_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-fn entity_int(entity: &Value, key: &str) -> Option<i64> {
+pub(super) fn entity_int(entity: &Value, key: &str) -> Option<i64> {
     match entity.get(key)? {
         Value::String(text) => text.trim().parse().ok(),
         other => other.as_i64(),
@@ -283,17 +299,20 @@ struct ModelInfo {
 impl ModelInfo {
     /// A skin replaces each default material with the material in the same slot.
     fn material(&self, original: &str, skin: Option<usize>) -> String {
-        let replacement = skin.and_then(|skin| {
-            let slot = self
-                .groups
-                .first()?
-                .1
-                .iter()
-                .position(|path| path == original)?;
-            self.groups.get(skin)?.1.get(slot)
-        });
-        replacement.map_or_else(|| original.to_owned(), Clone::clone)
+        skin_material(&self.groups, original, skin).to_owned()
     }
+}
+
+pub(super) fn skin_material<'a>(
+    groups: &'a [(String, Vec<String>)],
+    original: &'a str,
+    skin: Option<usize>,
+) -> &'a str {
+    let replacement = skin.and_then(|skin| {
+        let slot = groups.first()?.1.iter().position(|path| path == original)?;
+        groups.get(skin)?.1.get(slot)
+    });
+    replacement.map_or(original, String::as_str)
 }
 
 struct MeshInfo {
@@ -862,7 +881,7 @@ fn check_count(count: usize, what: &str) -> Result<()> {
     Ok(())
 }
 
-fn vector4(value: Option<&Value>) -> [f32; 4] {
+pub(super) fn vector4(value: Option<&Value>) -> [f32; 4] {
     let items = value.map_or(&[][..], Value::slice);
     std::array::from_fn(|i| items.get(i).and_then(Value::as_f64).unwrap_or(0.0) as f32)
 }
@@ -873,35 +892,45 @@ fn world_material_overrides(node: &Value) -> Result<HashMap<usize, PlacementOver
     check_count(rows.len(), "material overrides")?;
     let mut by_object = HashMap::<usize, PlacementOverrides<'_>>::new();
     for row in rows {
-        let index = |key| {
-            row.get(key)
-                .and_then(Value::as_u64)
-                .and_then(|number| u32::try_from(number).ok())
-                .ok_or_else(|| malformed("world", format!("material override has no valid {key}")))
-        };
-        let material = row
-            .str_field("m_pMaterial")
-            .filter(|path| !path.is_empty())
-            .ok_or_else(|| malformed("world", "material override has no material"))?;
-        let object = index("m_nSceneObjectIndex")? as usize;
-        let mesh = index("m_nSubSceneObject")? as usize;
-        let draw = index("m_nDrawCallIndex")?;
+        let (object, mesh, draw, material) = material_override_row(row)?;
         let overrides = by_object.entry(object).or_default();
-        if draw == u32::MAX {
-            overrides.whole.get_or_insert(material);
-        } else {
+        if let Some(draw) = draw {
             overrides
                 .meshes
                 .entry(mesh)
                 .or_default()
-                .insert(draw as usize, material);
+                .insert(draw, material);
+        } else {
+            overrides.whole.get_or_insert(material);
         }
     }
     Ok(by_object)
 }
 
+pub(super) fn material_override_row(row: &Value) -> Result<(usize, usize, Option<usize>, &str)> {
+    let index = |key| {
+        row.get(key)
+            .and_then(Value::as_u64)
+            .and_then(|number| u32::try_from(number).ok())
+            .ok_or_else(|| malformed("world", format!("material override has no valid {key}")))
+    };
+    let material = row
+        .str_field("m_pMaterial")
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| malformed("world", "material override has no material"))?;
+    let object = index("m_nSceneObjectIndex")? as usize;
+    let mesh = index("m_nSubSceneObject")? as usize;
+    let draw = index("m_nDrawCallIndex")?;
+    Ok((
+        object,
+        mesh,
+        (draw != u32::MAX).then_some(draw as usize),
+        material,
+    ))
+}
+
 /// The compiled file of resource `path` (`x.vmdl` is `x.vmdl_c`).
-fn compiled(path: &str) -> String {
+pub(super) fn compiled(path: &str) -> String {
     if path.ends_with("_c") {
         path.to_owned()
     } else {

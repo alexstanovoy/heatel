@@ -51,6 +51,108 @@ pub enum PixelFormat {
     Rgba32f,
 }
 
+macro_rules! vtex_formats {
+    ($($(#[$doc:meta])* $name:ident = $id:literal),+ $(,)?) => {
+        /// The exact Source 2 format identifier, before any unpacking or channel conversion.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[non_exhaustive]
+        pub enum VTexFormat {
+            $($(#[$doc])* $name,)+
+            /// An unrecognized Source 2 format identifier.
+            Unrecognized(u8),
+        }
+
+        impl VTexFormat {
+            /// Interprets a header's format byte.
+            pub const fn from_id(id: u8) -> Self {
+                match id {
+                    $($id => Self::$name,)+
+                    other => Self::Unrecognized(other),
+                }
+            }
+
+            /// Byte value in the Source 2 header.
+            pub const fn id(self) -> u8 {
+                match self {
+                    $(Self::$name => $id,)+
+                    Self::Unrecognized(id) => id,
+                }
+            }
+        }
+    };
+}
+
+vtex_formats! {
+    /// Unknown Valve format.
+    Unknown = 0,
+    /// DXT1 (BC1).
+    Dxt1 = 1,
+    /// DXT5 (BC3).
+    Dxt5 = 2,
+    /// 8-bit intensity.
+    I8 = 3,
+    /// 8-bit RGBA.
+    Rgba8888 = 4,
+    /// 16-bit unsigned normalized red.
+    R16 = 5,
+    /// 16-bit unsigned normalized red and green.
+    Rg1616 = 6,
+    /// 16-bit unsigned normalized RGBA.
+    Rgba16161616 = 7,
+    /// Half-float red.
+    R16f = 8,
+    /// Half-float red and green.
+    Rg1616f = 9,
+    /// Half-float RGBA.
+    Rgba16161616f = 10,
+    /// Float red.
+    R32f = 11,
+    /// Float red and green.
+    Rg3232f = 12,
+    /// Float RGB.
+    Rgb323232f = 13,
+    /// Float RGBA.
+    Rgba32323232f = 14,
+    /// JPEG in an RGBA8888 wrapper.
+    JpegRgba8888 = 15,
+    /// PNG in an RGBA8888 wrapper.
+    PngRgba8888 = 16,
+    /// JPEG in a DXT5 wrapper.
+    JpegDxt5 = 17,
+    /// PNG in a DXT5 wrapper.
+    PngDxt5 = 18,
+    /// Unsigned HDR BC6H.
+    Bc6h = 19,
+    /// BC7.
+    Bc7 = 20,
+    /// ATI2N (BC5).
+    Ati2n = 21,
+    /// 8-bit intensity and alpha.
+    Ia88 = 22,
+    /// ETC2 RGB.
+    Etc2 = 23,
+    /// ETC2 RGBA.
+    Etc2Eac = 24,
+    /// EAC red.
+    R11Eac = 25,
+    /// EAC red and green.
+    Rg11Eac = 26,
+    /// ATI1N (BC4).
+    Ati1n = 27,
+    /// 8-bit BGRA.
+    Bgra8888 = 28,
+    /// WebP in an RGBA8888 wrapper.
+    WebpRgba8888 = 29,
+    /// WebP in a DXT5 wrapper.
+    WebpDxt5 = 30,
+    /// 32-bit unsigned integer red.
+    R32Uint = 31,
+    /// 8-bit alpha.
+    A8 = 32,
+    /// 8-bit unsigned normalized red.
+    R8Unorm = 33,
+}
+
 /// What a `vtex_c` format id stores, and what has to happen to it on the way to a
 /// [`PixelFormat`].
 #[derive(Clone, Copy)]
@@ -64,37 +166,41 @@ pub(crate) enum Stored {
 }
 
 impl Stored {
-    /// The format ids of `vtex_c` (Valve's `VTexFormat`). The JPEG ids and the three-channel
-    /// 32-bit float have no counterpart in the GPU formats a KTX2 can name, and no texture of
-    /// the game uses them.
-    pub(crate) fn from_id(id: u8) -> Result<Self> {
+    /// Maps a Source 2 format to its GPU storage or pixel conversion.
+    pub(crate) fn from_format(format: VTexFormat) -> Result<Self> {
         use PixelFormat as P;
-        Ok(match id {
-            1 => Self::Plain(P::Bc1),
-            2 => Self::Plain(P::Bc3),
-            3 => Self::Plain(P::R8),
-            4 => Self::Plain(P::Rgba8),
-            5 => Self::Plain(P::R16),
-            6 => Self::Plain(P::Rg16),
-            7 => Self::Plain(P::Rgba16),
-            8 => Self::Plain(P::R16f),
-            9 => Self::Plain(P::Rg16f),
-            10 => Self::Plain(P::Rgba16f),
-            11 => Self::Plain(P::R32f),
-            12 => Self::Plain(P::Rg32f),
-            14 => Self::Plain(P::Rgba32f),
-            16 | 18 => Self::Png,
-            19 => Self::Plain(P::Bc6h),
-            20 => Self::Plain(P::Bc7),
-            21 => Self::Plain(P::Bc5),
-            22 => Self::Plain(P::Rg8),
-            23 => Self::Plain(P::Etc2Rgb),
-            24 => Self::Plain(P::Etc2Rgba),
-            25 => Self::Plain(P::EacR11),
-            26 => Self::Plain(P::EacRg11),
-            27 => Self::Plain(P::Bc4),
-            28 => Self::Bgra8,
-            _ => return Err(malformed("vtex", format!("unsupported format id {id}"))),
+        use VTexFormat as V;
+        Ok(match format {
+            V::Dxt1 => Self::Plain(P::Bc1),
+            V::Dxt5 => Self::Plain(P::Bc3),
+            V::I8 | V::R8Unorm | V::A8 => Self::Plain(P::R8),
+            V::Rgba8888 => Self::Plain(P::Rgba8),
+            V::R16 => Self::Plain(P::R16),
+            V::Rg1616 => Self::Plain(P::Rg16),
+            V::Rgba16161616 => Self::Plain(P::Rgba16),
+            V::R16f => Self::Plain(P::R16f),
+            V::Rg1616f => Self::Plain(P::Rg16f),
+            V::Rgba16161616f => Self::Plain(P::Rgba16f),
+            V::R32f => Self::Plain(P::R32f),
+            V::Rg3232f => Self::Plain(P::Rg32f),
+            V::Rgba32323232f => Self::Plain(P::Rgba32f),
+            V::Bc6h => Self::Plain(P::Bc6h),
+            V::Bc7 => Self::Plain(P::Bc7),
+            V::Ati2n => Self::Plain(P::Bc5),
+            V::Ia88 => Self::Plain(P::Rg8),
+            V::Etc2 => Self::Plain(P::Etc2Rgb),
+            V::Etc2Eac => Self::Plain(P::Etc2Rgba),
+            V::R11Eac => Self::Plain(P::EacR11),
+            V::Rg11Eac => Self::Plain(P::EacRg11),
+            V::Ati1n => Self::Plain(P::Bc4),
+            V::PngRgba8888 | V::PngDxt5 => Self::Png,
+            V::Bgra8888 => Self::Bgra8,
+            _ => {
+                return Err(malformed(
+                    "vtex",
+                    format!("unsupported format id {}", format.id()),
+                ));
+            }
         })
     }
 

@@ -34,23 +34,19 @@ pub(super) fn node_matrix(affine: &Affine) -> [f32; 16] {
 /// A placement stored as 3 rows of 4 numbers, nested or flat.
 pub(super) fn affine(value: Option<&Value>) -> Option<Affine> {
     let items = value?.as_array()?;
-    let numbers: Vec<f32> = match items.first()?.as_array() {
-        Some(_) => items
-            .iter()
-            .flat_map(|row| row.as_array().unwrap_or_default())
-            .map(|v| v.as_f64().unwrap_or(0.0) as f32)
-            .collect(),
-        None => items
-            .iter()
-            .map(|v| v.as_f64().unwrap_or(0.0) as f32)
-            .collect(),
-    };
-    if numbers.len() < 12 {
-        return None;
+    if items.first()?.as_array().is_some() {
+        affine_rows(items.iter().flat_map(Value::slice))
+    } else {
+        affine_rows(items.iter())
     }
-    Some(std::array::from_fn(|r| {
-        std::array::from_fn(|c| numbers[r * 4 + c])
-    }))
+}
+
+fn affine_rows<'a>(mut values: impl Iterator<Item = &'a Value>) -> Option<Affine> {
+    let mut result = [[0.0; 4]; 3];
+    for cell in result.iter_mut().flatten() {
+        *cell = values.next()?.as_f64().unwrap_or(0.0) as f32;
+    }
+    Some(result)
 }
 
 /// Whether `affine` collapses space (its rotation-scale part has determinant 0).

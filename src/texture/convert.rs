@@ -51,24 +51,18 @@ impl Content {
         })
     }
 
-    /// The RGBA8 pixels of a DXT5 level `width` x `height`, read as `self`.
-    pub(super) fn decode_bc3(self, level: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
-        let px = super::rgba::decode_blocks(
-            PixelFormat::Bc3,
-            texture2ddecoder::decode_bc3,
-            level,
-            (width as usize, height as usize),
-        )?;
-        let mut out = Vec::with_capacity(px.len() * 4);
-        for p in px {
-            let [b, g, r, a] = p.to_le_bytes();
-            out.extend_from_slice(&match self {
-                Self::Colour => [r, g, b, a],
-                Self::YCoCg => ycocg(r, g, b, a),
-                Self::Normal => normal(r, g, a),
-            });
+    pub(super) fn decode_bc3(self, level: &[u8], width: u32, height: u32) -> Vec<u8> {
+        super::rgba::decode_blocks(PixelFormat::Bc3, level, width, height, |pixel| {
+            self.unpack(pixel)
+        })
+    }
+
+    pub(super) fn unpack(self, [r, g, b, a]: [u8; 4]) -> [u8; 4] {
+        match self {
+            Self::Colour => [r, g, b, a],
+            Self::YCoCg => ycocg(r, g, b, a),
+            Self::Normal => normal(r, g, a),
         }
-        Ok(out)
     }
 }
 

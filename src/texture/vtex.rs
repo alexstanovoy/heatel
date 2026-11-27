@@ -1,8 +1,9 @@
 use std::io::Cursor as IoCursor;
 
 use super::convert::Content;
-use super::format::{PixelFormat, Stored};
+use super::format::{PixelFormat, Stored, VTexFormat};
 use super::ktx2::{self, Encoding};
+use super::native::{TextureFlags, TextureMeta};
 use super::rgba;
 use super::sheet::{self, Sheet};
 use crate::budget::Budget;
@@ -10,18 +11,17 @@ use crate::bytes::Cursor;
 use crate::error::{Result, malformed};
 use crate::resource::Resource;
 
-const WHAT: &str = "vtex";
+pub(super) const WHAT: &str = "vtex";
 /// Largest side of a texture; the game's biggest is 4096.
 const MAX_SIDE: u32 = 16384;
 /// Most memory the decoded levels of one texture may take.
-const MAX_BYTES: usize = 256 << 20;
+pub(super) const MAX_BYTES: usize = 256 << 20;
 /// Most extra data entries a header may list (the game's textures have up to three).
 const MAX_EXTRAS: u32 = 16;
-/// Flags of a texture that is not a plain 2D one: a cube map, a volume, an array.
-const NOT_2D: u16 = 0x10 | 0x20 | 0x40;
 /// LZ4 expands a byte at most 255 times, so a level cannot be larger than this per stored byte.
 const LZ4_RATIO: usize = 255;
 
+const EXTRA_METADATA: u32 = 3;
 const EXTRA_SHEET: u32 = 2;
 const EXTRA_COMPRESSED_MIPS: u32 = 4;
 
@@ -55,39 +55,26 @@ impl Texture {
     /// Reads the texture from an already-parsed `vtex_c` [`Resource`], charging decoded level and
     /// PNG buffers to `budget` before allocating.
     pub fn from_resource_in(resource: &Resource<'_>, budget: &mut Budget) -> Result<Self> {
-        let data = resource
-            .block(b"DATA")
-            .ok_or_else(|| malformed(WHAT, "no DATA block"))?;
-        let header = Header::parse(data)?;
-        let (stored, width, height) = (header.stored, header.width, header.height);
-        let sizes = header.level_sizes()?;
-        let raw = resource.trailing();
-        let mips = if matches!(stored, Stored::Png) {
-            vec![decode_png(raw, width, height, budget)?]
-        } else {
-            header.read_levels(raw, &sizes, budget)?
-        };
+        let header = Header::from_resource(resource, budget)?;
+        let meta = &header.meta;
+        if !meta.flags.is_2d() || meta.depth > 1 {
+            return Err(malformed(WHAT, "a cube map, volume or array"));
+        }
+        let stored = Stored::from_format(meta.format)?;
+        let (format, mips) = header.load_levels(resource.trailing(), stored, false, budget)?;
         let mut texture = Self {
-            width,
-            height,
-            format: stored.decoded(),
+            width: meta.width,
+            height: meta.height,
+            format,
             mips,
-            sheet: header.sheet,
+            sheet: header
+                .meta
+                .sheet
+                .map(|sheet| sheet.into_legacy(budget))
+                .transpose()?,
         };
-        match stored {
-            Stored::Bgra8 => {
-                for px in texture
-                    .mips
-                    .iter_mut()
-                    .flat_map(|mip| mip.as_chunks_mut::<4>().0.iter_mut())
-                {
-                    px.swap(0, 2);
-                }
-            }
-            Stored::Plain(PixelFormat::Bc3) => {
-                texture.decode_content(Content::of(resource, budget)?, budget)?;
-            }
-            _ => {}
+        if matches!(stored, Stored::Plain(PixelFormat::Bc3)) {
+            texture.decode_content(Content::of(resource, budget)?, budget)?;
         }
         Ok(texture)
     }
@@ -112,7 +99,7 @@ impl Texture {
         budget.charge(total)?;
         for (level, mip) in self.mips.iter_mut().enumerate() {
             let (w, h) = ((self.width >> level).max(1), (self.height >> level).max(1));
-            *mip = content.decode_bc3(mip, w, h)?;
+            *mip = content.decode_bc3(mip, w, h);
         }
         self.format = PixelFormat::Rgba8;
         Ok(())
@@ -250,9 +237,12 @@ impl Texture {
     /// A texture of RGBA8 mip `levels` (largest first, `max(1, size >> i)` texels a side), for
     /// images made level by level from others.
     pub fn from_rgba8_levels(width: u32, height: u32, levels: Vec<Vec<u8>>) -> Result<Self> {
-        let mut texture =
-            Self::from_rgba8(width, height, levels.first().cloned().unwrap_or_default())?;
-        for (level, pixels) in levels.into_iter().enumerate().skip(1) {
+        let mut levels = levels.into_iter();
+        let mut texture = Self::from_rgba8(width, height, levels.next().unwrap_or_default())?;
+        if levels.len() >= (32 - width.max(height).leading_zeros()) as usize {
+            return Err(malformed(WHAT, "too many RGBA8 mip levels"));
+        }
+        for (level, pixels) in (1..).zip(levels) {
             let (w, h) = ((width >> level).max(1), (height >> level).max(1));
             if PixelFormat::Rgba8.level_size(w, h) != Some(pixels.len()) {
                 return Err(malformed(
@@ -434,63 +424,107 @@ struct Compressed {
     sizes: Vec<u32>,
 }
 
-struct Header {
-    stored: Stored,
-    width: u32,
-    height: u32,
-    mips: usize,
+struct MipSize {
+    unpacked: usize,
+    content: usize,
+}
+
+pub(super) struct Header {
+    pub(super) meta: TextureMeta,
     compressed: Option<Compressed>,
-    sheet: Option<Sheet>,
 }
 
 impl Header {
-    fn parse(data: &[u8]) -> Result<Self> {
+    pub(super) fn from_resource(resource: &Resource<'_>, budget: &mut Budget) -> Result<Self> {
+        let data = resource
+            .block(b"DATA")
+            .ok_or_else(|| malformed(WHAT, "no DATA block"))?;
+        Self::parse(data, budget)
+    }
+
+    fn parse(data: &[u8], budget: &mut Budget) -> Result<Self> {
         let mut c = Cursor::new(data, WHAT);
         let version = c.u16()?;
         if version != 1 {
             return Err(malformed(WHAT, format!("version {version}, expected 1")));
         }
-        let flags = c.u16()?;
-        if flags & NOT_2D != 0 {
-            return Err(malformed(WHAT, "a cube map, volume or array"));
-        }
+        let flags = TextureFlags(c.u16()?);
         c.take(16)?; // reflectivity
-        let (width, height, depth) = (c.u16()?, c.u16()?, c.u16()?);
-        let (format, mips) = (c.u8()?, c.u8()?);
+        let (width, height, depth) = (
+            u32::from(c.u16()?),
+            u32::from(c.u16()?),
+            u32::from(c.u16()?),
+        );
+        let (format, mip_count) = (VTexFormat::from_id(c.u8()?), c.u8()?);
         c.u32()?;
         let extras_at = c.pos() as u64;
         let extras_offset = c.u32()?;
         let extras = c.u32()?;
-        if depth > 1 || width == 0 || height == 0 {
+        let longest = width
+            .max(height)
+            .max(if flags.is_volume() { depth } else { 1 });
+        if width == 0
+            || height == 0
+            || depth > MAX_SIDE
+            || longest > MAX_SIDE
+            || mip_count == 0
+            || u32::from(mip_count) > 32 - longest.leading_zeros()
+        {
             return Err(malformed(
                 WHAT,
-                format!("{width} x {height} x {depth} is not a 2D texture"),
-            ));
-        }
-        let (width, height) = (u32::from(width), u32::from(height));
-        let longest = width.max(height);
-        let (stored, mips) = (Stored::from_id(format)?, usize::from(mips));
-        if longest > MAX_SIDE || mips == 0 || mips > (32 - longest.leading_zeros()) as usize {
-            return Err(malformed(
-                WHAT,
-                format!("{mips} levels of {width} x {height} texels"),
+                format!("{mip_count} levels of {width} x {height} x {depth} texels"),
             ));
         }
         let mut header = Self {
-            stored,
-            width,
-            height,
-            mips,
+            meta: TextureMeta {
+                width,
+                height,
+                depth,
+                mip_count,
+                format,
+                flags,
+                display_rect: None,
+                sheet: None,
+            },
             compressed: None,
-            sheet: None,
         };
-        header.read_extras(data, extras_at + u64::from(extras_offset), extras)?;
+        header.read_extras(data, extras_at + u64::from(extras_offset), extras, budget)?;
         Ok(header)
+    }
+
+    pub(super) fn load_levels(
+        &self,
+        raw: &[u8],
+        stored: Stored,
+        retain_png_depth: bool,
+        budget: &mut Budget,
+    ) -> Result<(PixelFormat, Vec<Vec<u8>>)> {
+        if matches!(stored, Stored::Png) {
+            let meta = &self.meta;
+            if !meta.flags.is_2d() || meta.depth > 1 || meta.mip_count != 1 {
+                return Err(malformed(WHAT, "PNG must have one image and mip"));
+            }
+            let (format, pixels) =
+                decode_png(raw, (meta.width, meta.height), retain_png_depth, budget)?;
+            return Ok((format, vec![pixels]));
+        }
+        let format = stored.decoded();
+        let sizes = self.level_sizes(format)?;
+        let mut levels = self.read_levels(raw, &sizes, budget)?;
+        if matches!(stored, Stored::Bgra8) {
+            for px in levels
+                .iter_mut()
+                .flat_map(|mip| mip.as_chunks_mut::<4>().0.iter_mut())
+            {
+                px.swap(0, 2);
+            }
+        }
+        Ok((format, levels))
     }
 
     /// Reads the list of `count` extra data entries at `at`: (type, offset from the offset field,
     /// size).
-    fn read_extras(&mut self, data: &[u8], at: u64, count: u32) -> Result<()> {
+    fn read_extras(&mut self, data: &[u8], at: u64, count: u32, budget: &mut Budget) -> Result<()> {
         if count > MAX_EXTRAS {
             return Err(malformed(WHAT, format!("{count} extra data entries")));
         }
@@ -504,7 +538,15 @@ impl Header {
                 .and_then(|from| data.get(from..from.checked_add(size)?))
                 .ok_or_else(|| malformed(WHAT, "extra data runs past the end"))?;
             match kind {
-                EXTRA_SHEET => self.sheet = sheet::read(payload)?,
+                EXTRA_SHEET => self.meta.sheet = sheet::read(payload, budget)?,
+                EXTRA_METADATA => {
+                    let mut metadata = Cursor::new(payload, WHAT);
+                    metadata.u16()?;
+                    let [w, h] = [u32::from(metadata.u16()?), u32::from(metadata.u16()?)];
+                    if w > 0 && w <= self.meta.width && h > 0 && h <= self.meta.height {
+                        self.meta.display_rect = Some([w, h]);
+                    }
+                }
                 EXTRA_COMPRESSED_MIPS => self.compressed = Some(self.compressed_mips(payload)?),
                 _ => {}
             }
@@ -523,27 +565,37 @@ impl Header {
         };
         let offset = c.u32()?;
         let count = c.u32()? as usize;
-        if offset != 8 || count < self.mips || c.remaining() / 4 < count {
+        if offset != 8 || count < usize::from(self.meta.mip_count) || c.remaining() / 4 < count {
             return Err(malformed(WHAT, "compressed mip sizes"));
         }
-        let sizes = (0..count).map(|_| c.u32()).collect::<Result<_>>()?;
+        let sizes = (0..self.meta.mip_count)
+            .map(|_| c.u32())
+            .collect::<Result<_>>()?;
         Ok(Compressed { lz4, sizes })
     }
 
-    /// The decoded size of every level, largest first.
-    fn level_sizes(&self) -> Result<Vec<usize>> {
-        let format = self.stored.decoded();
+    /// Unpacked sizes, including Source 2's minimum of four images for multi-slice BC mips.
+    fn level_sizes(&self, format: PixelFormat) -> Result<Vec<MipSize>> {
+        let over_cap = || malformed(WHAT, format!("decodes to more than {MAX_BYTES} bytes"));
         let mut total = 0usize;
-        (0..self.mips)
+        (0..self.meta.mip_count)
             .map(|level| {
-                let size = format
-                    .level_size((self.width >> level).max(1), (self.height >> level).max(1))
-                    .and_then(|size| {
-                        total = total.checked_add(size)?;
-                        (total <= MAX_BYTES).then_some(size)
-                    });
-                size.ok_or_else(|| {
-                    malformed(WHAT, format!("decodes to more than {MAX_BYTES} bytes"))
+                let [w, h, depth] = self.meta.mip_dimensions(level);
+                let images = depth * self.meta.flags.face_count();
+                let padded = if format.block().0 > 1 && (2..4).contains(&images) {
+                    4
+                } else {
+                    images
+                };
+                let image = format.level_size(w, h).ok_or_else(over_cap)?;
+                let unpacked = image.checked_mul(padded as usize).ok_or_else(over_cap)?;
+                total = total
+                    .checked_add(unpacked)
+                    .filter(|&size| size <= MAX_BYTES)
+                    .ok_or_else(over_cap)?;
+                Ok(MipSize {
+                    unpacked,
+                    content: image * images as usize,
                 })
             })
             .collect()
@@ -555,30 +607,39 @@ impl Header {
     fn read_levels(
         &self,
         raw: &[u8],
-        sizes: &[usize],
+        sizes: &[MipSize],
         budget: &mut Budget,
     ) -> Result<Vec<Vec<u8>>> {
-        let total: usize = sizes.iter().sum();
-        budget.charge(total)?;
-        let stored: Vec<usize> = match &self.compressed {
-            Some(c) => c.sizes[..self.mips].iter().map(|&n| n as usize).collect(),
-            None => sizes.to_vec(),
-        };
-        let mut levels = vec![Vec::new(); self.mips];
+        budget.charge(sizes.iter().map(|size| size.unpacked).sum())?;
+        let mut levels = vec![Vec::new(); sizes.len()];
         let mut at = 0usize;
-        for level in (0..self.mips).rev() {
-            let (size, len) = (sizes[level], stored[level]);
+        for level in (0..sizes.len()).rev() {
+            let MipSize {
+                unpacked: size,
+                content,
+            } = sizes[level];
+            let len = self
+                .compressed
+                .as_ref()
+                .map_or(size, |entry| entry.sizes[level] as usize);
             let part = at
                 .checked_add(len)
                 .and_then(|end| raw.get(at..end))
                 .ok_or_else(|| malformed(WHAT, "level data runs past the end"))?;
             at += len;
             levels[level] = if len >= size {
-                part[..size].to_vec()
+                part[..content].to_vec()
             } else if self.compressed.as_ref().is_some_and(|c| c.lz4) && size / LZ4_RATIO <= len {
                 let mut out = vec![0; size];
-                lz4_flex::block::decompress_into(part, &mut out)
+                let decoded = lz4_flex::block::decompress_into(part, &mut out)
                     .map_err(|e| malformed(WHAT, format!("level {level}: {e}")))?;
+                if decoded != size {
+                    return Err(malformed(
+                        WHAT,
+                        format!("level {level} expands to {decoded} of {size} bytes"),
+                    ));
+                }
+                out.truncate(content);
                 out
             } else {
                 return Err(malformed(
@@ -592,22 +653,30 @@ impl Header {
 }
 
 /// The bytes of a level `width` x `height` as RGBA8, refused past [`MAX_BYTES`].
-fn rgba8_size(width: u32, height: u32) -> Result<usize> {
+pub(super) fn rgba8_size(width: u32, height: u32) -> Result<usize> {
     PixelFormat::Rgba8
         .level_size(width, height)
         .filter(|&size| size <= MAX_BYTES)
         .ok_or_else(|| malformed(WHAT, format!("{width} x {height} RGBA8 is over the cap")))
 }
 
-/// The RGBA8 pixels of a PNG-coded level, which must be the texture's size.
-fn decode_png(png: &[u8], width: u32, height: u32, budget: &mut Budget) -> Result<Vec<u8>> {
+/// The pixels of a PNG-coded level, which must be the texture's size.
+fn decode_png(
+    png: &[u8],
+    (width, height): (u32, u32),
+    retain_depth: bool,
+    budget: &mut Budget,
+) -> Result<(PixelFormat, Vec<u8>)> {
     let png_err = |e: png::DecodingError| malformed(WHAT, format!("png: {e}"));
-    let rgba_len = rgba8_size(width, height)?;
     let limits = png::Limits {
         bytes: budget.left().min(MAX_BYTES),
     };
     let mut decoder = png::Decoder::new_with_limits(IoCursor::new(png), limits);
-    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    decoder.set_transformations(if retain_depth {
+        png::Transformations::EXPAND
+    } else {
+        png::Transformations::normalize_to_color8()
+    });
     let mut reader = decoder.read_info().map_err(png_err)?;
     let info = reader.info();
     if (info.width, info.height) != (width, height) {
@@ -619,53 +688,66 @@ fn decode_png(png: &[u8], width: u32, height: u32, budget: &mut Budget) -> Resul
             ),
         ));
     }
+    let wide = reader.output_color_type().1 == png::BitDepth::Sixteen;
+    let format = if wide {
+        PixelFormat::Rgba16
+    } else {
+        PixelFormat::Rgba8
+    };
+    let alloc = format
+        .level_size(width, height)
+        .filter(|&size| size <= MAX_BYTES)
+        .ok_or_else(|| {
+            malformed(
+                WHAT,
+                format!("{width} x {height} PNG output is over the cap"),
+            )
+        })?;
     let size = reader
         .output_buffer_size()
-        .ok_or_else(|| malformed(WHAT, "png size"))?;
-    if size > MAX_BYTES {
-        return Err(malformed(
-            WHAT,
-            format!("png decodes to {size} bytes, more than {MAX_BYTES}"),
-        ));
-    }
-    let alloc = size.max(rgba_len);
+        .filter(|&size| size <= alloc)
+        .ok_or_else(|| malformed(WHAT, "png buffer size"))?;
     budget.charge(alloc)?;
     let mut pixels = vec![0; alloc];
     let frame = reader.next_frame(&mut pixels[..size]).map_err(png_err)?;
-    let (colors, decoded, texels) = (
-        frame.color_type,
-        frame.buffer_size(),
-        width as usize * height as usize,
-    );
-    // Expand narrower colour types back-to-front in place so no second full-frame Vec is allocated.
-    match colors {
-        png::ColorType::Rgba if decoded == texels * 4 => {}
-        png::ColorType::Rgb if decoded == texels * 3 => {
-            for i in (0..texels).rev() {
-                let (s, d) = (i * 3, i * 4);
-                let [r, g, b] = [pixels[s], pixels[s + 1], pixels[s + 2]];
-                pixels[d..d + 4].copy_from_slice(&[r, g, b, 255]);
-            }
-        }
-        png::ColorType::GrayscaleAlpha if decoded == texels * 2 => {
-            for i in (0..texels).rev() {
-                let (s, d) = (i * 2, i * 4);
-                let [g, a] = [pixels[s], pixels[s + 1]];
-                pixels[d..d + 4].copy_from_slice(&[g, g, g, a]);
-            }
-        }
-        png::ColorType::Grayscale if decoded == texels => {
-            for i in (0..texels).rev() {
-                let g = pixels[i];
-                let d = i * 4;
-                pixels[d..d + 4].copy_from_slice(&[g, g, g, 255]);
-            }
-        }
-        png::ColorType::Indexed => return Err(malformed(WHAT, "png left indexed")),
-        _ => return Err(malformed(WHAT, "png pixels do not fill the texture")),
+    let (channels, decoded) = (frame.color_type.samples(), frame.buffer_size());
+    if frame.color_type == png::ColorType::Indexed || decoded != alloc / 4 * channels {
+        return Err(malformed(WHAT, "png pixels do not fill the texture"));
     }
-    pixels.truncate(rgba_len);
-    Ok(pixels)
+    if wide {
+        let samples = pixels.as_chunks_mut::<2>().0;
+        for sample in &mut samples[..decoded / 2] {
+            sample.swap(0, 1);
+        }
+        expand_png(samples, channels);
+    } else {
+        expand_png(pixels.as_chunks_mut::<1>().0, channels);
+    }
+    Ok((format, pixels))
+}
+
+/// Expand grayscale and RGB PNGs back to front so input and output can share a buffer.
+fn expand_png<const N: usize>(samples: &mut [[u8; N]], channels: usize) {
+    if channels == 4 {
+        return;
+    }
+    for pixel in (0..samples.len() / 4).rev() {
+        let src = pixel * channels;
+        let dst = pixel * 4;
+        let red = samples[src];
+        let rgb = if channels == 3 {
+            [red, samples[src + 1], samples[src + 2]]
+        } else {
+            [red; 3]
+        };
+        let alpha = if channels == 2 {
+            samples[src + 1]
+        } else {
+            [255; N]
+        };
+        samples[dst..dst + 3].copy_from_slice(&rgb);
+        samples[dst + 3] = alpha;
+    }
 }
 
 /// The colour half of a DXT5 block as a BC1 block of the same four colours (see

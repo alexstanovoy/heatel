@@ -1,15 +1,21 @@
 //! Textures: Valve's `vtex_c` decoded to the pixel data they hold, and written as KTX2.
 
+mod bc6;
 mod convert;
+mod eac;
 mod format;
 mod ktx2;
+mod native;
 mod rgba;
 mod sheet;
 mod vtex;
 
-pub use format::PixelFormat;
+pub use format::{PixelFormat, VTexFormat};
 pub use ktx2::{Encoding, to_plain as ktx2_to_plain};
-pub use sheet::{Frame, Sequence, Sheet};
+pub use native::{
+    EmbeddedImage, Rgba8Options, TextureFlags, TextureMeta, TextureMip, VTex, embedded_image,
+};
+pub use sheet::{Frame, FrameImage, Sequence, Sheet, VTexFrame, VTexSequence, VTexSheet};
 pub use vtex::Texture;
 
 /// What a material reads a texture as, which decides its encoding and the block format an image
@@ -34,3 +40,9 @@ impl Role {
         }
     }
 }
+
+#[cfg(all(test, any(unix, windows)))]
+mod audit;
+
+#[cfg(test)]
+mod tests;
