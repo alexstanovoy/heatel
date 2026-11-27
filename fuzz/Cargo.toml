@@ -216,3 +216,59 @@ path = "fuzz_targets/scripts.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "shops_catalog"
+path = "fuzz_targets/shops_catalog.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tooltip_catalog"
+path = "fuzz_targets/tooltip_catalog.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sound_graph"
+path = "fuzz_targets/sound_graph.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "source2_material"
+path = "fuzz_targets/source2_material.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vtex_native"
+path = "fuzz_targets/vtex_native.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "animation_set"
+path = "fuzz_targets/animation_set.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "model_rig"
+path = "fuzz_targets/model_rig.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "world_descriptors"
+path = "fuzz_targets/world_descriptors.rs"
+test = false
+doc = false
+bench = false
