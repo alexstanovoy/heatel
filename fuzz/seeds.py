@@ -208,12 +208,15 @@ def formats(pak):
                 continue
             seen_formats[fmt] = seen_formats.get(fmt, 0) + 1
             write("vtex", name, data)
+            write("vtex_native", name, data)
         elif ext == "vsnd_c":
             write("vsnd", name, data)
         else:
             write("resource", name, data)
             if ext in ("vsndevts_c", "vrr_c", "vpcf_c"):
                 write("presentation", name, data)
+            if ext == "vsndevts_c":
+                write("sound_graph", name, data)
         for kind, block, _ in blocks(data):
             key = (ext, kind, block[:1])
             if is_kv3(block) and len(block) <= MAX_KV3 and key not in kv3_seen:
@@ -247,6 +250,7 @@ def models(pak):
         if {"ANIM", "AGRP"} & has and animated < 16:
             animated += 1
             write("anim", name, data)
+            write("animation_set", name, data)
             write("sequence", name, data)
         for kind, block, _ in blocks(data):
             if kind in ("VBIB", "MBUF") and len(block) <= 128 << 10:
@@ -254,17 +258,40 @@ def models(pak):
     for path in spread(small, 12):
         data = pak.read(path)
         if data is not None:
-            write("model", path.replace("/", "_"), bundle(reachable([pak], path, data, MAX_BUNDLE)))
+            seed = bundle(reachable([pak], path, data, MAX_BUNDLE))
+            write("model", path.replace("/", "_"), seed)
+            write("model_rig", path.replace("/", "_"), seed)
     materials = sorted((p for p in pak.files if p.endswith(".vmat_c")), key=pak.size)
     for path in spread([p for p in materials if pak.size(p) <= 128 << 10], 24):
         data = pak.read(path)
         if data is not None:
             write("material", path.replace("/", "_"), data)
+            write("source2_material", path.replace("/", "_"), data)
     systems = sorted((p for p in pak.files if p.endswith(".vpcf_c")), key=pak.size)
     for path in spread([p for p in systems if pak.size(p) <= 64 << 10], 24):
         data = pak.read(path)
         if data is not None:
             write("particle", path.replace("/", "_"), data)
+
+
+def world_files(package, pak, world, max_file=256 << 10):
+    """A world, its small nodes and entities, and bounded referenced files."""
+    files = [(world, package.read(world))]
+    files += [
+        (p, package.read(p))
+        for p in package.files
+        if p.endswith((".vwnod_c", ".vents_c")) and package.size(p) <= max_file
+    ]
+    files = [(p, d) for p, d in files if d is not None]
+    extra = []
+    for path, data in files:
+        extra += reachable([package, pak], path, data, MAX_BUNDLE // 2)[1:]
+    all_files, total = [], 0
+    for path, data in files + extra:
+        if total + len(data) <= MAX_BUNDLE and path not in dict(all_files):
+            all_files.append((path, data))
+            total += len(data)
+    return all_files
 
 
 def worlds(game, pak):
@@ -299,23 +326,17 @@ def worlds(game, pak):
         world = next((p for p in package.files if p.endswith("world.vwrld_c")), None)
         if world is None or worlds_written >= 8:
             continue
-        files = [(world, package.read(world))]
-        files += [
-            (p, package.read(p))
-            for p in package.files
-            if p.endswith((".vwnod_c", ".vents_c")) and package.size(p) <= 256 << 10
-        ]
-        files = [(p, d) for p, d in files if d is not None]
-        extra = []
-        for path, data in files:
-            extra += reachable([package, pak], path, data, MAX_BUNDLE // 2)[1:]
-        all_files, total = [], 0
-        for path, data in files + extra:
-            if total + len(data) <= MAX_BUNDLE and path not in dict(all_files):
-                all_files.append((path, data))
-                total += len(data)
-        write("world", rel.replace("/", "_"), bundle(all_files))
+        seed = bundle(world_files(package, pak, world))
+        write("world", rel.replace("/", "_"), seed)
+        write("world_descriptors", rel.replace("/", "_"), seed)
         worlds_written += 1
+
+    # The smallest scenes use unsupported binary entities; seed a typed main-map world too.
+    if os.path.isfile(os.path.join(game, "maps/dota.vpk")):
+        package = Package(game, "maps/dota.vpk")
+        world = "maps/dota/world.vwrld_c"
+        if world in package.files:
+            write("world_descriptors", "dota", bundle(world_files(package, pak, world, 512 << 10)))
 
 
 def excerpt(text, keys, limit):
@@ -358,11 +379,20 @@ def texts(pak):
     ]
     files = [("", loc[: 64 << 10].encode())] + [("", s.encode()) for s in scripts]
     write("tooltips", "abilities", bundle(files))
+    definitions = [("", ('"DOTAAbilities"\n{\n' + s + '\n}\n').encode()) for s in scripts]
+    labels = "".join(
+        l for l in read("resource/localization/dota_english.txt").splitlines(keepends=True)
+        if '"DOTA_Tooltip_' in l
+    )[: 32 << 10]
+    write("tooltip_catalog", "abilities", bundle([files[0], ("", labels.encode())] + definitions))
+    shops = read("scripts/shops.txt").encode()
+    neutral = read("scripts/npc/neutral_items.txt").encode()
+    write("shops_catalog", "shops", bundle([("", shops), definitions[0], ("", neutral)]))
     write("scripts", "localization", loc[: 64 << 10].encode())
     for name, script in zip(["items", "abilities"], scripts):
         write("scripts", name, script.encode())
     write("portraits", "excerpt", read("scripts/npc/portraits.txt")[: 200 << 10].encode())
-    write("shop", "shops", read("scripts/shops.txt").encode())
+    write("shop", "shops", shops)
     write("soundmixer", "soundmixers", read("scripts/soundmixers.txt").encode())
     items = read("scripts/items/items_game.txt")
     start = items.find('\t"items"')

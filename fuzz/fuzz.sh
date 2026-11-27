@@ -34,7 +34,8 @@ build() {
 # The longest input worth mutating: a few real files of the format fit.
 max_len() {
     case "$1" in
-    model | world | map) echo 1048576 ;;
+    model | world | map | world_descriptors | model_rig | vtex_native) echo 1048576 ;;
+    animation_set | tooltip_catalog | shops_catalog | sound_graph | source2_material) echo 262144 ;;
     resource | vtex | ktx2 | anim | sequence | presentation | items_game | entities | tooltips | portraits | shop | scripts) echo 262144 ;;
     kv3 | material | vbib) echo 131072 ;;
     *) echo 65536 ;;
