@@ -76,14 +76,13 @@ fn terrain_keeps_layer_indices_and_last_value_of_duplicate_keys() {
 
 #[cfg(any(unix, windows))]
 #[test]
+#[ignore = "requires build-6997 Dota VPKs"]
 fn vpk_material_audit() {
     use crate::{Budget, DirSource, Resource, Vpk, locate::install_in};
     use std::collections::BTreeMap;
     use std::path::Path;
 
-    let Some(path) = std::env::var_os("HEATEL_DOTA_PATH") else {
-        return;
-    };
+    let path = std::env::var_os("HEATEL_DOTA_PATH").expect("set HEATEL_DOTA_PATH");
     let source = DirSource::new(install_in(Path::new(&path)).expect("Dota install").game);
     let pak = Vpk::open(&source, "pak01_dir.vpk").unwrap();
     let mut shaders = BTreeMap::<String, usize>::new();

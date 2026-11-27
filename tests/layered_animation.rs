@@ -414,11 +414,13 @@ fn default_wearables_select_the_base_forms_slots() {
     assert_eq!(models, ["base.vmdl"]);
 }
 
-fn install() -> Option<(DirSource, Vpk)> {
-    let path = std::path::PathBuf::from(std::env::var_os("HEATEL_DOTA_PATH")?);
+fn install() -> (DirSource, Vpk) {
+    let path = std::path::PathBuf::from(
+        std::env::var_os("HEATEL_DOTA_PATH").expect("set HEATEL_DOTA_PATH"),
+    );
     let source = DirSource::new(heatel::find_game_dir(Some(&path)).expect("Dota install"));
     let pak = Vpk::open(&source, "pak01_dir.vpk").expect("Dota VPK");
-    Some((source, pak))
+    (source, pak)
 }
 
 fn changed_rotation(tracks: &SourceTracks, bone: usize) -> bool {
@@ -434,10 +436,9 @@ fn changed_rotation(tracks: &SourceTracks, bone: usize) -> bool {
 }
 
 #[test]
+#[ignore = "requires build-6997 Dota VPKs"]
 fn gyrocopter_constant_layers_spin_both_rotor_bones() {
-    let Some((source, pak)) = install() else {
-        return;
-    };
+    let (source, pak) = install();
     let bytes = pak.read_file(&source, GYRO).unwrap();
     let resource = Resource::parse(&bytes).unwrap();
     let rig = ModelRig::read(&resource).unwrap();
@@ -493,10 +494,9 @@ fn gyrocopter_constant_layers_spin_both_rotor_bones() {
 }
 
 #[test]
+#[ignore = "requires build-6997 Dota VPKs"]
 fn gyrocopter_default_wearables_resolve_front_and_rear_rotors() {
-    let Some((source, pak)) = install() else {
-        return;
-    };
+    let (source, pak) = install();
     let bytes = pak.read_file(&source, GYRO).unwrap();
     let rig = ModelRig::read(&Resource::parse(&bytes).unwrap()).unwrap();
     let attachment = rig
@@ -645,10 +645,9 @@ fn audit_wearables(
 }
 
 #[test]
+#[ignore = "requires build-6997 Dota VPKs"]
 fn every_playable_hero_model_and_clip_decodes_from_the_install() {
-    let Some((source, pak)) = install() else {
-        return;
-    };
+    let (source, pak) = install();
     let models = hero_models(&source, &pak);
     assert_eq!(models.len(), 127);
     let mut totals = Totals::default();

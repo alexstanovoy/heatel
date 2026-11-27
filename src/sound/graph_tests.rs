@@ -219,13 +219,12 @@ fn an_unaffordable_event_file_leaves_the_graph_unchanged() {
 
 #[cfg(any(unix, windows))]
 #[test]
+#[ignore = "requires build-6997 Dota VPKs"]
 fn vpk_sound_event_audit() {
     use crate::{DirSource, Vpk, locate::install_in};
     use std::path::Path;
 
-    let Some(path) = std::env::var_os("HEATEL_DOTA_PATH") else {
-        return;
-    };
+    let path = std::env::var_os("HEATEL_DOTA_PATH").expect("set HEATEL_DOTA_PATH");
     let source = DirSource::new(install_in(Path::new(&path)).expect("Dota install").game);
     let pak = Vpk::open(&source, "pak01_dir.vpk").unwrap();
     let (graph, resource_counts, definitions) = read_graph(&source, &pak);
