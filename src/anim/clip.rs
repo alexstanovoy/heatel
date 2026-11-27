@@ -165,6 +165,7 @@ pub(crate) fn read_clips_with_ctrl(
                     Output::Gltf {
                         trajectory: !in_place,
                     },
+                    mem_budget,
                 )?
                 .bones;
             clips.push(Clip {
@@ -209,6 +210,50 @@ mod in_place_tests {
                 })
                 .collect(),
         )
+    }
+
+    #[test]
+    fn morph_decode_buffers_and_names_refuse_a_tight_memory_budget() {
+        let group = Value::object([(
+            "m_decodeKey",
+            Value::object([(
+                "m_dataChannelArray",
+                Value::from_array([Value::object([
+                    ("m_szVariableName", Value::from("data")),
+                    ("m_szChannelClass", Value::from("MorphChannel")),
+                    ("m_szElementNameArray", Value::from(["smile"])),
+                    ("m_nElementIndexArray", Value::from([0])),
+                ])]),
+            )]),
+        )]);
+        let animation = Value::Null;
+        let desc = Value::object([("m_pData", Value::object([("m_nFrames", 0)]))]);
+        let mut decoder = Decoder::new(&animation, &group, &[], true).unwrap();
+        assert_eq!(decoder.morph_names, ["smile"]);
+        let buffers =
+            size_of::<Option<f32>>() + size_of::<KeyWriter<1>>() + size_of::<MorphTrack>();
+        let required = buffers + "smile".len() + 16;
+        for (limit, charge) in [
+            (0, size_of::<Option<f32>>()),
+            (size_of::<Option<f32>>(), size_of::<KeyWriter<1>>()),
+            (buffers - 1, size_of::<MorphTrack>()),
+            (buffers, "smile".len() + 16),
+            (required - 1, "smile".len() + 16),
+        ] {
+            let mut memory = MemBudget::new(limit);
+            let error = match decoder.source_tracks(&desc, &mut memory) {
+                Err(error) => error,
+                Ok(_) => panic!("morph buffers exceeded their memory budget"),
+            };
+            assert_eq!(
+                error.to_string(),
+                format!("reading: takes {charge} bytes more than it may")
+            );
+        }
+        let mut memory = MemBudget::new(required);
+        let tracks = decoder.source_tracks(&desc, &mut memory).unwrap();
+        assert!(tracks.morphs.is_empty());
+        assert_eq!(memory.spent(), required);
     }
 
     #[test]
@@ -517,23 +562,23 @@ impl<'a> Decoder<'a> {
         })
     }
 
-    pub(super) fn source_tracks(&mut self, desc: &Value) -> Result<SourceTracks> {
-        self.decode(desc, Output::Source)
+    pub(super) fn source_tracks(
+        &mut self,
+        desc: &Value,
+        memory: &mut MemBudget,
+    ) -> Result<SourceTracks> {
+        self.decode(desc, Output::Source, memory)
     }
 
-    fn decode(&mut self, desc: &Value, output: Output) -> Result<SourceTracks> {
+    fn decode(
+        &mut self,
+        desc: &Value,
+        output: Output,
+        memory: &mut MemBudget,
+    ) -> Result<SourceTracks> {
         let data = desc.get("m_pData");
         let frames = frame_count(data)?;
-        let channels = self
-            .bones
-            .len()
-            .saturating_add(self.morph_names.len())
-            .max(1);
-        Budget::spend(
-            &mut self.budget.bone_frames,
-            frames.max(1).saturating_mul(channels),
-            "frames",
-        )?;
+        self.spend_frames(frames)?;
         let fps = frame_rate(desc)?;
         let blocks = frame_blocks(data, &mut self.budget)?;
         let movements = if matches!(output, Output::Gltf { trajectory: false }) {
@@ -541,6 +586,7 @@ impl<'a> Decoder<'a> {
         } else {
             movements(desc, &mut self.budget, matches!(output, Output::Source))?
         };
+        self.charge_buffers(memory)?;
         let mut pose: Vec<_> = self.bones.iter().map(rest_pose).collect();
         let mut morphs = vec![None; self.morph_names.len()];
         let mut writers: Vec<TrackWriter> =
@@ -583,6 +629,32 @@ impl<'a> Decoder<'a> {
             movements,
             end,
         ))
+    }
+
+    fn spend_frames(&mut self, frames: usize) -> Result<()> {
+        let channels = self
+            .bones
+            .len()
+            .saturating_add(self.morph_names.len())
+            .max(1);
+        Budget::spend(
+            &mut self.budget.bone_frames,
+            frames.max(1).saturating_mul(channels),
+            "frames",
+        )
+    }
+
+    fn charge_buffers(&self, memory: &mut MemBudget) -> Result<()> {
+        memory.slots::<BonePose>(self.bones.len())?;
+        memory.slots::<TrackWriter>(self.bones.len())?;
+        memory.slots::<Track>(self.bones.len())?;
+        memory.slots::<Option<f32>>(self.morph_names.len())?;
+        memory.slots::<KeyWriter<1>>(self.morph_names.len())?;
+        memory.slots::<MorphTrack>(self.morph_names.len())?;
+        for name in &self.morph_names {
+            memory.string_of(name.len())?;
+        }
+        Ok(())
     }
 
     fn read_frame(

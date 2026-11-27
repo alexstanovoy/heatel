@@ -378,7 +378,8 @@ impl AnimationSet {
             .get(index)
             .ok_or_else(|| malformed("animation", format!("no clip {index}")))?;
         let group = self.group.as_ref().unwrap_or(&Value::Null);
-        Decoder::new(animation, group, &self.bones, true)?.source_tracks(clip)
+        Decoder::new(animation, group, &self.bones, true)?
+            .source_tracks(clip, &mut Budget::named("animation decode"))
     }
 }
 
