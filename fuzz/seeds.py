@@ -13,6 +13,7 @@ Other fuzz suites may import this module for its package reader and
 bundling (`Package`, `bundle`, `reachable`, `excerpt`, `spread`, `write`).
 """
 import os
+import re
 import struct
 import sys
 import zlib
@@ -272,6 +273,17 @@ def models(pak):
         data = pak.read(path)
         if data is not None:
             write("particle", path.replace("/", "_"), data)
+    rig_pair(pak)
+
+
+def rig_pair(pak):
+    """A base hero followed by a wearable, for cross-rig bone merging."""
+    paths = ["models/heroes/axe/axe.vmdl_c", "models/items/axe/axe_belt001/axe_belt001.vmdl_c"]
+    files = [(path, pak.read(path)) for path in paths]
+    if all(data is not None for _, data in files):
+        seed = bundle(files)
+        if len(seed) <= MAX_BUNDLE:
+            write("model_rig", "axe-wearable", seed)
 
 
 def world_files(package, pak, world, max_file=256 << 10):
@@ -353,46 +365,72 @@ def excerpt(text, keys, limit):
                 if depth <= 0 and j > i + 1:
                     break
             chunk = "".join(lines[i:j])
-            out.append(chunk)
-            total += len(chunk)
+            size = len(chunk.encode())
+            if total + size <= limit:
+                out.append(chunk)
+                total += size
             i = j
         else:
             i += 1
     return "".join(out)
 
 
+def block_names(text):
+    return set(re.findall(r'"([^"\n]+)"\s*\{', text))
+
+
+def shop_definitions(shops, items):
+    """Shop results and their existing recipes, without localization suffixes."""
+    names = set(re.findall(r'"item"\s+"(item_[^"]+)"', shops))
+    names.update("item_recipe_" + name[5:] for name in tuple(names))
+    return excerpt(items, names & block_names(items), 96 << 10)
+
+
+def hero_scripts(read):
+    """Axe's authored abilities and facet metadata, with shared ability defaults."""
+    hero = excerpt(read("scripts/npc/heroes/npc_dota_hero_axe.txt"), ["npc_dota_hero_axe"], 24 << 10)
+    definitions = excerpt(hero, ["AbilityDefinitions"], 16 << 10)
+    abilities = excerpt(read("scripts/npc/npc_abilities.txt"), ["ability_base", "generic_hidden"], 8 << 10)
+    abilities += definitions.partition("{")[2].rpartition("}")[0]
+    return abilities, '"DOTAHeroes"\n{\n' + hero + '\n}\n'
+
+
+def localization_excerpt(text, needles, limit):
+    """Matching localization lines, kept whole within a UTF-8 byte budget."""
+    needles = [needle.lower() for needle in needles]
+    lines, total = [], 0
+    for line in text.splitlines(keepends=True):
+        size = len(line.encode())
+        if total + size <= limit and any(needle in line.lower() for needle in needles):
+            lines.append(line)
+            total += size
+    return "".join(lines)
+
+
 def texts(pak):
-    """Tooltip sources, portrait framings and the shop, cut to the first items the
-    localization names."""
+    """Shop definitions and authored hero tooltips with matching localization."""
     read = lambda p: (pak.read(p) or b"").decode("utf-8", "replace")
+    shops = read("scripts/shops.txt")
+    items = shop_definitions(shops, read("scripts/npc/items.txt"))
+    abilities, hero = hero_scripts(read)
+    item_names = [name for name in block_names(items) if name.startswith("item_")]
+    hero_names = [name for name in block_names(hero) if name.startswith("axe_")]
     localization = read("resource/localization/abilities_english.txt")
-    prefix = '"DOTA_Tooltip_ability_item_'
-    names = sorted({
-        "item_" + l.split(prefix, 1)[1].split('"', 1)[0]
-        for l in localization.splitlines()
-        if prefix in l
-    })[:48]
-    loc = "".join(l for l in localization.splitlines(keepends=True) if any(n in l for n in names))
-    scripts = [
-        excerpt(read(p), names, 96 << 10)
-        for p in ["scripts/npc/items.txt", "scripts/npc/npc_abilities.txt"]
-    ]
-    files = [("", loc[: 64 << 10].encode())] + [("", s.encode()) for s in scripts]
+    loc = localization_excerpt(localization, ["_" + n for n in hero_names], 16 << 10)
+    loc += localization_excerpt(localization, ["_" + n for n in item_names], 48 << 10)
+    scripts = [items, abilities]
+    files = [("", loc.encode())] + [("", s.encode()) for s in scripts]
     write("tooltips", "abilities", bundle(files))
     definitions = [("", ('"DOTAAbilities"\n{\n' + s + '\n}\n').encode()) for s in scripts]
-    labels = "".join(
-        l for l in read("resource/localization/dota_english.txt").splitlines(keepends=True)
-        if '"DOTA_Tooltip_' in l
-    )[: 32 << 10]
-    write("tooltip_catalog", "abilities", bundle([files[0], ("", labels.encode())] + definitions))
-    shops = read("scripts/shops.txt").encode()
+    labels = localization_excerpt(read("resource/localization/dota_english.txt"), ['"DOTA_Tooltip_'], 16 << 10)
+    write("tooltip_catalog", "abilities", bundle([files[0], ("", labels.encode())] + definitions + [("", hero.encode())]))
     neutral = read("scripts/npc/neutral_items.txt").encode()
-    write("shops_catalog", "shops", bundle([("", shops), definitions[0], ("", neutral)]))
-    write("scripts", "localization", loc[: 64 << 10].encode())
+    write("shops_catalog", "shops", bundle([("", shops.encode()), definitions[0], ("", neutral)]))
+    write("scripts", "localization", loc.encode())
     for name, script in zip(["items", "abilities"], scripts):
         write("scripts", name, script.encode())
     write("portraits", "excerpt", read("scripts/npc/portraits.txt")[: 200 << 10].encode())
-    write("shop", "shops", shops)
+    write("shop", "shops", shops.encode())
     write("soundmixer", "soundmixers", read("scripts/soundmixers.txt").encode())
     items = read("scripts/items/items_game.txt")
     start = items.find('\t"items"')
