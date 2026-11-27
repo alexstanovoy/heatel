@@ -497,3 +497,37 @@ impl EventAudit {
         self.missing += other.missing;
     }
 }
+
+#[test]
+fn indexed_definitions_keep_file_positions_and_last_object_duplicate() {
+    let mut graph = SoundEventGraph::default();
+    let mut budget = Budget::default();
+    graph
+        .add_events(
+            Value::object([
+                ("skip", Value::Null),
+                ("event", Value::object([("type", "first")])),
+                ("event", Value::object([("type", "last")])),
+                ("tail", Value::object([("base", "event")])),
+                ("event", Value::Null),
+            ]),
+            &mut budget,
+        )
+        .unwrap();
+    assert_eq!(
+        graph.resolve("event").unwrap().unwrap().kind(),
+        Some("last")
+    );
+    assert_eq!(graph.resolve("tail").unwrap().unwrap().kind(), Some("last"));
+    assert!(graph.resolve("skip").unwrap().is_none());
+    graph
+        .add_events(
+            Value::object([("event", Value::object([("type", "replacement")]))]),
+            &mut budget,
+        )
+        .unwrap();
+    assert_eq!(
+        graph.resolve("tail").unwrap().unwrap().kind(),
+        Some("replacement")
+    );
+}

@@ -1498,12 +1498,16 @@ fn inherit_value(inherited: &mut ScalingValue, current: &ScalingValue) {
     for (key, value) in &current.conditional {
         inherit_value(inherited.conditional.entry(key.clone()).or_default(), value);
     }
+    let mut attributes = HashMap::new();
+    for (index, (name, _)) in inherited.attributes.iter().enumerate() {
+        attributes.entry(name.clone()).or_insert(index);
+    }
     for (name, value) in &current.attributes {
-        if let Some((_, inherited)) = inherited.attributes.iter_mut().find(|(key, _)| key == name) {
-            inherited.clone_from(value);
-        } else {
-            inherited.attributes.push((name.clone(), value.clone()));
-        }
+        let index = *attributes.entry(name.clone()).or_insert_with(|| {
+            inherited.attributes.push((name.clone(), String::new()));
+            inherited.attributes.len() - 1
+        });
+        inherited.attributes[index].1.clone_from(value);
     }
 }
 
@@ -1726,5 +1730,32 @@ mod tests {
             &context,
         );
         assert_eq!(plain(&rendered), "Gains 20 / 20% damage.");
+    }
+
+    #[test]
+    fn inherited_attributes_keep_order_and_first_duplicate_precedence() {
+        let value = |rows: &[(&str, &str)]| ScalingValue {
+            attributes: rows
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..ScalingValue::default()
+        };
+        let mut inherited = value(&[("a", "old"), ("a", "duplicate"), ("b", "keep")]);
+        let current = value(&[("a", "new"), ("c", "first"), ("c", "last")]);
+        inherit_value(&mut inherited, &current);
+        assert_eq!(
+            inherited.attributes,
+            value(&[
+                ("a", "new"),
+                ("a", "duplicate"),
+                ("b", "keep"),
+                ("c", "last")
+            ])
+            .attributes
+        );
+        let before = inherited.clone();
+        inherit_value(&mut inherited, &ScalingValue::default());
+        assert_eq!(inherited, before);
     }
 }

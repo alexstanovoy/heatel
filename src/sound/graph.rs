@@ -171,7 +171,7 @@ impl Definitions {
 
     fn get(&self, name: &str) -> Option<Definition<'_>> {
         let &(document, member) = self.index.get(name)?;
-        self.documents.get(document)?.iter().nth(member)
+        self.documents.get(document)?.member(member)
     }
 }
 

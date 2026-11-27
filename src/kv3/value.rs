@@ -77,6 +77,12 @@ impl Object {
         self.members.iter().map(|(k, v)| (k.as_str(), v))
     }
 
+    pub(crate) fn member(&self, index: usize) -> Option<(&str, &Value)> {
+        self.members
+            .get(index)
+            .map(|(key, value)| (key.as_str(), value))
+    }
+
     /// How many members it has.
     pub fn len(&self) -> usize {
         self.members.len()

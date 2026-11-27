@@ -143,22 +143,19 @@ impl ModelDraws {
                     .or_else(|| name.parse::<usize>().ok())
             })
             .filter(|&skin| skin != 0);
+        let mut whole = None;
+        let mut overrides = HashMap::new();
+        for row in &placement.material_overrides {
+            if let Some(draw) = row.draw_call {
+                overrides.insert((row.mesh, draw), row.material.as_str());
+            } else {
+                whole.get_or_insert(row.material.as_str());
+            }
+        }
         let mut at = |mesh, draw_call, original| {
-            let material = placement
-                .material_overrides
-                .iter()
-                .find(|row| row.draw_call.is_none())
-                .or_else(|| {
-                    placement
-                        .material_overrides
-                        .iter()
-                        .rev()
-                        .find(|row| row.mesh == mesh && row.draw_call == Some(draw_call))
-                })
-                .map_or_else(
-                    || skin_material(&self.skins, original, skin),
-                    |row| row.material.as_str(),
-                );
+            let material = whole
+                .or_else(|| overrides.get(&(mesh, draw_call)).copied())
+                .unwrap_or_else(|| skin_material(&self.skins, original, skin));
             visit(
                 WorldDrawRef {
                     placement: index,
@@ -225,6 +222,9 @@ pub(super) fn resolve(
         let Some(model) = &models[placement.model.as_str()] else {
             continue;
         };
+        reader.budget.slots::<((usize, usize), &str)>(
+            placement.material_overrides.len().saturating_mul(2),
+        )?;
         model.visit(placement, index, |draw, path| {
             reader.budget.slots::<WorldDrawRef>(1)?;
             if path.is_empty() {
@@ -371,4 +371,91 @@ fn terrain_material(
         tint_masks: texture(material, "g_tTintMasks", budget)?,
         secondary_tint_masks: texture(material, "g_tTint2Masks", budget)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::{PlacementSource, WorldMaterialOverride};
+
+    fn placement() -> WorldPropPlacement {
+        WorldPropPlacement {
+            model: "model.vmdl".into(),
+            source: PlacementSource::Entity { lump: 0, entity: 0 },
+            transform: super::super::place::IDENTITY,
+            tint: [1.0; 4],
+            skin: Some("alternate".into()),
+            layer: None,
+            classname: None,
+            draw_call: None,
+            material_overrides: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn indexed_overrides_keep_whole_first_and_draw_last_precedence() {
+        let model = ModelDraws {
+            meshes: vec![vec!["base".into(), "other".into()], vec!["base".into()]],
+            skins: vec![
+                ("default".into(), vec!["base".into()]),
+                ("alternate".into(), vec!["skin".into()]),
+            ],
+        };
+        let mut placement = placement();
+        let row = |mesh, draw_call, material: &str| WorldMaterialOverride {
+            mesh,
+            draw_call,
+            material: material.into(),
+            linear_tint: None,
+        };
+        placement.material_overrides = vec![
+            row(0, Some(0), "first"),
+            row(0, Some(0), "last"),
+            row(1, Some(0), "second mesh"),
+        ];
+        let materials = |placement: &WorldPropPlacement| {
+            let mut draws = Vec::new();
+            model
+                .visit(placement, 7, |draw, material| {
+                    draws.push((
+                        draw.placement,
+                        draw.mesh,
+                        draw.draw_call,
+                        material.to_owned(),
+                    ));
+                    Ok(())
+                })
+                .unwrap();
+            draws
+        };
+        assert_eq!(
+            materials(&placement),
+            vec![
+                (7, 0, 0, "last".into()),
+                (7, 0, 1, "other".into()),
+                (7, 1, 0, "second mesh".into())
+            ]
+        );
+        placement.material_overrides.clear();
+        assert_eq!(materials(&placement)[0].3, "skin");
+        placement.material_overrides = vec![
+            row(0, Some(0), "draw"),
+            row(9, None, "whole first"),
+            row(0, None, "whole last"),
+        ];
+        assert!(
+            materials(&placement)
+                .iter()
+                .all(|draw| draw.3 == "whole first")
+        );
+        placement.draw_call = Some(1);
+        assert_eq!(materials(&placement), vec![(7, 0, 1, "whole first".into())]);
+        placement.draw_call = Some(2);
+        let error = model.visit(&placement, 7, |_, _| Ok(())).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("aggregate draw call 2 out of range")
+        );
+    }
 }
