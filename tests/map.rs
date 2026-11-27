@@ -207,11 +207,6 @@ impl Shapes {
     }
 }
 
-fn env_game_dir() -> Option<std::path::PathBuf> {
-    let raw = std::env::var_os("DOTA_DIR").or_else(|| std::env::var_os("HEATEL_DOTA_PATH"))?;
-    find_game_dir(Some(&std::path::PathBuf::from(raw)))
-}
-
 #[test]
 fn fresnel_lut_round_trips_synthetic_256x16_texture() {
     let expected: [[u8; 3]; 17] = [
@@ -249,11 +244,16 @@ fn fresnel_lut_round_trips_synthetic_256x16_texture() {
 }
 
 #[test]
+#[ignore = "requires build-6997 Dota VPKs"]
 fn real_maps_export_lighting_zones_water_ground_and_fresnel_lut() {
-    let Some(game) = env_game_dir() else {
-        return;
-    };
+    let raw = std::env::var_os("HEATEL_DOTA_PATH").expect("set HEATEL_DOTA_PATH");
+    let game = find_game_dir(Some(&std::path::PathBuf::from(raw))).expect("Dota 2 not found");
+    check_map_lighting(&game);
+    check_map_materials(&game);
+    check_fresnel_lut(&game);
+}
 
+fn check_map_lighting(game: &std::path::Path) {
     // Main map: 4 zones, RF sun (216,208,207)x5, Dire sky (73,94,200), fog end 4500.
     let maps_src = DirSource::new(game.join("maps"));
     let dota_vpk = Vpk::open(&maps_src, "dota.vpk").unwrap();
@@ -297,9 +297,11 @@ fn real_maps_export_lighting_zones_water_ground_and_fresnel_lut() {
     assert_eq!(demo_light.zones.len(), 2);
     assert_eq!(demo_light.zones[0].center, [-2904.0, -2320.0]);
     assert_eq!(demo_light.zones[1].center, [1920.0, 1216.0]);
+}
 
-    // Real water, ground blend, hero material look & default Fresnel LUT from pak01.
-    let pak_src = DirSource::new(&game);
+fn check_map_materials(game: &std::path::Path) {
+    // Real water, ground blend and hero material look from pak01.
+    let pak_src = DirSource::new(game);
     let pak = Vpk::open(&pak_src, "pak01_dir.vpk").unwrap();
 
     let load_mat = |path: &str| {
@@ -335,7 +337,11 @@ fn real_maps_export_lighting_zones_water_ground_and_fresnel_lut() {
     assert_eq!(hero.spec_exp, 30.0);
     assert_eq!(hero.spec_scale, 10.0);
     assert_eq!(hero.blend_full, [0.0; 6]);
+}
 
+fn check_fresnel_lut(game: &std::path::Path) {
+    let pak_src = DirSource::new(game);
+    let pak = Vpk::open(&pak_src, "pak01_dir.vpk").unwrap();
     let lut_bytes = pak
         .read_file(
             &pak_src,
