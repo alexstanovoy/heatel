@@ -11,7 +11,7 @@ use crate::kv3::Value;
 use crate::resource::Resource;
 
 /// Most sequences a model has (the largest hero here has about 700).
-const MAX_SEQUENCES: usize = 1 << 14;
+pub(super) const MAX_SEQUENCES: usize = 1 << 14;
 /// Most events all the sequences of a model carry together.
 const MAX_EVENTS: usize = 1 << 16;
 /// Most activity entries (activities and their modifiers) one sequence names.
@@ -188,13 +188,13 @@ pub fn read_sequences(resource: &Resource) -> Result<Vec<Sequence>> {
     Ok(out)
 }
 
-fn frames(desc: &Value) -> u32 {
+pub(super) fn frames(desc: &Value) -> u32 {
     desc.get("m_pData")
         .and_then(|d| d.get("m_nFrames")?.as_u64())
         .map_or(0, |f| u32::try_from(f).unwrap_or(u32::MAX))
 }
 
-fn frame_rate(desc: &Value) -> f32 {
+pub(super) fn frame_rate(desc: &Value) -> f32 {
     let fps = finite(desc.get("fps").and_then(Value::as_f64).unwrap_or(0.0) as f32);
     // A rate of zero or less plays at one frame a second, as the clips do.
     if fps <= 0.0 {
@@ -232,7 +232,7 @@ pub(super) fn read_activities(entries: Option<&Value>) -> Result<Vec<Activity>> 
 }
 
 /// The events of an animation, charged to `total`, sorted by frame (stably).
-fn read_events(desc: &Value, total: &mut usize) -> Result<Vec<AnimEvent>> {
+pub(super) fn read_events(desc: &Value, total: &mut usize) -> Result<Vec<AnimEvent>> {
     let list = desc.array("m_eventArray");
     *total += list.len();
     if *total > MAX_EVENTS {

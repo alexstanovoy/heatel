@@ -38,6 +38,7 @@ fn any_segment_bytes_are_an_error_or_a_pose() {
         position: [0.0; 3],
         rotation: [0.0, 0.0, 0.0, 1.0],
         scale: 1.0,
+        authored: 0,
     };
     let (mut posed, mut failed) = (0, 0);
     for round in 0..50_000 {
@@ -60,7 +61,7 @@ fn any_segment_bytes_are_an_error_or_a_pose() {
         let attribute = attributes[below(attributes.len())];
         if let Ok(Some(segment)) = Segment::parse(&bytes, &CODECS, attribute, &remap) {
             for frame in [0, 1, below(16), usize::MAX] {
-                match segment.read(frame, &mut pose) {
+                match segment.read(frame, &mut pose, &mut []) {
                     Ok(()) => posed += usize::from(pose != before),
                     Err(_) => failed += 1,
                 }

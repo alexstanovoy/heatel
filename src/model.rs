@@ -1,6 +1,11 @@
 //! A compiled model (`.vmdl_c`): its skeleton and the render meshes of its most detailed level
 //! of detail, in glTF's frame (Y up, metres; Source is Z up, inches).
 
+mod rig;
+
+pub(crate) use rig::bone_indices;
+pub use rig::{AttachmentInfluence, ModelRig, WeightedAttachment, default_wearables};
+
 use crate::budget::Budget;
 use crate::coords::{bone_to_gltf, finite, rotate, unit_rotation, valid_bone_scale};
 use crate::error::{Result, malformed};
@@ -244,12 +249,20 @@ impl Remap {
 }
 
 /// A bone's rest pose relative to its parent as the model stores it (Source's frame, inches).
-pub(crate) struct SourceBone {
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceBone {
+    /// Bone name shared by the base model and its wearables.
     pub name: String,
+    /// Index of the parent in skeleton order, or none for a root.
     pub parent: Option<usize>,
+    /// Rest translation in inches.
     pub position: [f32; 3],
+    /// Rest rotation quaternion in XYZW order.
     pub rotation: [f32; 4],
+    /// Uniform rest scale.
     pub scale: f32,
+    /// Source's model bone flags.
+    pub flags: u64,
 }
 
 /// The model skeleton of DATA's `m_modelSkeleton`, in bone order. A parent index that does not
@@ -260,6 +273,7 @@ pub(crate) fn source_skeleton(data: &Value) -> Result<Vec<SourceBone>> {
     let (names, parents) = (get("m_boneName"), get("m_nParent"));
     let (positions, rotations) = (get("m_bonePosParent"), get("m_boneRotParent"));
     let scales = get("m_boneScaleParent");
+    let flags = get("m_nFlag");
     if !scales.is_empty() && scales.len() != names.len() {
         return Err(malformed(
             "model",
@@ -286,6 +300,7 @@ pub(crate) fn source_skeleton(data: &Value) -> Result<Vec<SourceBone>> {
             position: floats::<3>(positions.get(i))?,
             rotation,
             scale,
+            flags: flags.get(i).and_then(Value::as_u64).unwrap_or(0),
         });
     }
     Ok(bones)

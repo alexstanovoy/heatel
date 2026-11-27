@@ -10,11 +10,15 @@ pub(crate) enum Attribute {
     Position,
     Angle,
     Scale,
-    /// Flex controller values (`data`): read by no glTF channel.
+    /// Scalar flex-controller channels.
     Data,
 }
 
 impl Attribute {
+    pub(crate) fn bit(self) -> u8 {
+        1 << self as u8
+    }
+
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "Position" => Self::Position,
@@ -32,6 +36,7 @@ pub(crate) struct BonePose {
     pub position: [f32; 3],
     pub rotation: [f32; 4],
     pub scale: f32,
+    pub authored: u8,
 }
 
 /// The codecs Valve's animation compiler writes. The ones not listed (chars, ints, bools,
@@ -166,7 +171,12 @@ impl<'a> Segment<'a> {
 
     /// Writes frame `frame` (counted from the segment's first) of every bone it covers into
     /// `pose`.
-    pub(crate) fn read(&self, frame: usize, pose: &mut [BonePose]) -> Result<()> {
+    pub(crate) fn read(
+        &self,
+        frame: usize,
+        pose: &mut [BonePose],
+        morphs: &mut [Option<f32>],
+    ) -> Result<()> {
         let row = if self.codec.is_static() {
             0
         } else {
@@ -179,6 +189,12 @@ impl<'a> Segment<'a> {
                 .checked_add(element)
                 .ok_or_else(|| malformed("animation", "a frame index overflows"))?;
             let sample = self.sample(index, element)?;
+            if self.attribute == Attribute::Data {
+                if let (Some(target), Sample::Float(value)) = (morphs.get_mut(bone), sample) {
+                    *target = Some(value);
+                }
+                continue;
+            }
             let Some(target) = pose.get_mut(bone) else {
                 continue;
             };
@@ -186,8 +202,9 @@ impl<'a> Segment<'a> {
                 (Attribute::Position, Sample::Vector(v)) => target.position = v,
                 (Attribute::Angle, Sample::Quaternion(q)) => target.rotation = q,
                 (Attribute::Scale, Sample::Float(s)) => target.scale = s,
-                _ => {}
+                _ => continue,
             }
+            target.authored |= self.attribute.bit();
         }
         Ok(())
     }
