@@ -59,6 +59,10 @@ impl<'a> Obj<'a> {
         }
     }
 
+    pub(super) fn int32(&self, key: &str, default: i32) -> Result<i32> {
+        Ok(self.int_in(key, default.into(), i32::MIN.into(), i32::MAX.into())? as i32)
+    }
+
     /// An integer bounded to `min..=max`.
     pub(super) fn int_in(&self, key: &str, default: i64, min: i64, max: i64) -> Result<i64> {
         let value = self.int(key, default)?;
@@ -183,6 +187,16 @@ impl<'a> Obj<'a> {
             .int_in(key, i64::from(default), -1, i64::from(MAX_CONTROL_POINT))?
             .max(0);
         ControlPoint::new(index as u8).ok_or_else(|| malformed(WHAT, format!("{key} is past 63")))
+    }
+
+    /// A control point with -1 preserved as absence.
+    pub(super) fn optional_control_point(
+        &self,
+        key: &str,
+        default: i64,
+    ) -> Result<Option<ControlPoint>> {
+        let index = self.int_in(key, default, -1, MAX_CONTROL_POINT.into())?;
+        Ok(u8::try_from(index).ok().and_then(ControlPoint::new))
     }
 
     pub(super) fn field(&self, key: &str, default: Field) -> Result<Field> {

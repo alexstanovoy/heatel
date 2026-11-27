@@ -325,8 +325,16 @@ impl System {
         Ok(())
     }
 
-    /// Checks the hitbox sets its functions on a model name.
+    /// Checks initializer and model parameters with size bounds.
     fn validate_sets(&self) -> Result<()> {
+        for initializer in &self.initializers {
+            initializer.class.validate()?;
+        }
+        for operator in &self.operators {
+            if let Operator::SetControlPointsToModelParticles(points) = &operator.class {
+                points.validate()?;
+            }
+        }
         let sets = self
             .initializers
             .iter()

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
+use super::function::FadeTimeModifiers;
 use super::input::{FloatInput, Mapping, VectorInput};
 use super::read::Obj;
 use super::transform::{ControlPoint, Transform};
@@ -107,6 +108,46 @@ pub enum PreEmission {
     },
     /// `C_OP_RemapCPtoCP`: a control-point component remapped into another control point.
     RemapControlPoint(Box<ControlPointRemap>),
+    /// `C_OP_SetControlPointOrientation`: orient a control point in a reference frame.
+    SetControlPointOrientation {
+        /// The control point to orient.
+        control_point: ControlPoint,
+        /// The control point whose frame supplies the reference.
+        head: ControlPoint,
+        /// Pitch, yaw and roll in degrees at either end of the range.
+        rotation: [[f32; 3]; 2],
+        /// How far to move toward the target orientation.
+        interpolation: FloatInput,
+        /// The reference frame is world space.
+        world: bool,
+        /// Pick a rotation between the two ends.
+        randomize: bool,
+        /// Set the rotation once.
+        set_once: bool,
+    },
+    /// `C_OP_RemapSpeedtoCP`: write a remapped control point speed into a component.
+    RemapSpeedToCp(Box<SpeedToCp>),
+}
+
+/// `C_OP_RemapSpeedtoCP`'s parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
+pub struct SpeedToCp {
+    /// The moving control point.
+    pub input: ControlPoint,
+    /// The destination control point, if set.
+    pub output: Option<ControlPoint>,
+    /// The destination's component.
+    pub component: VectorComponent,
+    /// The speed interval.
+    pub input_range: [f32; 2],
+    /// The mapped interval.
+    pub output_range: [f32; 2],
+    /// Use the change in velocity instead of speed.
+    pub use_delta_velocity: bool,
+    /// Time offset and scale for the operator's fades.
+    pub fade_time: FadeTimeModifiers,
 }
 
 /// A component of a three-dimensional control-point position.
@@ -149,7 +190,7 @@ impl VectorComponent {
         }
     }
 
-    fn read(obj: &Obj<'_>, key: &str) -> Result<Self> {
+    pub(super) fn read(obj: &Obj<'_>, key: &str) -> Result<Self> {
         Ok([Self::X, Self::Y, Self::Z][obj.int_in(key, 0, 0, 2)? as usize])
     }
 }
@@ -484,6 +525,39 @@ impl PreEmission {
                 avoid_singularity: obj.bool("m_bAvoidSingularity", false)?,
                 point_away: obj.bool("m_bPointAway", false)?,
             },
+            other => return Self::read_orientation_and_speed(other, obj),
+        })
+    }
+
+    fn read_orientation_and_speed(class: &str, obj: &Obj<'_>) -> Result<Self> {
+        Ok(match class {
+            "C_OP_SetControlPointOrientation" => Self::SetControlPointOrientation {
+                control_point: obj.control_point("m_nCP", 1)?,
+                head: obj.control_point("m_nHeadLocation", 0)?,
+                rotation: [
+                    obj.vec3("m_vecRotation", [0.0; 3])?,
+                    obj.vec3("m_vecRotationB", [0.0; 3])?,
+                ],
+                interpolation: FloatInput::read(obj, "m_flInterpolation", 1.0)?,
+                world: obj.bool("m_bUseWorldLocation", false)?,
+                randomize: obj.bool("m_bRandomize", false)?,
+                set_once: obj.bool("m_bSetOnce", false)?,
+            },
+            "C_OP_RemapSpeedtoCP" => Self::RemapSpeedToCp(Box::new(SpeedToCp {
+                input: obj.control_point("m_nInControlPointNumber", 0)?,
+                output: obj.optional_control_point("m_nOutControlPointNumber", -1)?,
+                component: VectorComponent::read(obj, "m_nField")?,
+                input_range: [
+                    obj.float("m_flInputMin", 0.0)?,
+                    obj.float("m_flInputMax", 1.0)?,
+                ],
+                output_range: [
+                    obj.float("m_flOutputMin", 0.0)?,
+                    obj.float("m_flOutputMax", 1.0)?,
+                ],
+                use_delta_velocity: obj.bool("m_bUseDeltaV", false)?,
+                fade_time: FadeTimeModifiers::read(obj)?,
+            })),
             other => Self::Unsupported(other.to_owned()),
         })
     }

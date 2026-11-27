@@ -3,15 +3,18 @@
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{Result, malformed};
+use crate::kv3::Value;
 
 use super::field::{Field, SetMethod};
+use super::function::FadeTimeModifiers;
 use super::initializer::TraceMiss;
 use super::input::{FloatInput, VectorInput};
-use super::models::{LockToBone, model_control_point};
+use super::models::{LockToBone, model_control_point, set_name};
 use super::noise::CurlNoise;
 use super::path::{MaintainPath, Path};
-use super::read::{MAX_CONTROL_POINT, Obj};
+use super::pre_emission::VectorComponent;
+use super::read::{MAX_CONTROL_POINT, MAX_NAME, Obj, WHAT};
 use super::transform::{ControlPoint, Transform};
 
 /// An operator class.
@@ -503,6 +506,206 @@ pub enum Operator {
     },
     /// A class this crate does not read.
     Unsupported(String),
+    /// `C_OP_OscillateScalar`: a scalar attribute oscillates over a time window.
+    OscillateScalar(Box<ScalarOscillation>),
+    /// `C_OP_FadeIn`: alpha fades in over a random duration.
+    FadeIn {
+        /// Minimum and maximum fade duration.
+        time: [f32; 2],
+        /// Exponent of the random draw.
+        exponent: f32,
+        /// Durations are fractions of the particle's lifetime.
+        proportional: bool,
+        /// Time offset and scale for the operator's fades.
+        fade_time: FadeTimeModifiers,
+    },
+    /// `C_OP_LerpScalar`: a scalar attribute moves toward an input value over a time window.
+    LerpScalar {
+        /// The attribute.
+        field: Field,
+        /// The target value.
+        target: FloatInput,
+        /// Start and end of the window.
+        time: [f32; 2],
+    },
+    /// `C_OP_DistanceCull`: kills particles by distance from a control point plus an offset.
+    DistanceCull {
+        /// The centre's control point.
+        control_point: ControlPoint,
+        /// The displacement from that control point.
+        offset: [f32; 3],
+        /// The distance threshold.
+        distance: FloatInput,
+        /// Cull inside the threshold.
+        inside: bool,
+        /// The vector attribute used as the particle's location.
+        field: Field,
+    },
+    /// `C_OP_InheritFromParentParticlesV2`: update an attribute from a parent particle.
+    InheritFromParentParticlesV2(Box<ParentParticleInheritance>),
+    /// `C_OP_SnapshotRigidSkinToBones`: move snapshot particles with their rigid bone bindings.
+    SnapshotRigidSkinToBones {
+        /// The control point carrying the model.
+        control_point: ControlPoint,
+        /// Rotate normals.
+        transform_normals: bool,
+        /// Scale radii.
+        transform_radii: bool,
+    },
+    /// `C_OP_SnapshotSkinToBones`: update particles skinned to the bones of a model.
+    SnapshotSkinToBones {
+        /// The control point carrying the model.
+        control_point: ControlPoint,
+        /// Rotate normals.
+        transform_normals: bool,
+        /// Scale radii.
+        transform_radii: bool,
+        /// Start and end of the lifetime fade.
+        lifetime_fade: [f32; 2],
+        /// Displacements above this threshold are treated as jumps.
+        jump_threshold: f32,
+        /// Scale applied to the previous position update.
+        previous_scale: f32,
+    },
+    /// `C_OP_SetControlPointsToModelParticles`: drive control points from model particles.
+    SetControlPointsToModelParticles(Box<ModelParticleControlPoints>),
+    /// `C_OP_RemapCPtoScalar`: write a remapped control point component into an attribute.
+    RemapCpToScalar(Box<CpToScalar>),
+}
+
+/// `C_OP_OscillateScalar`'s parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
+pub struct ScalarOscillation {
+    /// The attribute.
+    pub field: Field,
+    /// Minimum and maximum rate.
+    pub rate: [f32; 2],
+    /// Minimum and maximum frequency.
+    pub frequency: [f32; 2],
+    /// The oscillator's multiplier.
+    pub multiplier: f32,
+    /// The oscillator's starting phase.
+    pub phase: f32,
+    /// Use normalized particle age for the oscillator.
+    pub proportional: bool,
+    /// Use normalized particle age for the time window.
+    pub proportional_window: bool,
+    /// Minimum and maximum start time.
+    pub start: [f32; 2],
+    /// Minimum and maximum end time.
+    pub end: [f32; 2],
+    /// Time offset and scale for the operator's fades.
+    pub fade_time: FadeTimeModifiers,
+}
+
+/// `C_OP_InheritFromParentParticlesV2`'s parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
+pub struct ParentParticleInheritance {
+    /// The attribute copied from the parent.
+    pub field: Field,
+    /// How much of the parent's value is inherited.
+    pub scale: FloatInput,
+    /// Parent particle index increment.
+    pub increment: FloatInput,
+    /// How far the child's value moves toward the inherited one.
+    pub interpolation: FloatInput,
+    /// Sub-sample the parent particles.
+    pub subsample: bool,
+    /// Distribute the choice of parent particles at random.
+    pub random: bool,
+    /// Start from the last parent particle and count back.
+    pub reverse: bool,
+    /// How to handle a missing or dead parent particle.
+    pub missing_parent: MissingParentBehavior,
+}
+
+/// What inheritance does when the source particle dies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
+pub enum MissingParentBehavior {
+    /// Leave the child unchanged.
+    DoNothing,
+    /// Kill the child particle.
+    Kill,
+    /// Use the next parent particle.
+    FindNew,
+    /// Use a new particle at the same index when available.
+    SameIndex,
+}
+
+impl MissingParentBehavior {
+    fn read(obj: &Obj<'_>) -> Result<Self> {
+        let key = "m_nMissingParentBehavior";
+        let Some(value) = obj.get(key) else {
+            return Ok(Self::DoNothing);
+        };
+        let number = match value {
+            Value::String(name) => match name.as_str() {
+                "MISSING_PARENT_DO_NOTHING" => Some(-1),
+                "MISSING_PARENT_KILL" => Some(0),
+                "MISSING_PARENT_FIND_NEW" => Some(1),
+                "MISSING_PARENT_SAME_INDEX" => Some(2),
+                number => number.parse().ok(),
+            },
+            _ => value.as_i64(),
+        };
+        match number {
+            Some(-1 | 4_294_967_295) => Ok(Self::DoNothing),
+            Some(0) => Ok(Self::Kill),
+            Some(1) => Ok(Self::FindNew),
+            Some(2) => Ok(Self::SameIndex),
+            _ => Err(malformed(WHAT, format!("{key} {value:?} is not known"))),
+        }
+    }
+}
+
+/// `C_OP_SetControlPointsToModelParticles`' parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
+pub struct ModelParticleControlPoints {
+    /// The first control point written.
+    pub first_control_point: ControlPoint,
+    /// The number of control points to write.
+    pub count: u8,
+    /// The index of the first source particle.
+    pub first_source: i32,
+    /// The hitbox set.
+    pub hitbox_set: String,
+    /// The model attachment.
+    pub attachment_name: String,
+    /// Use skinning in place of hitboxes.
+    pub skin: bool,
+    /// Follow the named attachment.
+    pub attachment: bool,
+}
+
+/// `C_OP_RemapCPtoScalar`'s parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
+pub struct CpToScalar {
+    /// The input control point.
+    pub control_point: ControlPoint,
+    /// The input component.
+    pub component: VectorComponent,
+    /// The destination attribute.
+    pub field: Field,
+    /// The source range.
+    pub input_range: [f32; 2],
+    /// The destination range.
+    pub output_range: [f32; 2],
+    /// Emitter lifetime window in seconds (negative endpoints disable the bound).
+    pub time: [f32; 2],
+    /// Interpolation scale.
+    pub interpolation: f32,
+    /// How the value is written.
+    pub set_method: SetMethod,
 }
 
 /// `C_OP_PercentageBetweenTransforms`' parameters.
@@ -731,13 +934,15 @@ pub enum Force {
 impl Operator {
     pub(super) fn read(class: &str, obj: &Obj<'_>) -> Result<Self> {
         type Group = fn(&str, &Obj<'_>) -> Result<Option<Operator>>;
-        let groups: [Group; 6] = [
+        let groups: [Group; 8] = [
             Self::read_life,
             Self::read_motion,
             Self::read_end,
             Self::read_follow,
             Self::read_paths,
             Self::read_remaps,
+            Self::read_scalar,
+            Self::read_snapshot_and_model,
         ];
         for group in groups {
             if let Some(op) = group(class, obj)? {
@@ -785,6 +990,75 @@ impl Operator {
             }
             other => Self::Unsupported(other.to_owned()),
         })
+    }
+
+    fn read_scalar(class: &str, obj: &Obj<'_>) -> Result<Option<Self>> {
+        Ok(Some(match class {
+            "C_OP_OscillateScalar" => Self::OscillateScalar(Box::new(scalar_oscillation(obj)?)),
+            "C_OP_FadeIn" => Self::FadeIn {
+                time: [
+                    obj.float("m_flFadeInTimeMin", 0.25)?,
+                    obj.float("m_flFadeInTimeMax", 0.25)?,
+                ],
+                exponent: obj.float("m_flFadeInTimeExp", 1.0)?,
+                proportional: obj.bool("m_bProportional", true)?,
+                fade_time: FadeTimeModifiers::read(obj)?,
+            },
+            "C_OP_LerpScalar" => Self::LerpScalar {
+                field: obj.field("m_nFieldOutput", Field::RADIUS)?,
+                target: FloatInput::read(obj, "m_flOutput", 1.0)?,
+                time: [
+                    obj.float("m_flStartTime", 0.0)?,
+                    obj.float("m_flEndTime", 1.0)?,
+                ],
+            },
+            "C_OP_RemapCPtoScalar" => Self::RemapCpToScalar(Box::new(cp_to_scalar(obj)?)),
+            "C_OP_DistanceCull" => Self::DistanceCull {
+                control_point: obj.control_point("m_nControlPoint", 0)?,
+                offset: obj.vec3("m_vecPointOffset", [0.0; 3])?,
+                distance: FloatInput::read(obj, "m_flDistance", 0.0)?,
+                inside: obj.bool("m_bCullInside", false)?,
+                field: obj.field("m_nAttribute", Field::POSITION)?,
+            },
+            _ => return Ok(None),
+        }))
+    }
+
+    fn read_snapshot_and_model(class: &str, obj: &Obj<'_>) -> Result<Option<Self>> {
+        Ok(Some(match class {
+            "C_OP_SnapshotRigidSkinToBones" => Self::SnapshotRigidSkinToBones {
+                control_point: obj.control_point("m_nControlPointNumber", 0)?,
+                transform_normals: obj.bool("m_bTransformNormals", false)?,
+                transform_radii: obj.bool("m_bTransformRadii", false)?,
+            },
+            "C_OP_SnapshotSkinToBones" => Self::SnapshotSkinToBones {
+                control_point: obj.control_point("m_nControlPointNumber", 0)?,
+                transform_normals: obj.bool("m_bTransformNormals", false)?,
+                transform_radii: obj.bool("m_bTransformRadii", false)?,
+                lifetime_fade: [
+                    obj.float("m_flLifeTimeFadeStart", 1.0)?,
+                    obj.float("m_flLifeTimeFadeEnd", 1.0)?,
+                ],
+                jump_threshold: obj.float("m_flJumpThreshold", 100.0)?,
+                previous_scale: obj.float("m_flPrevPosScale", 1.0)?,
+            },
+            "C_OP_SetControlPointsToModelParticles" => {
+                Self::SetControlPointsToModelParticles(Box::new(model_particle_points(obj)?))
+            }
+            "C_OP_InheritFromParentParticlesV2" => {
+                Self::InheritFromParentParticlesV2(Box::new(ParentParticleInheritance {
+                    field: obj.field("m_nFieldOutput", Field::RADIUS)?,
+                    scale: FloatInput::read(obj, "m_flScale", 1.0)?,
+                    increment: FloatInput::read(obj, "m_nIncrement", 1.0)?,
+                    interpolation: FloatInput::read(obj, "m_flInterpolation", 1.0)?,
+                    subsample: obj.bool("m_bSubSample", false)?,
+                    random: obj.bool("m_bRandomDistribution", false)?,
+                    reverse: obj.bool("m_bReverse", false)?,
+                    missing_parent: MissingParentBehavior::read(obj)?,
+                }))
+            }
+            _ => return Ok(None),
+        }))
     }
 
     /// The operators of a particle's life: its fades, ramps and death.
@@ -1205,6 +1479,87 @@ fn position_lock(obj: &Obj<'_>) -> Result<PositionLock> {
         output: obj.field("m_nFieldOutput", Field::POSITION)?,
         output_previous: obj.field("m_nFieldOutputPrev", Field::POSITION_PREVIOUS)?,
     })
+}
+
+fn scalar_oscillation(obj: &Obj<'_>) -> Result<ScalarOscillation> {
+    Ok(ScalarOscillation {
+        field: obj.field("m_nField", Field::ALPHA)?,
+        rate: [obj.float("m_RateMin", 0.0)?, obj.float("m_RateMax", 0.0)?],
+        frequency: [
+            obj.float("m_FrequencyMin", 1.0)?,
+            obj.float("m_FrequencyMax", 1.0)?,
+        ],
+        multiplier: obj.float("m_flOscMult", 2.0)?,
+        phase: obj.float("m_flOscAdd", 0.5)?,
+        proportional: obj.bool("m_bProportional", true)?,
+        proportional_window: obj.bool("m_bProportionalOp", true)?,
+        start: [
+            obj.float("m_flStartTime_min", 0.0)?,
+            obj.float("m_flStartTime_max", 0.0)?,
+        ],
+        end: [
+            obj.float("m_flEndTime_min", 1.0)?,
+            obj.float("m_flEndTime_max", 1.0)?,
+        ],
+        fade_time: FadeTimeModifiers::read(obj)?,
+    })
+}
+
+fn cp_to_scalar(obj: &Obj<'_>) -> Result<CpToScalar> {
+    Ok(CpToScalar {
+        control_point: obj.control_point("m_nCPInput", 0)?,
+        component: VectorComponent::read(obj, "m_nField")?,
+        field: obj.field("m_nFieldOutput", Field::RADIUS)?,
+        input_range: [
+            obj.float("m_flInputMin", 0.0)?,
+            obj.float("m_flInputMax", 1.0)?,
+        ],
+        output_range: [
+            obj.float("m_flOutputMin", 0.0)?,
+            obj.float("m_flOutputMax", 1.0)?,
+        ],
+        time: [
+            obj.float("m_flStartTime", -1.0)?,
+            obj.float("m_flEndTime", -1.0)?,
+        ],
+        interpolation: obj.float("m_flInterpRate", 0.0)?,
+        set_method: SetMethod::from_index(obj.choice("m_nSetMethod", &SetMethod::NAMES, 0)?),
+    })
+}
+
+fn model_particle_points(obj: &Obj<'_>) -> Result<ModelParticleControlPoints> {
+    let attachment_name = obj.str("m_AttachmentName")?.unwrap_or_default();
+    let points = ModelParticleControlPoints {
+        first_control_point: obj.control_point("m_nFirstControlPoint", 0)?,
+        count: obj.int_in(
+            "m_nNumControlPoints",
+            1,
+            0,
+            i64::from(MAX_CONTROL_POINT) + 1,
+        )? as u8,
+        first_source: obj.int32("m_nFirstSourcePoint", 0)?,
+        hitbox_set: set_name(obj)?,
+        attachment_name: attachment_name.to_owned(),
+        skin: obj.bool("m_bSkin", false)?,
+        attachment: obj.bool("m_bAttachment", false)?,
+    };
+    points.validate()?;
+    Ok(points)
+}
+
+impl ModelParticleControlPoints {
+    pub(super) fn validate(&self) -> Result<()> {
+        if self.count > MAX_CONTROL_POINT + 1 {
+            return Err(malformed(WHAT, "too many model particle control points"));
+        }
+        if self.hitbox_set.len() > MAX_NAME || self.attachment_name.len() > MAX_NAME {
+            return Err(malformed(
+                WHAT,
+                "a hitbox set or model attachment name is too long",
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn oscillate(obj: &Obj<'_>) -> Result<Oscillate> {

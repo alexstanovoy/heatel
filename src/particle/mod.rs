@@ -19,22 +19,24 @@ mod transform;
 pub use constraint::{Constraint, Distance, DistanceToPath, Planar, WorldTrace};
 pub use emitter::Emitter;
 pub use field::{Field, SetMethod};
-pub use function::{EndCap, Function, Timing};
+pub use function::{EndCap, FadeTimeModifiers, Function, Timing};
 pub use initializer::{
-    DistanceToCp, Epitrochoid, Hitbox, Initializer, PlaceOnGround, Ring, Sphere, TraceMiss,
+    DistanceToCp, Epitrochoid, Hitbox, Initializer, NamedModelSequence, PlaceOnGround, Ring,
+    SkinnedSnapshotOptions, SnapshotAttribute, SnapshotIndexType, Sphere, TraceMiss,
     TransformToVector, Warp, WithinBox,
 };
 pub use input::{Bias, Curve, FloatInput, Mapping, ParticleNoise, VectorInput};
 pub use models::{LockToBone, Models, OnModel};
 pub use noise::{CreationNoise, CurlNoise, DirectionNoise, NoiseEmitter};
 pub use operator::{
-    ControlPointsFromParticles, CpOffset, DistanceToTransform, Force, GroundMovement, Operator,
-    Oscillate, PercentageBetween, PositionLock,
+    ControlPointsFromParticles, CpOffset, CpToScalar, DistanceToTransform, Force, GroundMovement,
+    MissingParentBehavior, ModelParticleControlPoints, Operator, Oscillate,
+    ParentParticleInheritance, PercentageBetween, PositionLock, ScalarOscillation,
 };
 pub use path::{MaintainPath, Path, SequentialPath};
 pub use pre_emission::{
     ControlPointPositions, ControlPointRemap, DistanceBetweenCps, ParentSet, PreEmission,
-    ScalarExpression, ScalarExpressionToCp, VectorComponent,
+    ScalarExpression, ScalarExpressionToCp, SpeedToCp, VectorComponent,
 };
 pub use preview::{ControlPointConfig, ControlPointDriver, control_point_configurations};
 pub use read::MAX_CONTROL_POINT;
@@ -47,3 +49,6 @@ pub use transform::{ControlPoint, Transform};
 
 mod snapshot;
 pub use snapshot::{MAX_SNAPSHOT_POINTS, MAX_UNSUPPORTED_NAME, Snapshot};
+
+#[cfg(test)]
+mod top16_tests;

@@ -298,6 +298,137 @@ pub enum Initializer {
         /// Copy snapshot normals as well as positions.
         set_normal: bool,
     },
+    /// `C_INIT_InitSkinnedPositionFromCPSnapshot` with rigid skinning or additional parameters.
+    SkinnedSnapshotWithOptions(Box<SkinnedSnapshotOptions>),
+    /// `C_INIT_InitFromCPSnapshot`: initialize an attribute from a snapshot.
+    InitFromCpSnapshot(Box<SnapshotAttribute>),
+    /// `C_INIT_SequenceLifeTime`: derive lifetime from the sprite sequence's frame count.
+    SequenceLifetime {
+        /// Frames per second.
+        framerate: f32,
+    },
+    /// `C_INIT_NormalOffset`: offset the particle normal.
+    NormalOffset {
+        /// Minimum and maximum offset.
+        offset: [[f32; 3]; 2],
+        /// Control point whose frame supplies the local axes.
+        control_point: ControlPoint,
+        /// The offset is in the control point's frame.
+        local: bool,
+        /// Normalize the output.
+        normalize: bool,
+    },
+    /// `C_INIT_RandomNamedModelSequence`: initialize an attribute with a model sequence index.
+    RandomNamedModelSequence(Box<NamedModelSequence>),
+}
+
+/// How a skinned snapshot initializer selects a point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
+pub enum SnapshotIndexType {
+    /// Advance through the snapshot, with an optional random order.
+    Increment,
+    /// Read the index directly from an input.
+    Direct,
+}
+
+/// The full parameters of `C_INIT_InitSkinnedPositionFromCPSnapshot`.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
+pub struct SkinnedSnapshotOptions {
+    /// Spatial placement frame.
+    pub control_point: ControlPoint,
+    /// Control point carrying the snapshot resource.
+    pub snapshot_control_point: ControlPoint,
+    /// First snapshot point.
+    pub start: u32,
+    /// Choose a point at random in increment mode.
+    pub random: bool,
+    /// Seed for random point selection.
+    pub random_seed: i32,
+    /// Prepare the particle for rigid bone attachment.
+    pub rigid: bool,
+    /// Lock rotation with the rigid attachment (older format).
+    pub rigid_rotation_lock: bool,
+    /// Copy snapshot normals as well as positions.
+    pub set_normal: bool,
+    /// Copy snapshot radii.
+    pub set_radius: bool,
+    /// Copy snapshot color.
+    pub copy_color: bool,
+    /// Copy snapshot alpha.
+    pub copy_alpha: bool,
+    /// How the snapshot index is chosen.
+    pub index_type: SnapshotIndexType,
+    /// Particle input for direct index selection.
+    pub read_index: FloatInput,
+    /// Snapshot points advanced per particle.
+    pub increment: f32,
+    /// Extra index increment after a complete pass through the snapshot.
+    pub full_loop_increment: i32,
+    /// Minimum and maximum velocity along the normal.
+    pub normal_velocity: [f32; 2],
+    /// Apply the normal velocity without scaling by the time step.
+    pub ignore_dt: bool,
+    /// The share of the bone's velocity inherited.
+    pub bone_velocity: f32,
+    /// Maximum inherited bone velocity.
+    pub max_bone_velocity: f32,
+}
+
+/// `C_INIT_InitFromCPSnapshot`'s parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
+pub struct SnapshotAttribute {
+    /// Control point carrying the snapshot resource, if specified.
+    pub control_point: Option<ControlPoint>,
+    /// Named subset of the snapshot.
+    pub subset: String,
+    /// The snapshot attribute, when explicitly selected.
+    pub input: Option<Field>,
+    /// The destination particle attribute.
+    pub output: Field,
+    /// A control point supplying the local frame, when enabled.
+    pub local_control_point: Option<ControlPoint>,
+    /// Transform angles with the local frame.
+    pub local_space_angles: bool,
+    /// Choose snapshot points randomly.
+    pub random: bool,
+    /// Seed for random point selection.
+    pub random_seed: i32,
+    /// Count from the last point.
+    pub reverse: bool,
+    /// Snapshot points advanced per particle.
+    pub increment: FloatInput,
+    /// Restart the index when the snapshot changes.
+    pub reset_on_change: bool,
+    /// An explicit particle index, negative for automatic selection.
+    pub manual_index: FloatInput,
+}
+
+/// Most sequence names in one selection list.
+const MAX_SEQUENCE_NAMES: usize = 64;
+
+/// `C_INIT_RandomNamedModelSequence`'s parameters.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
+pub struct NamedModelSequence {
+    /// The explicit model resource, if set.
+    pub model: Option<String>,
+    /// Candidate sequences, in authored order.
+    pub names: Vec<String>,
+    /// Use the renderer's model.
+    pub model_from_renderer: bool,
+    /// Shuffle the sequences.
+    pub shuffle: bool,
+    /// Choose the sequences in order.
+    pub linear: bool,
+    /// The destination particle attribute.
+    pub field: Field,
 }
 
 /// `C_INIT_CreateWithinBox`' parameters.
@@ -551,23 +682,6 @@ impl Initializer {
         behavior_version: i32,
     ) -> Result<Self> {
         Ok(match class {
-            "C_INIT_InitSkinnedPositionFromCPSnapshot"
-                if !obj.bool("m_bRigid", false)? && !obj.bool("m_bRigidRotationLock", false)? =>
-            {
-                Self::SkinnedSnapshot {
-                    control_point: obj.control_point("m_nControlPointNumber", 0)?,
-                    snapshot_control_point: obj
-                        .control_point("m_nSnapshotControlPointNumber", 1)?,
-                    start: obj.int_in(
-                        "m_nSnapShotStartPoint",
-                        0,
-                        0,
-                        super::MAX_SNAPSHOT_POINTS as i64,
-                    )? as u32,
-                    random: obj.bool("m_bRandom", false)?,
-                    set_normal: obj.bool("m_bSetNormal", false)?,
-                }
-            }
             "C_INIT_RadiusFromCPObject" => Self::RadiusFromCpObject {
                 control_point: obj.control_point("m_nControlPoint", 0)?,
             },
@@ -714,8 +828,200 @@ impl Initializer {
                 Some(on_model) => Self::CreateOnModel(Box::new(on_model)),
                 None => Self::Unsupported(class.to_owned()),
             },
+            other => return Self::read_snapshot_and_sequence(other, obj),
+        })
+    }
+
+    fn read_snapshot_and_sequence(class: &str, obj: &Obj<'_>) -> Result<Self> {
+        Ok(match class {
+            "C_INIT_InitSkinnedPositionFromCPSnapshot" => skinned_snapshot(obj)?,
+            "C_INIT_InitFromCPSnapshot" => {
+                Self::InitFromCpSnapshot(Box::new(snapshot_attribute(obj)?))
+            }
+            "C_INIT_SequenceLifeTime" => Self::SequenceLifetime {
+                framerate: obj.float("m_flFramerate", 30.0)?,
+            },
+            "C_INIT_NormalOffset" => Self::NormalOffset {
+                offset: [
+                    obj.vec3("m_OffsetMin", [0.0; 3])?,
+                    obj.vec3("m_OffsetMax", [0.0; 3])?,
+                ],
+                control_point: obj.control_point("m_nControlPointNumber", 0)?,
+                local: obj.bool("m_bLocalCoords", false)?,
+                normalize: obj.bool("m_bNormalize", false)?,
+            },
+            "C_INIT_RandomNamedModelSequence" => {
+                Self::RandomNamedModelSequence(Box::new(named_model_sequence(obj)?))
+            }
             other => Self::Unsupported(other.to_owned()),
         })
+    }
+
+    pub(super) fn validate(&self) -> Result<()> {
+        match self {
+            Self::SkinnedSnapshotWithOptions(snapshot)
+                if snapshot.start > super::MAX_SNAPSHOT_POINTS as u32 =>
+            {
+                Err(malformed(WHAT, "snapshot start exceeds point limit"))
+            }
+            Self::InitFromCpSnapshot(snapshot) if snapshot.subset.len() > MAX_NAME => {
+                Err(malformed(WHAT, "a snapshot subset name is too long"))
+            }
+            Self::RandomNamedModelSequence(sequence) => sequence.validate(),
+            _ => Ok(()),
+        }
+    }
+}
+
+const SKINNED_SNAPSHOT_EXTRA_MEMBERS: &[&str] = &[
+    "m_nRandomSeed",
+    "m_bSetRadius",
+    "m_bCopyColor",
+    "m_bCopyAlpha",
+    "m_nIndexType",
+    "m_flReadIndex",
+    "m_flIncrement",
+    "m_nFullLoopIncrement",
+    "m_flMinNormalVelocity",
+    "m_flMaxNormalVelocity",
+    "m_bIgnoreDt",
+    "m_flBoneVelocity",
+    "m_flBoneVelocityMax",
+];
+
+fn skinned_snapshot(obj: &Obj<'_>) -> Result<Initializer> {
+    let control_point = obj.control_point("m_nControlPointNumber", 0)?;
+    let snapshot_control_point = obj.control_point("m_nSnapshotControlPointNumber", 1)?;
+    let start = obj.int_in(
+        "m_nSnapShotStartPoint",
+        0,
+        0,
+        super::MAX_SNAPSHOT_POINTS as i64,
+    )? as u32;
+    let random = obj.bool("m_bRandom", false)?;
+    let set_normal = obj.bool("m_bSetNormal", false)?;
+    let rigid = obj.bool("m_bRigid", false)?;
+    let rigid_rotation_lock = obj.bool("m_bRigidRotationLock", false)?;
+    // Keep the original variant when its fields describe the whole initializer.
+    if !rigid
+        && !rigid_rotation_lock
+        && !SKINNED_SNAPSHOT_EXTRA_MEMBERS
+            .iter()
+            .any(|key| obj.has(key))
+    {
+        return Ok(Initializer::SkinnedSnapshot {
+            control_point,
+            snapshot_control_point,
+            start,
+            random,
+            set_normal,
+        });
+    }
+    let index_type = match obj.choice(
+        "m_nIndexType",
+        &["SNAPSHOT_INDEX_INCREMENT", "SNAPSHOT_INDEX_DIRECT"],
+        0,
+    )? {
+        0 => SnapshotIndexType::Increment,
+        _ => SnapshotIndexType::Direct,
+    };
+    Ok(Initializer::SkinnedSnapshotWithOptions(Box::new(
+        SkinnedSnapshotOptions {
+            control_point,
+            snapshot_control_point,
+            start,
+            random,
+            random_seed: obj.int32("m_nRandomSeed", 0)?,
+            rigid,
+            rigid_rotation_lock,
+            set_normal,
+            set_radius: obj.bool("m_bSetRadius", false)?,
+            copy_color: obj.bool("m_bCopyColor", false)?,
+            copy_alpha: obj.bool("m_bCopyAlpha", false)?,
+            index_type,
+            read_index: FloatInput::read(obj, "m_flReadIndex", 0.0)?,
+            increment: obj.float("m_flIncrement", 1.0)?,
+            full_loop_increment: obj.int32("m_nFullLoopIncrement", 0)?,
+            normal_velocity: [
+                obj.float("m_flMinNormalVelocity", 0.0)?,
+                obj.float("m_flMaxNormalVelocity", 0.0)?,
+            ],
+            ignore_dt: obj.bool("m_bIgnoreDt", false)?,
+            bone_velocity: obj.float("m_flBoneVelocity", 0.0)?,
+            max_bone_velocity: obj.float("m_flBoneVelocityMax", 0.0)?,
+        },
+    )))
+}
+
+fn snapshot_attribute(obj: &Obj<'_>) -> Result<SnapshotAttribute> {
+    let key = "m_nAttributeToRead";
+    let input = match obj.get(key) {
+        None => None,
+        Some(value) if value.as_i64() == Some(-1) => None,
+        Some(_) => Some(obj.field(key, Field::POSITION)?),
+    };
+    let subset = obj.str("m_strSnapshotSubset")?.unwrap_or_default();
+    if subset.len() > MAX_NAME {
+        return Err(malformed(WHAT, "a snapshot subset name is too long"));
+    }
+    Ok(SnapshotAttribute {
+        control_point: obj.optional_control_point("m_nControlPointNumber", 0)?,
+        subset: subset.to_owned(),
+        input,
+        output: obj.field("m_nAttributeToWrite", Field::POSITION)?,
+        local_control_point: obj.optional_control_point("m_nLocalSpaceCP", 0)?,
+        local_space_angles: obj.bool("m_bLocalSpaceAngles", false)?,
+        random: obj.bool("m_bRandom", false)?,
+        random_seed: obj.int32("m_nRandomSeed", 0)?,
+        reverse: obj.bool("m_bReverse", false)?,
+        increment: FloatInput::read(obj, "m_nSnapShotIncrement", 1.0)?,
+        reset_on_change: obj.bool("m_bResetSnapshotIndexOnChanges", false)?,
+        manual_index: FloatInput::read(obj, "m_nManualSnapshotIndex", -1.0)?,
+    })
+}
+
+fn named_model_sequence(obj: &Obj<'_>) -> Result<NamedModelSequence> {
+    let model = obj.str("m_hModel")?.filter(|path| !path.is_empty());
+    let names = obj
+        .array("m_names", MAX_SEQUENCE_NAMES)?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| malformed(WHAT, "m_names contains a non-string sequence name"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let sequence = NamedModelSequence {
+        model: model.map(str::to_owned),
+        names,
+        model_from_renderer: obj.bool("m_bModelFromRenderer", false)?,
+        shuffle: obj.bool("m_bShuffle", false)?,
+        linear: obj.bool("m_bLinear", false)?,
+        field: obj.field("m_nFieldOutput", Field::POSITION)?,
+    };
+    sequence.validate()?;
+    Ok(sequence)
+}
+
+impl NamedModelSequence {
+    fn validate(&self) -> Result<()> {
+        if self
+            .model
+            .as_ref()
+            .is_some_and(|path| path.len() > MAX_NAME)
+        {
+            return Err(malformed(WHAT, "a sequence model's path is too long"));
+        }
+        if self.names.len() > MAX_SEQUENCE_NAMES
+            || self.names.iter().any(|name| name.len() > MAX_NAME)
+        {
+            return Err(malformed(
+                WHAT,
+                "too many model sequences or a sequence name is too long",
+            ));
+        }
+        Ok(())
     }
 }
 

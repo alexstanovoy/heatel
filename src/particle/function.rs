@@ -50,6 +50,41 @@ pub struct Timing {
     pub run_once: bool,
 }
 
+/// Random shifts and scales applied to an operator's fade times.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[non_exhaustive]
+pub struct FadeTimeModifiers {
+    /// Minimum and maximum time offset.
+    pub offset: [f32; 2],
+    /// Seed for the offset.
+    pub offset_seed: i32,
+    /// Minimum and maximum time scale.
+    pub scale: [f32; 2],
+    /// Seed for the scale.
+    pub scale_seed: i32,
+    /// Normalize fade times to the stop time.
+    pub normalize_to_stop_time: bool,
+}
+
+impl FadeTimeModifiers {
+    pub(super) fn read(obj: &Obj<'_>) -> Result<Self> {
+        Ok(Self {
+            offset: [
+                obj.float("m_flOpTimeOffsetMin", 0.0)?,
+                obj.float("m_flOpTimeOffsetMax", 0.0)?,
+            ],
+            offset_seed: obj.int32("m_nOpTimeOffsetSeed", 0)?,
+            scale: [
+                obj.float("m_flOpTimeScaleMin", 0.0)?,
+                obj.float("m_flOpTimeScaleMax", 0.0)?,
+            ],
+            scale_seed: obj.int32("m_nOpTimeScaleSeed", 0)?,
+            normalize_to_stop_time: obj.bool("m_bNormalizeToStopTime", false)?,
+        })
+    }
+}
+
 impl Timing {
     pub(super) fn read(obj: &Obj<'_>) -> Result<Self> {
         let states = [

@@ -8,7 +8,7 @@ use crate::error::{Result, malformed};
 
 use super::field::Field;
 use super::input::{FloatInput, VectorInput};
-use super::read::{MAX_CONTROL_POINT, MAX_NAME, Obj, WHAT};
+use super::read::{MAX_NAME, Obj, WHAT};
 use super::transform::{ControlPoint, Transform};
 
 /// Most models a model renderer picks from.
@@ -145,17 +145,12 @@ pub(super) fn model_control_point(obj: &Obj<'_>, legacy_key: &str) -> Result<Opt
 }
 
 /// A hitbox set's name, `default` when absent.
-fn set_name(obj: &Obj<'_>) -> Result<String> {
+pub(super) fn set_name(obj: &Obj<'_>) -> Result<String> {
     let set = obj.str("m_HitboxSetName")?.unwrap_or("default");
     if set.len() > MAX_NAME {
         return Err(malformed(WHAT, "a hitbox set's name is too long"));
     }
     Ok(set.to_owned())
-}
-
-fn optional_point(obj: &Obj<'_>, key: &str) -> Result<Option<ControlPoint>> {
-    let index = obj.int_in(key, -1, -1, i64::from(MAX_CONTROL_POINT))?;
-    Ok(u8::try_from(index).ok().and_then(ControlPoint::new))
 }
 
 impl OnModel {
@@ -174,7 +169,8 @@ impl OnModel {
             )?,
             force_in_model: obj.int_clamped("m_nForceInModel", 0, -1, 2)? as i32,
             desired_hitbox: FloatInput::read(obj, "m_nDesiredHitbox", -1.0)?,
-            hitbox_from_control_point: optional_point(obj, "m_nHitboxValueFromControlPointIndex")?,
+            hitbox_from_control_point: obj
+                .optional_control_point("m_nHitboxValueFromControlPointIndex", -1)?,
             scale: VectorInput::read(obj, "m_vecHitBoxScale", [1.0; 3])?,
             bone_velocity: obj.float("m_flBoneVelocity", 0.0)?,
             max_bone_velocity: obj.float("m_flMaxBoneVelocity", 0.0)?,
@@ -254,7 +250,7 @@ impl Models {
             local_scale: obj.bool("m_bLocalScale", false)?,
             suppress_tint: obj.bool("m_bSuppressTint", false)?,
             center_offset: obj.bool("m_bCenterOffset", false)?,
-            scale_control_point: optional_point(obj, "m_nModelScaleCP")?,
+            scale_control_point: obj.optional_control_point("m_nModelScaleCP", -1)?,
             local_offset: VectorInput::read(obj, "m_vecLocalOffset", [0.0; 3])?,
             local_rotation: VectorInput::read(obj, "m_vecLocalRotation", [0.0; 3])?,
             component_scale: VectorInput::read(obj, "m_vecComponentScale", [1.0; 3])?,
