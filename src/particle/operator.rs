@@ -1529,14 +1529,16 @@ fn cp_to_scalar(obj: &Obj<'_>) -> Result<CpToScalar> {
 
 fn model_particle_points(obj: &Obj<'_>) -> Result<ModelParticleControlPoints> {
     let attachment_name = obj.str("m_AttachmentName")?.unwrap_or_default();
+    let first_control_point = obj.control_point("m_nFirstControlPoint", 0)?;
+    let count = obj.int_in(
+        "m_nNumControlPoints",
+        1,
+        0,
+        i64::from(MAX_CONTROL_POINT) + 1,
+    )? as u8;
     let points = ModelParticleControlPoints {
-        first_control_point: obj.control_point("m_nFirstControlPoint", 0)?,
-        count: obj.int_in(
-            "m_nNumControlPoints",
-            1,
-            0,
-            i64::from(MAX_CONTROL_POINT) + 1,
-        )? as u8,
+        first_control_point,
+        count: count.min((64 - first_control_point.index()) as u8),
         first_source: obj.int32("m_nFirstSourcePoint", 0)?,
         hitbox_set: set_name(obj)?,
         attachment_name: attachment_name.to_owned(),

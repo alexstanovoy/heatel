@@ -684,3 +684,18 @@ fn newly_read_fields_reject_invalid_types_and_bounds() {
         assert!(error.to_string().contains(expected), "{class}: {error}");
     }
 }
+
+#[test]
+fn model_particle_control_points_clamp_count_at_the_last_point() {
+    let Operator::SetControlPointsToModelParticles(points) = operator(
+        "C_OP_SetControlPointsToModelParticles",
+        &[
+            ("m_nFirstControlPoint", 63.into()),
+            ("m_nNumControlPoints", 64.into()),
+        ],
+    ) else {
+        panic!("model particle control points")
+    };
+    assert_eq!(points.first_control_point.index(), 63);
+    assert_eq!(points.count, 1);
+}
