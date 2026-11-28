@@ -246,3 +246,52 @@ fn kv3_that_cannot_hold_what_it_claims_is_refused_before_allocating() {
         assert!(err.contains("cannot expand"), "{err}");
     }
 }
+
+#[test]
+fn resource_rejects_body_end_beyond_eof_and_table_or_block_crossing_body() {
+    let mut valid = resource(&[(b"DATA", b"AB".to_vec())]);
+    valid.extend_from_slice(b"cd");
+    let parsed = Resource::parse(&valid).expect("valid body plus trailing stream");
+    assert_eq!(parsed.block(b"DATA"), Some(&b"AB"[..]));
+    assert_eq!(parsed.trailing(), b"cd");
+
+    // Block extending 1 byte past declared body end into trailing stream.
+    let mut crossing_block = valid.clone();
+    crossing_block[24..28].copy_from_slice(&3u32.to_le_bytes());
+    assert!(
+        Resource::parse(&crossing_block).is_err(),
+        "block reading into trailing stream must be rejected"
+    );
+
+    // Block table crossing declared body end into trailing stream.
+    let mut crossing_table = valid.clone();
+    // table_at field is at offset 8; body end is 30, so offset 20 -> table_at = 28 (table ends at 40 > 30).
+    crossing_table[8..12].copy_from_slice(&20u32.to_le_bytes());
+    assert!(
+        Resource::parse(&crossing_table).is_err(),
+        "block table crossing body end must be rejected"
+    );
+
+    // Declared body end past EOF.
+    let mut past_eof = valid.clone();
+    let too_big = (past_eof.len() as u32) + 1;
+    past_eof[0..4].copy_from_slice(&too_big.to_le_bytes());
+    assert!(
+        Resource::parse(&past_eof).is_err(),
+        "declared body end beyond EOF must be rejected"
+    );
+
+    // Foreign / out-of-range Block accessors must return Err, never panic.
+    let foreign_past_eof = heatel::resource::Block {
+        kind: *b"DATA",
+        offset: u32::MAX,
+        size: 16,
+    };
+    assert!(parsed.bytes(&foreign_past_eof).is_err());
+    let foreign_into_trailing = heatel::resource::Block {
+        kind: *b"DATA",
+        offset: parsed.file_size(),
+        size: 2,
+    };
+    assert!(parsed.bytes(&foreign_into_trailing).is_err());
+}

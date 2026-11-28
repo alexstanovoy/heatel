@@ -32,6 +32,8 @@ pub struct Vpk {
     part_prefix: Option<String>,
     /// Where entries stored in the directory file start: right after the tree.
     data_start: u64,
+    /// Declared length of the inline archive data section for VPK v2 (`None` for v1).
+    inline_data_len: Option<u64>,
     tree: Box<[u8]>,
     files: Vec<Record>,
     index: Index,
@@ -76,32 +78,7 @@ impl Vpk {
     ) -> Result<Self> {
         let size = src.size(dir_path)?;
         let head = src.read_at(dir_path, 0, size.min(28) as usize)?;
-        let mut header = Cursor::new(&head, "VPK header");
-        let signature = header.u32()?;
-        let version = header.u32()?;
-        let tree_len = header.u32()? as usize;
-        if signature != SIGNATURE {
-            return Err(malformed(
-                "VPK header",
-                format!("{dir_path}: signature {signature:08x}"),
-            ));
-        }
-        let header_len = match version {
-            1 => 12,
-            2 => 28,
-            _ => {
-                return Err(malformed(
-                    "VPK header",
-                    format!("{dir_path}: version {version}"),
-                ));
-            }
-        };
-        if tree_len > MAX_TREE_LEN {
-            return Err(malformed(
-                "VPK header",
-                format!("{dir_path}: directory tree of {tree_len} bytes exceeds {MAX_TREE_LEN}"),
-            ));
-        }
+        let (header_len, tree_len, inline_data_len) = parse_header(&head, size, dir_path)?;
         budget.bytes(tree_len)?;
         let tree = src.read_at(dir_path, header_len, tree_len)?;
         let part_prefix = dir_path.strip_suffix("_dir.vpk").map(str::to_owned);
@@ -111,6 +88,7 @@ impl Vpk {
             dir_path: dir_path.to_owned(),
             part_prefix,
             data_start: header_len + tree_len as u64,
+            inline_data_len,
             tree: tree.into_boxed_slice(),
             files,
             index,
@@ -222,7 +200,7 @@ impl Vpk {
         let tail = if len == 0 {
             Vec::new()
         } else {
-            let (part, offset) = self.location(entry)?;
+            let (part, offset) = self.location(entry, len)?;
             src.read_at(&part, offset, len)?
         };
         let data = if preload.is_empty() {
@@ -242,13 +220,34 @@ impl Vpk {
     }
 
     /// The file and offset holding the entry's archive bytes.
-    fn location(&self, entry: Entry<'_>) -> Result<(String, u64)> {
+    fn location(&self, entry: Entry<'_>, len: usize) -> Result<(String, u64)> {
         let archive = entry.archive_index();
         if archive == IN_DIR_FILE {
-            return Ok((
-                self.dir_path.clone(),
-                self.data_start + u64::from(entry.archive_offset()),
-            ));
+            let rel = u64::from(entry.archive_offset());
+            let end = rel.checked_add(len as u64).ok_or_else(|| {
+                malformed(
+                    "VPK entry",
+                    format!("{}: inline offset overflows", entry.path()),
+                )
+            })?;
+            if let Some(limit) = self.inline_data_len
+                && end > limit
+            {
+                return Err(malformed(
+                    "VPK entry",
+                    format!(
+                        "{}: inline range {rel}..{end} crosses inline section ({limit})",
+                        entry.path()
+                    ),
+                ));
+            }
+            let abs = self.data_start.checked_add(rel).ok_or_else(|| {
+                malformed(
+                    "VPK entry",
+                    format!("{}: inline offset overflows", entry.path()),
+                )
+            })?;
+            return Ok((self.dir_path.clone(), abs));
         }
         let prefix = self.part_prefix.as_ref().ok_or_else(|| {
             malformed(
@@ -260,6 +259,64 @@ impl Vpk {
             format!("{prefix}_{archive:03}.vpk"),
             u64::from(entry.archive_offset()),
         ))
+    }
+}
+
+fn parse_header(head: &[u8], size: u64, dir_path: &str) -> Result<(u64, usize, Option<u64>)> {
+    let mut header = Cursor::new(head, "VPK header");
+    let signature = header.u32()?;
+    let version = header.u32()?;
+    let tree_len = header.u32()? as usize;
+    if signature != SIGNATURE {
+        return Err(malformed(
+            "VPK header",
+            format!("{dir_path}: signature {signature:08x}"),
+        ));
+    }
+    if tree_len > MAX_TREE_LEN {
+        return Err(malformed(
+            "VPK header",
+            format!("{dir_path}: directory tree of {tree_len} bytes exceeds {MAX_TREE_LEN}"),
+        ));
+    }
+    match version {
+        1 => {
+            let end = 12u64.checked_add(tree_len as u64);
+            if end.is_none_or(|end| end > size) {
+                return Err(malformed(
+                    "VPK header",
+                    format!("{dir_path}: directory tree extends past EOF ({size})"),
+                ));
+            }
+            Ok((12, tree_len, None))
+        }
+        2 => {
+            let file_data_len = u64::from(header.u32()?);
+            let archive_md5_len = u64::from(header.u32()?);
+            let other_md5_len = u64::from(header.u32()?);
+            let signature_len = u64::from(header.u32()?);
+            let total = [
+                28u64,
+                tree_len as u64,
+                file_data_len,
+                archive_md5_len,
+                other_md5_len,
+                signature_len,
+            ]
+            .into_iter()
+            .try_fold(0u64, u64::checked_add);
+            if total.is_none_or(|end| end > size) {
+                return Err(malformed(
+                    "VPK header",
+                    format!("{dir_path}: v2 sections extend past EOF ({size})"),
+                ));
+            }
+            Ok((28, tree_len, Some(file_data_len)))
+        }
+        _ => Err(malformed(
+            "VPK header",
+            format!("{dir_path}: version {version}"),
+        )),
     }
 }
 

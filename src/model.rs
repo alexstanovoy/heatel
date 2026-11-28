@@ -138,7 +138,7 @@ impl Model {
         ctrl: &Value,
         budget: &mut Budget,
     ) -> Result<Self> {
-        let bones = skeleton(data)?;
+        let bones = skeleton(data, budget)?;
         let masks = integers(data.array("m_refLODGroupMasks"));
         let lowest = masks
             .iter()
@@ -160,24 +160,11 @@ impl Model {
             if in_lod {
                 let joints = remap.of(index, bones.len());
                 let (mesh, data) = read_mesh(resource, embedded, joints.as_deref(), budget)?;
-                add_attachments(&data, &bones, &mut attachments)?;
+                add_attachments(&data, &bones, &mut attachments, budget)?;
                 meshes.push(mesh);
             }
         }
-        let material_groups = data
-            .array("m_materialGroups")
-            .iter()
-            .map(|g| {
-                let name = g.str_field("m_name").unwrap_or_default();
-                let materials = g
-                    .array("m_materials")
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect();
-                (name.to_owned(), materials)
-            })
-            .collect();
+        let material_groups = read_material_groups(data, budget)?;
         Ok(Self {
             bones,
             meshes,
@@ -267,7 +254,7 @@ pub struct SourceBone {
 
 /// The model skeleton of DATA's `m_modelSkeleton`, in bone order. A parent index that does not
 /// come before its bone makes the bone a root.
-pub(crate) fn source_skeleton(data: &Value) -> Result<Vec<SourceBone>> {
+pub(crate) fn source_skeleton(data: &Value, budget: &mut Budget) -> Result<Vec<SourceBone>> {
     let skeleton = data.get("m_modelSkeleton");
     let get = |key| skeleton.map_or(&[][..], |s| s.array(key));
     let (names, parents) = (get("m_boneName"), get("m_nParent"));
@@ -280,6 +267,7 @@ pub(crate) fn source_skeleton(data: &Value) -> Result<Vec<SourceBone>> {
             "the rest scales and bone names have different lengths",
         ));
     }
+    budget.slots::<SourceBone>(names.len())?;
     let mut bones = Vec::with_capacity(names.len());
     for (i, name) in names.iter().enumerate() {
         let parent = parents
@@ -295,7 +283,7 @@ pub(crate) fn source_skeleton(data: &Value) -> Result<Vec<SourceBone>> {
         let rotation =
             unit_rotation(floats::<4>(rotations.get(i))?).unwrap_or([0.0, 0.0, 0.0, 1.0]);
         bones.push(SourceBone {
-            name: name.as_str().unwrap_or_default().to_owned(),
+            name: budget.copy(name.as_str().unwrap_or_default())?,
             parent,
             position: floats::<3>(positions.get(i))?,
             rotation,
@@ -306,8 +294,8 @@ pub(crate) fn source_skeleton(data: &Value) -> Result<Vec<SourceBone>> {
     Ok(bones)
 }
 
-fn skeleton(data: &Value) -> Result<Vec<Bone>> {
-    Ok(source_skeleton(data)?
+fn skeleton(data: &Value, budget: &mut Budget) -> Result<Vec<Bone>> {
+    Ok(source_skeleton(data, budget)?
         .into_iter()
         .map(|bone| {
             let (translation, rotation) =
@@ -321,6 +309,23 @@ fn skeleton(data: &Value) -> Result<Vec<Bone>> {
             }
         })
         .collect())
+}
+
+fn read_material_groups(data: &Value, budget: &mut Budget) -> Result<Vec<(String, Vec<String>)>> {
+    let raw = data.array("m_materialGroups");
+    budget.slots::<(String, Vec<String>)>(raw.len())?;
+    let mut groups = Vec::with_capacity(raw.len());
+    for group in raw {
+        let name = budget.copy(group.str_field("m_name").unwrap_or_default())?;
+        let mats = group.array("m_materials");
+        budget.slots::<String>(mats.len())?;
+        let mut materials = Vec::with_capacity(mats.len());
+        for material in mats.iter().filter_map(Value::as_str) {
+            materials.push(budget.copy(material)?);
+        }
+        groups.push((name, materials));
+    }
+    Ok(groups)
 }
 
 pub(crate) fn floats<const N: usize>(value: Option<&Value>) -> Result<[f32; N]> {
@@ -340,7 +345,12 @@ pub(crate) fn floats<const N: usize>(value: Option<&Value>) -> Result<[f32; N]> 
 
 /// The attachments of a mesh's data block (`m_attachments`) that `out` lacks, carried by the
 /// strongest influence of each.
-fn add_attachments(data: &Value, bones: &[Bone], out: &mut Vec<Attachment>) -> Result<()> {
+fn add_attachments(
+    data: &Value,
+    bones: &[Bone],
+    out: &mut Vec<Attachment>,
+    budget: &mut Budget,
+) -> Result<()> {
     for entry in data.array("m_attachments") {
         let value = entry.get("value").unwrap_or(entry);
         let name = value.str_field("m_name").unwrap_or_default();
@@ -369,8 +379,9 @@ fn add_attachments(data: &Value, bones: &[Bone], out: &mut Vec<Attachment>) -> R
         let offset = floats::<3>(value.array("m_vInfluenceOffsets").get(strongest))?;
         let turn = floats::<4>(value.array("m_vInfluenceRotations").get(strongest))?;
         let (translation, rotation) = bone_to_gltf(offset, turn, bone.is_none());
+        budget.slots::<Attachment>(1)?;
         out.push(Attachment {
-            name: name.to_owned(),
+            name: budget.copy(name)?,
             bone,
             translation,
             rotation,
@@ -387,18 +398,19 @@ fn read_mesh(
     joints: Option<&[u16]>,
     budget: &mut Budget,
 ) -> Result<(Mesh, Value)> {
-    let name = ["m_Name", "name"]
-        .iter()
-        .find_map(|k| embedded.get(k).and_then(Value::as_str))
-        .unwrap_or_default()
-        .to_owned();
+    let name = budget.copy(
+        ["m_Name", "name"]
+            .iter()
+            .find_map(|k| embedded.get(k).and_then(Value::as_str))
+            .unwrap_or_default(),
+    )?;
     let block = |keys: &[&str]| {
         number(embedded, keys)
             .and_then(|i| usize::try_from(i).ok())
             .and_then(|i| resource.blocks().get(i))
     };
     let (vertex_buffers, index_buffers) = match block(&["m_nVBIBBlock", "vbib_block"]) {
-        Some(vbib) => vbib::from_vbib(resource.bytes(vbib), budget)?,
+        Some(vbib) => vbib::from_vbib(resource.bytes(vbib)?, budget)?,
         None => (
             buffers(resource, embedded.get("m_vertexBuffers"), true, budget)?,
             buffers(resource, embedded.get("m_indexBuffers"), false, budget)?,
@@ -406,7 +418,7 @@ fn read_mesh(
     };
     let data = block(&["m_nDataBlock", "data_block"])
         .ok_or_else(|| malformed("model", format!("mesh {name} has no data block")))?;
-    let data = kv3::decode_in(resource.bytes(data), budget)?.root;
+    let data = kv3::decode_in(resource.bytes(data)?, budget)?.root;
     let weight_count = data
         .get("m_skeleton")
         .and_then(|s| s.usize_field("m_nBoneWeightCount"))
@@ -433,7 +445,7 @@ fn read_mesh(
         .filter(|atlas| !atlas.is_empty());
     let morph = match (block(&["m_nMorphBlock", "morph_block"]), atlas) {
         (Some(set), Some(atlas)) => Some(MorphSet::read(
-            &kv3::decode_in(resource.bytes(set), budget)?.root,
+            &kv3::decode_in(resource.bytes(set)?, budget)?.root,
             atlas,
         )?),
         _ => None,
@@ -654,7 +666,7 @@ mod attachment_tests {
             ]),
         )]);
         let mut model = model([0.0, 0.0, 0.0, 1.0], None);
-        model.bones = skeleton(&data).unwrap();
+        model.bones = skeleton(&data, &mut Budget::default()).unwrap();
         model.attachments[0].bone = Some(0);
         let position = model.attachment_position("socket").unwrap();
         let length = position

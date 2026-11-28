@@ -91,7 +91,9 @@ pub fn strings(bytes: &[u8]) -> Vec<String> {
             strings.extend(refs.into_iter().map(|r| r.name));
         }
         for block in resource.blocks() {
-            if let Ok(doc) = kv3::decode(resource.bytes(block)) {
+            if let Ok(bytes) = resource.bytes(block)
+                && let Ok(doc) = kv3::decode(bytes)
+            {
                 collect(&doc.root, &mut strings);
             }
         }

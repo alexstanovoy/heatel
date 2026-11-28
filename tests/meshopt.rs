@@ -282,7 +282,7 @@ fn buffer_bytes(res: &Resource, buf: &Value, index: bool, totals: &mut Totals) -
     );
     let block = &res.blocks()[field(buf, "m_nBlockIndex") as usize];
     assert_eq!(&block.kind, if index { b"MIDX" } else { b"MVTX" });
-    let mut bytes = res.bytes(block).to_vec();
+    let mut bytes = res.bytes(block).expect("buffer block").to_vec();
     totals.encoded_bytes += bytes.len() as u64;
     if flag(buf, "m_bCompressedZSTD") {
         let mut plain = Vec::new();

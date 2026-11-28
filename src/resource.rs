@@ -6,6 +6,7 @@ use crate::ntro;
 
 /// The only header version of compiled Source 2 resources (`*_c` files).
 const HEADER_VERSION: u16 = 12;
+const HEADER_LEN: usize = 16;
 const BLOCK_ENTRY_LEN: usize = 12;
 
 /// A compiled Source 2 resource (`.vmdl_c`, `.vmat_c`, `.vtex_c`, ...): a header and a table of
@@ -39,7 +40,8 @@ pub struct ExternalRef {
 }
 
 impl<'a> Resource<'a> {
-    /// Reads the header and block table of a compiled file; a table that points outside the file is an error.
+    /// Reads the header and block table of a compiled file; a body end beyond EOF, a table
+    /// crossing the declared body end, or a block extending into the trailing stream is an error.
     pub fn parse(bytes: &'a [u8]) -> Result<Self> {
         let mut c = Cursor::new(bytes, "resource header");
         let file_size = c.u32()?;
@@ -53,40 +55,42 @@ impl<'a> Resource<'a> {
         let version = c.u16()?;
         let table_at = c.offset32()?;
         let count = c.u32()? as usize;
-        if count > bytes.len() / BLOCK_ENTRY_LEN {
-            return Err(malformed("resource header", format!("{count} blocks")));
-        }
-        let mut c = Cursor::new(bytes, "resource block table");
-        c.take(table_at)?;
-        let mut blocks = Vec::with_capacity(count);
-        for _ in 0..count {
-            let kind = c.array()?;
-            // Offsets count from the offset field itself.
-            let at = c.pos() as u64;
-            let offset = at + u64::from(c.u32()?);
-            let size = c.u32()?;
-            if offset + u64::from(size) > bytes.len() as u64 {
-                return Err(malformed(
+        let body_len = usize::try_from(file_size)
+            .ok()
+            .filter(|&len| (HEADER_LEN..=bytes.len()).contains(&len))
+            .ok_or_else(|| {
+                malformed(
+                    "resource header",
+                    format!("body size {file_size} out of range ({})", bytes.len()),
+                )
+            })?;
+        let body = &bytes[..body_len];
+        let table_len = count
+            .checked_mul(BLOCK_ENTRY_LEN)
+            .ok_or_else(|| malformed("resource header", format!("{count} blocks")))?;
+        table_at
+            .checked_add(table_len)
+            .filter(|&end| end <= body.len())
+            .ok_or_else(|| {
+                malformed(
                     "resource block table",
                     format!(
-                        "block {} at {offset}+{size} past the end ({})",
-                        kind_name(&kind),
-                        bytes.len()
+                        "table at {table_at}+{table_len} past body end ({})",
+                        body.len()
                     ),
-                ));
-            }
-            blocks.push(Block {
-                kind,
-                offset: offset as u32,
-                size,
-            });
-        }
+                )
+            })?;
+        let blocks = parse_blocks(body, table_at, count)?;
         Ok(Self {
             bytes,
             file_size,
             version,
             blocks,
         })
+    }
+
+    fn body(&self) -> &'a [u8] {
+        &self.bytes[..self.file_size as usize]
     }
 
     /// The resource type's own version (the header's second field).
@@ -104,10 +108,26 @@ impl<'a> Resource<'a> {
         &self.blocks
     }
 
-    /// The bytes of `block`.
-    pub fn bytes(&self, block: &Block) -> &'a [u8] {
-        let start = block.offset as usize;
-        &self.bytes[start..start + block.size as usize]
+    /// The bytes of `block`, or an error if `block` falls outside this resource's body.
+    pub fn bytes(&self, block: &Block) -> Result<&'a [u8]> {
+        let body = self.body();
+        let start = usize::try_from(block.offset).ok();
+        let end = start.and_then(|s| s.checked_add(usize::try_from(block.size).ok()?));
+        start
+            .zip(end)
+            .and_then(|(s, e)| body.get(s..e))
+            .ok_or_else(|| {
+                malformed(
+                    "resource block",
+                    format!(
+                        "block {} at {}+{} outside body ({})",
+                        kind_name(&block.kind),
+                        block.offset,
+                        block.size,
+                        body.len()
+                    ),
+                )
+            })
     }
 
     /// The bytes of the first block of `kind`.
@@ -115,14 +135,12 @@ impl<'a> Resource<'a> {
         self.blocks
             .iter()
             .find(|b| &b.kind == kind)
-            .map(|b| self.bytes(b))
+            .and_then(|b| self.bytes(b).ok())
     }
 
     /// The bytes after the header's file size (texture mips, sound samples).
     pub fn trailing(&self) -> &'a [u8] {
-        self.bytes
-            .get(self.file_size as usize..)
-            .unwrap_or_default()
+        &self.bytes[self.file_size as usize..]
     }
 
     /// The first block of `kind`. `None` means the block is absent. A present block returns
@@ -154,7 +172,7 @@ impl<'a> Resource<'a> {
     /// [`Resource::data`], decoded within `budget`.
     pub fn data_in(&self, budget: &mut Budget) -> Option<Result<Value>> {
         let data = self.blocks.iter().find(|b| &b.kind == b"DATA")?;
-        let bytes = self.bytes(data);
+        let bytes = self.bytes(data).ok()?;
         if kv3::is_kv3(bytes) {
             return Some(kv3::decode_in(bytes, budget).map(|doc| doc.root));
         }
@@ -162,7 +180,7 @@ impl<'a> Resource<'a> {
         Some(self.external_refs_in(budget).and_then(|refs| {
             let names = refs.into_iter().map(|r| (r.id, r.name)).collect();
             ntro::read(
-                self.bytes,
+                self.body(),
                 ntro.offset as usize,
                 data.offset as usize,
                 &names,
@@ -181,16 +199,22 @@ impl<'a> Resource<'a> {
         let Some(block) = self.blocks.iter().find(|b| &b.kind == b"RERL") else {
             return Ok(Vec::new());
         };
-        // Offsets count from their own field and may point anywhere in the file, so names may
+        let body = self.body();
+        // Offsets count from their own field and may point anywhere in the body, so names may
         // overlap: their copies are charged, or a small file would name gigabytes.
-        let mut c = Cursor::new(self.bytes, "RERL");
+        let mut c = Cursor::new(body, "RERL");
         c.take(block.offset as usize)?;
         let list_at = c.offset32()?;
         let count = c.u32()? as usize;
-        if count > block.size as usize / 16 {
-            return Err(malformed("RERL", format!("{count} references")));
-        }
-        let mut c = Cursor::new(self.bytes, "RERL");
+        let list_len = count
+            .checked_mul(16)
+            .filter(|&len| len <= block.size as usize)
+            .ok_or_else(|| malformed("RERL", format!("{count} references")))?;
+        list_at
+            .checked_add(list_len)
+            .filter(|&end| end <= body.len())
+            .ok_or_else(|| malformed("RERL", format!("{count} references past body end")))?;
+        let mut c = Cursor::new(body, "RERL");
         c.take(list_at)?;
         budget.slots::<ExternalRef>(count)?;
         let mut refs = Vec::with_capacity(count);
@@ -198,13 +222,47 @@ impl<'a> Resource<'a> {
             let id = c.u64()?;
             let name_at = c.offset32()?;
             c.take(4)?;
-            let mut name = Cursor::new(self.bytes, "RERL name");
+            let mut name = Cursor::new(body, "RERL name");
             name.take(name_at)?;
             let name = budget.text(name.cstr()?)?;
             refs.push(ExternalRef { id, name });
         }
         Ok(refs)
     }
+}
+
+fn parse_blocks(body: &[u8], table_at: usize, count: usize) -> Result<Vec<Block>> {
+    let mut c = Cursor::new(body, "resource block table");
+    c.take(table_at)?;
+    let mut blocks = Vec::with_capacity(count);
+    for _ in 0..count {
+        let kind = c.array()?;
+        // Offsets count from the offset field itself.
+        let at = c.pos() as u64;
+        let offset = at
+            .checked_add(u64::from(c.u32()?))
+            .ok_or_else(|| malformed("resource block table", "block offset overflow"))?;
+        let size = c.u32()?;
+        let end = offset
+            .checked_add(u64::from(size))
+            .ok_or_else(|| malformed("resource block table", "block end overflow"))?;
+        if end > body.len() as u64 {
+            return Err(malformed(
+                "resource block table",
+                format!(
+                    "block {} at {offset}+{size} past body end ({})",
+                    kind_name(&kind),
+                    body.len()
+                ),
+            ));
+        }
+        blocks.push(Block {
+            kind,
+            offset: offset as u32,
+            size,
+        });
+    }
+    Ok(blocks)
 }
 
 pub(crate) fn kind_name(kind: &[u8; 4]) -> String {

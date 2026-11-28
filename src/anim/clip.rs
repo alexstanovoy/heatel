@@ -134,7 +134,7 @@ pub(crate) fn read_clips_with_ctrl(
     let Some(embedded) = ctrl.get("embedded_animation") else {
         return Ok(Vec::new());
     };
-    let bones = source_skeleton(data)?;
+    let bones = source_skeleton(data, mem_budget)?;
     let group = block(resource, embedded, "group_data_block", mem_budget)?
         .ok_or_else(|| malformed("animation", "no group block"))?;
     let anim = block(resource, embedded, "anim_data_block", mem_budget)?
@@ -322,7 +322,7 @@ pub(super) fn block(
     else {
         return Ok(None);
     };
-    Ok(Some(kv3::decode_in(resource.bytes(block), budget)?.root))
+    Ok(Some(kv3::decode_in(resource.bytes(block)?, budget)?.root))
 }
 
 /// A decode-key channel: what it animates (`None`: nothing a skeleton shows) and, per bone,

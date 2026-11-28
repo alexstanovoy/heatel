@@ -138,17 +138,19 @@ pub(crate) fn from_ctrl(
         zstd: flag("m_bCompressedZSTD"),
     };
     let data = decode(
-        resource.bytes(block),
+        resource.bytes(block)?,
         (count, stride),
         vertex,
         packing,
         budget,
     )?;
-    let fields = desc
-        .array("m_inputLayoutFields")
-        .iter()
-        .map(field_from_kv3)
-        .collect::<Result<_>>()?;
+    let layout = desc.array("m_inputLayoutFields");
+    budget.slots::<Buffer>(1)?;
+    budget.slots::<Field>(layout.len())?;
+    let mut fields = Vec::with_capacity(layout.len());
+    for field in layout {
+        fields.push(field_from_kv3(field, budget)?);
+    }
     Ok(Buffer {
         count,
         stride,
@@ -157,14 +159,42 @@ pub(crate) fn from_ctrl(
     })
 }
 
-fn field_from_kv3(field: &Value) -> Result<Field> {
-    let semantic = match field.get("m_pSemanticName") {
-        Some(Value::String(name)) => name.clone(),
-        Some(Value::Blob(bytes)) => String::from_utf8_lossy(bytes)
-            .trim_end_matches('\0')
-            .to_owned(),
+fn uppercase_semantic(raw: &[u8], budget: &mut Budget) -> Result<String> {
+    match std::str::from_utf8(raw) {
+        Ok(text) => {
+            let upper_len: usize = text
+                .chars()
+                .flat_map(char::to_uppercase)
+                .map(char::len_utf8)
+                .sum();
+            if upper_len > 0 {
+                budget.string_of(upper_len)?;
+            }
+            Ok(text.to_uppercase())
+        }
+        Err(_) => {
+            let bound = raw.len().saturating_mul(3);
+            if bound > 0 {
+                budget.string_of(bound)?;
+            }
+            Ok(String::from_utf8_lossy(raw).to_uppercase())
+        }
+    }
+}
+
+fn field_from_kv3(field: &Value, budget: &mut Budget) -> Result<Field> {
+    let raw = match field.get("m_pSemanticName") {
+        Some(Value::String(name)) => name.as_bytes(),
+        Some(Value::Blob(bytes)) => {
+            let mut trimmed = bytes.as_slice();
+            while let Some(rest) = trimmed.strip_suffix(&[0]) {
+                trimmed = rest;
+            }
+            trimmed
+        }
         _ => return Err(malformed("mesh buffer", "a field without a semantic")),
     };
+    let semantic = uppercase_semantic(raw, budget)?;
     let u32_field = |key: &str| field.get(key).and_then(Value::as_u64).unwrap_or(0) as u32;
     let offset = match field.get("m_nOffset") {
         None => 0,
@@ -173,37 +203,51 @@ fn field_from_kv3(field: &Value) -> Result<Field> {
             .ok_or_else(|| malformed("mesh buffer", "a field offset out of range"))?,
     };
     Ok(Field {
-        semantic: semantic.to_uppercase(),
+        semantic,
         index: u32_field("m_nSemanticIndex"),
         format: u32_field("m_Format"),
         offset,
     })
 }
 
-/// The vertex and index buffers of a binary `VBIB` (or `MBUF`) block, their decoded bytes
-/// charged to `budget`.
+/// Checks that `count` fixed-size records of `stride` bytes starting at `at` fit within `block`.
+fn checked_table_span(block: &[u8], at: usize, count: usize, stride: usize) -> Result<()> {
+    if count == 0 {
+        return Ok(());
+    }
+    let len = count
+        .checked_mul(stride)
+        .ok_or_else(|| malformed("VBIB", format!("{count} entries overflow")))?;
+    at.checked_add(len)
+        .filter(|&end| end <= block.len())
+        .ok_or_else(|| {
+            malformed(
+                "VBIB",
+                format!("table at {at}+{len} past end ({})", block.len()),
+            )
+        })?;
+    Ok(())
+}
+
+/// The vertex and index buffers of a binary `VBIB` (or `MBUF`) block, their metadata and decoded
+/// bytes charged to `budget`.
 pub(crate) fn from_vbib(block: &[u8], budget: &mut Budget) -> Result<(Vec<Buffer>, Vec<Buffer>)> {
     let mut c = Cursor::new(block, "VBIB");
-    let vertex_at = c.u32()? as usize;
+    let vertex_at = c.offset32()?;
     let vertex_count = c.u32()? as usize;
     let index_at = c.offset32()?;
     let index_count = c.u32()? as usize;
     let mut list = |at: usize, count: usize, vertex: bool| -> Result<Vec<Buffer>> {
-        if count > block.len() / 24 {
-            return Err(malformed("VBIB", format!("{count} buffers")));
+        checked_table_span(block, at, count, 24)?;
+        budget.slots::<Buffer>(count)?;
+        let mut buffers = Vec::with_capacity(count);
+        for i in 0..count {
+            buffers.push(binary_buffer(block, at + i * 24, vertex, budget)?);
         }
-        (0..count)
-            .map(|i| binary_buffer(block, past(at, i * 24)?, vertex, budget))
-            .collect()
+        Ok(buffers)
     };
     let vertices = list(vertex_at, vertex_count, true)?;
     Ok((vertices, list(index_at, index_count, false)?))
-}
-
-/// The position `len` bytes past `at` (which a 32-bit target may not reach).
-fn past(at: usize, len: usize) -> Result<usize> {
-    at.checked_add(len)
-        .ok_or_else(|| malformed("VBIB", format!("{len} bytes past {at}")))
 }
 
 /// A cursor at `at` of `block`.
@@ -224,12 +268,12 @@ fn binary_buffer(block: &[u8], at: usize, vertex: bool, budget: &mut Budget) -> 
     let data_at = c.offset32()?;
     let stored = c.u32()? as usize;
     let stride = (size & STRIDE_MASK) as usize;
-    if field_count > block.len() / 56 {
-        return Err(malformed("VBIB", format!("{field_count} fields")));
+    checked_table_span(block, fields_at, field_count, 56)?;
+    budget.slots::<Field>(field_count)?;
+    let mut fields = Vec::with_capacity(field_count);
+    for i in 0..field_count {
+        fields.push(binary_field(block, fields_at + i * 56, budget)?);
     }
-    let fields = (0..field_count)
-        .map(|i| binary_field(block, past(fields_at, i * 56)?))
-        .collect::<Result<_>>()?;
     let stored = seek(block, data_at)?.take(stored)?;
     let compressed = count.saturating_mul(stride) > stored.len();
     let packing = Packing {
@@ -246,12 +290,13 @@ fn binary_buffer(block: &[u8], at: usize, vertex: bool, budget: &mut Budget) -> 
 }
 
 /// A 56-byte field: a 32-byte name, semantic index, format, offset, then slot data.
-fn binary_field(block: &[u8], at: usize) -> Result<Field> {
+fn binary_field(block: &[u8], at: usize, budget: &mut Budget) -> Result<Field> {
     let mut c = seek(block, at)?;
     let name = c.take(32)?;
     let end = name.iter().position(|&b| b == 0).unwrap_or(32);
+    let semantic = uppercase_semantic(&name[..end], budget)?;
     Ok(Field {
-        semantic: String::from_utf8_lossy(&name[..end]).to_uppercase(),
+        semantic,
         index: c.u32()?,
         format: c.u32()?,
         offset: c.u32()? as usize,
@@ -480,4 +525,84 @@ fn unpack_frame(packed: u32) -> ([f32; 3], [f32; 4]) {
 pub(crate) fn normalize(v: [f32; 3]) -> [f32; 3] {
     let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     if len > 0.0 { v.map(|c| c / len) } else { v }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shared_layout_vbib(buffer_count: u32) -> Vec<u8> {
+        let mut block = Vec::new();
+        let headers_at = 16u32;
+        let fields_at = headers_at + buffer_count * 24;
+        block.extend_from_slice(&headers_at.to_le_bytes());
+        block.extend_from_slice(&buffer_count.to_le_bytes());
+        block.extend_from_slice(&0u32.to_le_bytes());
+        block.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..buffer_count {
+            block.extend_from_slice(&0u32.to_le_bytes()); // count = 0
+            block.extend_from_slice(&0u32.to_le_bytes()); // size/stride = 0
+            let fields_rel = fields_at - block.len() as u32;
+            block.extend_from_slice(&fields_rel.to_le_bytes());
+            block.extend_from_slice(&1u32.to_le_bytes()); // 1 field
+            block.extend_from_slice(&0u32.to_le_bytes()); // data_at
+            block.extend_from_slice(&0u32.to_le_bytes()); // stored = 0
+        }
+        let mut name = [0u8; 32];
+        name[..8].copy_from_slice(b"POSITION");
+        block.extend_from_slice(&name);
+        block.extend_from_slice(&0u32.to_le_bytes());
+        block.extend_from_slice(&R32G32B32_FLOAT.to_le_bytes());
+        block.extend_from_slice(&0u32.to_le_bytes());
+        block.extend_from_slice(&[0u8; 12]);
+        block
+    }
+
+    #[test]
+    fn binary_vbib_shared_layout_metadata_charges_budget() {
+        let one_copy = size_of::<Buffer>() + size_of::<Field>() + "POSITION".len() + 16;
+        let mut ok_budget = Budget::new(one_copy);
+        let (verts, _) = from_vbib(&shared_layout_vbib(1), &mut ok_budget).unwrap();
+        assert_eq!(verts.len(), 1);
+        assert!(ok_budget.spent() > 0, "metadata must charge the budget");
+
+        let two_bufs = shared_layout_vbib(2);
+        let mut tight = Budget::new(one_copy);
+        assert!(
+            from_vbib(&two_bufs, &mut tight).is_err(),
+            "second aliased layout copy must exceed budget for one copy"
+        );
+    }
+
+    #[test]
+    fn ctrl_zero_element_buffer_metadata_charges_budget() {
+        let mut raw = 28u32.to_le_bytes().to_vec();
+        raw.extend_from_slice(&12u16.to_le_bytes());
+        raw.extend_from_slice(&0u16.to_le_bytes());
+        raw.extend_from_slice(&8u32.to_le_bytes());
+        raw.extend_from_slice(&1u32.to_le_bytes());
+        raw.extend_from_slice(b"DATA");
+        raw.extend_from_slice(&8u32.to_le_bytes());
+        raw.extend_from_slice(&0u32.to_le_bytes());
+        let resource = Resource::parse(&raw).unwrap();
+        let mut field = kv3::Object::new();
+        field.insert("m_pSemanticName", Value::String("POSITION".into()));
+        let mut desc = kv3::Object::new();
+        desc.insert("m_nElementCount", Value::Int(0));
+        desc.insert("m_nElementSizeInBytes", Value::Int(0));
+        desc.insert("m_nBlockIndex", Value::Int(0));
+        desc.insert(
+            "m_inputLayoutFields",
+            Value::Array(vec![Value::Object(field)]),
+        );
+        let desc = Value::Object(desc);
+        assert!(
+            from_ctrl(&resource, &desc, true, &mut Budget::new(0)).is_err(),
+            "zero-byte budget must refuse CTRL field metadata allocation"
+        );
+        let mut generous = Budget::new(1024);
+        let buf = from_ctrl(&resource, &desc, true, &mut generous).unwrap();
+        assert_eq!(buf.fields.len(), 1);
+        assert!(generous.spent() > 0, "CTRL metadata must charge the budget");
+    }
 }

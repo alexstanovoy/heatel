@@ -166,7 +166,7 @@ fn block(resource: &Resource, embedded: &Value, key: &str) -> Value {
         return Value::Null;
     };
     let block = &resource.blocks()[index as usize];
-    heatel::kv3::decode(resource.bytes(block))
+    heatel::kv3::decode(resource.bytes(block).expect("embedded block"))
         .expect("embedded KV3")
         .root
 }

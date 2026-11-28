@@ -318,7 +318,7 @@ impl AnimationSet {
             let data = resource
                 .data_in(&mut budget)
                 .ok_or_else(|| malformed("animation", "no model DATA"))??;
-            source_skeleton(&data)?
+            source_skeleton(&data, &mut budget)?
         } else {
             Vec::new()
         };

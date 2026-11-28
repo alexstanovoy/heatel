@@ -56,7 +56,7 @@ impl ModelRig {
         let data = resource
             .data_in(&mut budget)
             .ok_or_else(|| malformed("model", "no DATA"))??;
-        let bones = source_skeleton(&data)?;
+        let bones = source_skeleton(&data, &mut budget)?;
         let names = bone_indices(&bones);
         let mut attachments = Vec::new();
         read_attachments(&data, &names, &mut attachments, &mut budget)?;
@@ -66,7 +66,7 @@ impl ModelRig {
                     .and_then(|i| usize::try_from(i).ok())
                     .and_then(|i| resource.blocks().get(i))
                     .ok_or_else(|| malformed("model", "embedded mesh has no data block"))?;
-                let data = kv3::decode_in(resource.bytes(block), &mut budget)?.root;
+                let data = kv3::decode_in(resource.bytes(block)?, &mut budget)?.root;
                 read_attachments(&data, &names, &mut attachments, &mut budget)?;
             }
         }

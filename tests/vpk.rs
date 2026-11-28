@@ -152,3 +152,56 @@ fn damaged_packages_are_errors() {
         );
     }
 }
+
+fn vpk_v2_with_sections(files: &[File], in_dir: &[u8], trailing_section: &[u8]) -> Vec<u8> {
+    let mut base = directory(files, in_dir);
+    // Patch archive_md5_section_size (header word 4 at byte offset 16).
+    base[16..20].copy_from_slice(&(trailing_section.len() as u32).to_le_bytes());
+    base.extend_from_slice(trailing_section);
+    base
+}
+
+#[test]
+fn vpk_v2_rejects_inline_entry_crossing_declared_inline_section() {
+    let inside = File {
+        ext: "vmdl_c",
+        dir: "models/heroes",
+        name: "inside",
+        preload: b"",
+        archive: 0x7FFF,
+        offset: 0,
+        data: b"abcd",
+    };
+    let crossing = File {
+        ext: "vmdl_c",
+        dir: "models/heroes",
+        name: "crossing",
+        preload: b"",
+        archive: 0x7FFF,
+        offset: 0,
+        data: b"abcdW",
+    };
+    let archive = vpk_v2_with_sections(&[inside, crossing], b"abcd", b"WXYZ");
+    let mut src = SliceSource::default();
+    src.insert("pak01_dir.vpk", archive);
+    let vpk = Vpk::open(&src, "pak01_dir.vpk").unwrap();
+    assert_eq!(
+        vpk.read_file(&src, "models/heroes/inside.vmdl_c").unwrap(),
+        b"abcd"
+    );
+    assert!(
+        vpk.read_file(&src, "models/heroes/crossing.vmdl_c")
+            .is_err(),
+        "inline entry crossing into following VPK v2 section must be rejected"
+    );
+
+    // Declared v2 section lengths exceeding total file size must be rejected on open.
+    let mut truncated = vpk_v2_with_sections(&[inside], b"abcd", b"WXYZ");
+    truncated.pop();
+    let mut bad_src = SliceSource::default();
+    bad_src.insert("pak01_dir.vpk", truncated);
+    assert!(
+        Vpk::open(&bad_src, "pak01_dir.vpk").is_err(),
+        "v2 sections extending past EOF must fail open"
+    );
+}
